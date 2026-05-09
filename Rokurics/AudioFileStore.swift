@@ -9,11 +9,17 @@ import Foundation
 
 enum AudioFileStoreError: LocalizedError {
     case documentsDirectoryUnavailable
+    case directoryCreationFailed(URL, Error)
+    case fileRemovalFailed(URL, Error)
 
     var errorDescription: String? {
         switch self {
         case .documentsDirectoryUnavailable:
             return "无法访问本地 Documents 目录。"
+        case let .directoryCreationFailed(url, error):
+            return "录音目录创建失败：\(url.path) - \(error.localizedDescription)"
+        case let .fileRemovalFailed(url, error):
+            return "旧录音文件删除失败：\(url.path) - \(error.localizedDescription)"
         }
     }
 }
@@ -34,28 +40,47 @@ struct AudioFileStore {
             .appendingPathComponent("Rokurics", isDirectory: true)
             .appendingPathComponent("Recordings", isDirectory: true)
 
-        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        do {
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        } catch {
+            throw AudioFileStoreError.directoryCreationFailed(directoryURL, error)
+        }
+
         return directoryURL
     }
 
-    func makeRecordingURL(date: Date = Date()) throws -> URL {
+    func makeRecordingURL(date: Date = Date(), fallback: Bool = false) throws -> URL {
         let directoryURL = try recordingsDirectory()
-        let baseName = "rokurics_\(Self.fileDateFormatter.string(from: date))"
-        var candidateURL = directoryURL.appendingPathComponent(baseName).appendingPathExtension("m4a")
-        var suffix = 1
+        let suffix = fallback ? "_fallback" : ""
+        let baseName = "rokurics_\(Self.fileDateFormatter.string(from: date))\(suffix)"
 
-        while fileManager.fileExists(atPath: candidateURL.path) {
-            candidateURL = directoryURL
-                .appendingPathComponent("\(baseName)_\(suffix)")
-                .appendingPathExtension("m4a")
-            suffix += 1
-        }
-
-        return candidateURL
+        return directoryURL.appendingPathComponent(baseName).appendingPathExtension("m4a")
     }
 
     func fileExists(at url: URL) -> Bool {
         fileManager.fileExists(atPath: url.path)
+    }
+
+    func directoryExists(at url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        return exists && isDirectory.boolValue
+    }
+
+    func isWritableDirectory(at url: URL) -> Bool {
+        fileManager.isWritableFile(atPath: url.path)
+    }
+
+    func removeFileIfExists(at url: URL) throws {
+        guard fileExists(at: url) else {
+            return
+        }
+
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            throw AudioFileStoreError.fileRemovalFailed(url, error)
+        }
     }
 
     private static let fileDateFormatter: DateFormatter = {

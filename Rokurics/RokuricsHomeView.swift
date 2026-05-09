@@ -277,13 +277,15 @@ private struct RokuricsRecordingOrb: View {
             return nil
         case .requestingPermission:
             return ("请求权限", RokuricsColors.aqua)
+        case .configuringSession:
+            return ("配置录音", RokuricsColors.aqua)
         case .recording:
             return ("正在录音 \(RokuricsRecordingFormat.clock(elapsedSeconds))", RokuricsColors.coral)
         case .stopping:
             return ("正在保存", RokuricsColors.aqua)
         case .saved:
             return ("保存成功", RokuricsColors.mint)
-        case .denied:
+        case .permissionDenied:
             return ("麦克风权限未开启", RokuricsColors.coral)
         case .failed:
             return ("录音失败", RokuricsColors.coral)
@@ -296,6 +298,8 @@ private struct RokuricsRecordingOrb: View {
             return "停止录音"
         case .requestingPermission:
             return "正在请求麦克风权限"
+        case .configuringSession:
+            return "正在配置录音"
         case .stopping:
             return "正在保存录音"
         default:
@@ -526,9 +530,9 @@ private struct RokuricsHomeDashboardCard: View {
         switch recordingState {
         case .recording:
             return "record.circle.fill"
-        case .denied, .failed:
+        case .permissionDenied, .failed:
             return "exclamationmark.circle.fill"
-        case .requestingPermission, .stopping:
+        case .requestingPermission, .configuringSession, .stopping:
             return "hourglass"
         case .idle, .saved:
             return "lock.fill"
@@ -537,9 +541,9 @@ private struct RokuricsHomeDashboardCard: View {
 
     private var footerTint: Color {
         switch recordingState {
-        case .recording, .denied, .failed:
+        case .recording, .permissionDenied, .failed:
             return RokuricsColors.coral
-        case .requestingPermission, .stopping:
+        case .requestingPermission, .configuringSession, .stopping:
             return RokuricsColors.softTeal
         case .idle, .saved:
             return RokuricsColors.aqua
