@@ -8,8 +8,12 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var recordingManager = RecordingManager()
+
     var body: some View {
-        RokuricsHomeView()
+        NavigationStack {
+            RokuricsHomeView(recordingManager: recordingManager)
+        }
     }
 }
 

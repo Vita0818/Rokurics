@@ -8,7 +8,10 @@
 import SwiftUI
 
 struct RokuricsHomeView: View {
-    @StateObject private var recordingManager = RecordingManager()
+    @ObservedObject var recordingManager: RecordingManager
+    @State private var isRecordingSessionPresented = false
+    @State private var isRecordingLibraryPresented = false
+    @State private var isMacConnectionPresented = false
 
     var body: some View {
         RokuricsAdaptivePage { metrics in
@@ -25,16 +28,18 @@ struct RokuricsHomeView: View {
                         visualScale: metrics.orbScale,
                         state: recordingManager.state,
                         elapsedSeconds: recordingManager.elapsedSeconds,
-                        action: recordingManager.toggleRecording
+                        action: openRecordingSession
                     )
 
                     Spacer(minLength: metrics.isPadWidth ? 32 : 20)
 
                     RokuricsHomeDashboardCard(
                         scale: metrics.dashboardScale,
-                        recordingState: recordingManager.state,
-                        elapsedSeconds: recordingManager.elapsedSeconds,
-                        statusMessage: recordingManager.statusMessage
+                        recordingCount: recordingManager.recordings.count,
+                        latestRecording: recordingManager.latestRecordingMetadata,
+                        statusMessage: homeStatusMessage,
+                        onOpenRecordingLibrary: openRecordingLibrary,
+                        onOpenMacConnection: openMacConnection
                     )
                         .padding(.bottom, metrics.homeBottomPadding)
                 }
@@ -42,6 +47,16 @@ struct RokuricsHomeView: View {
                 .frame(maxWidth: metrics.homeMaxWidth)
                 .frame(maxWidth: .infinity, minHeight: metrics.height, alignment: .top)
             }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $isRecordingSessionPresented) {
+            RecordingSessionView(recordingManager: recordingManager)
+        }
+        .navigationDestination(isPresented: $isRecordingLibraryPresented) {
+            RecordingLibraryView(recordingManager: recordingManager)
+        }
+        .navigationDestination(isPresented: $isMacConnectionPresented) {
+            MacConnectionView()
         }
     }
 
@@ -58,6 +73,30 @@ struct RokuricsHomeView: View {
                 size: 46 * metrics.headerScale
             )
         }
+    }
+
+    private var homeStatusMessage: String {
+        if let latestRecordingMetadata = recordingManager.latestRecordingMetadata {
+            return "最近录音：\(RokuricsRecordingFormat.shortTime(latestRecordingMetadata.createdAt)) · \(RokuricsRecordingFormat.durationText(latestRecordingMetadata.duration))"
+        }
+
+        return "录音默认仅保存在本地"
+    }
+
+    private func openRecordingSession() {
+        print("[RokuricsNavigation] open recording session")
+        isRecordingSessionPresented = true
+    }
+
+    private func openRecordingLibrary() {
+        print("[RokuricsNavigation] open recording library")
+        recordingManager.reloadRecordings()
+        isRecordingLibraryPresented = true
+    }
+
+    private func openMacConnection() {
+        print("[RokuricsNavigation] open Mac connection")
+        isMacConnectionPresented = true
     }
 }
 
@@ -193,6 +232,9 @@ private struct RokuricsRecordingOrb: View {
                     if state.isRecording {
                         RokuricsSoundRipple(size: 222 * scale, opacity: isBreathing ? 0.24 : 0.16, tint: RokuricsColors.coral)
                             .scaleEffect(isBreathing ? 1.10 : 1.02)
+                    } else if state.isPaused {
+                        RokuricsSoundRipple(size: 222 * scale, opacity: isBreathing ? 0.17 : 0.11, tint: RokuricsColors.softTeal)
+                            .scaleEffect(isBreathing ? 1.05 : 1.00)
                     }
 
                     Circle()
@@ -222,40 +264,41 @@ private struct RokuricsRecordingOrb: View {
                                         colors: [
                                             Color.white.opacity(0.56),
                                             Color.white.opacity(0.12),
-                                            state.isRecording ? RokuricsColors.coral.opacity(0.42) : RokuricsColors.mint.opacity(0.25)
+                                            activeStrokeColor.opacity(activeStrokeOpacity)
                                         ],
                                         startPoint: .topLeading,
                                         endPoint: .bottomTrailing
                                     ),
-                                    lineWidth: state.isRecording ? 2.2 * scale : 1.2 * scale
+                                    lineWidth: isActiveSession ? 2.2 * scale : 1.2 * scale
                                 )
                         }
                         .shadow(color: RokuricsColors.shadow.opacity(0.24), radius: 30 * scale, x: 0, y: 18 * scale)
                         .shadow(color: Color.white.opacity(0.22), radius: 10 * scale, x: -3 * scale, y: -5 * scale)
-                        .scaleEffect(isBreathing || state.isRecording ? 1.018 : 0.992)
+                        .scaleEffect(isBreathing || isActiveSession ? 1.018 : 0.992)
 
-                    if state.isRecording {
-                        RokuricsStopGlyph(size: 58 * scale, cornerRadius: 12 * scale)
+                    if isActiveSession {
+                        Text(centerText)
+                            .font(RokuricsTypography.largeNumber(size: centerTextSize * scale, weight: .bold))
+                            .monospacedDigit()
                             .foregroundStyle(.white.opacity(0.97))
-                            .shadow(color: RokuricsColors.deepText.opacity(0.12), radius: 8 * scale, y: 4 * scale)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.58)
+                            .rokuricsPausedBlinking(state.isPaused)
+                            .shadow(color: RokuricsColors.deepText.opacity(0.16), radius: 8 * scale, y: 4 * scale)
+                            .padding(.horizontal, 22 * scale)
                     } else {
                         RokuricsPlusGlyph(size: 74 * scale, thickness: 10 * scale)
                             .foregroundStyle(.white.opacity(0.97))
                             .shadow(color: RokuricsColors.deepText.opacity(0.12), radius: 8 * scale, y: 4 * scale)
                     }
 
-                    if let statusPill = statusPill {
-                        RokuricsOrbStatusPill(text: statusPill.text, tint: statusPill.tint, scale: scale)
-                            .offset(y: 128 * scale)
-                    }
                 }
                 .frame(width: 272 * scale, height: 286 * scale)
-                .scaleEffect(isBreathing || state.isRecording ? 1.010 : 0.996)
+                .scaleEffect(isBreathing || isActiveSession ? 1.010 : 0.996)
                 .offset(y: (isBreathing ? -4 : 2) * scale)
                 .contentShape(Circle())
             }
             .buttonStyle(RokuricsScaleButtonStyle())
-            .disabled(state.isBusy)
             .accessibilityLabel(accessibilityLabel)
         }
         .onAppear {
@@ -271,40 +314,66 @@ private struct RokuricsRecordingOrb: View {
         return progress * 360
     }
 
-    private var statusPill: (text: String, tint: Color)? {
-        switch state {
-        case .idle:
-            return nil
-        case .requestingPermission:
-            return ("请求权限", RokuricsColors.aqua)
-        case .configuringSession:
-            return ("配置录音", RokuricsColors.aqua)
-        case .recording:
-            return ("正在录音 \(RokuricsRecordingFormat.clock(elapsedSeconds))", RokuricsColors.coral)
-        case .stopping:
-            return ("正在保存", RokuricsColors.aqua)
-        case .saved:
-            return ("保存成功", RokuricsColors.mint)
-        case .permissionDenied:
-            return ("麦克风权限未开启", RokuricsColors.coral)
-        case .failed:
-            return ("录音失败", RokuricsColors.coral)
-        }
-    }
-
     private var accessibilityLabel: String {
         switch state {
         case .recording:
-            return "停止录音"
+            return "返回当前录音"
+        case .paused:
+            return "返回已暂停录音"
         case .requestingPermission:
-            return "正在请求麦克风权限"
+            return "打开录音页，正在请求麦克风权限"
         case .configuringSession:
-            return "正在配置录音"
+            return "打开录音页，正在配置录音"
         case .stopping:
+            return "打开录音页，正在保存录音"
+        case .naming:
+            return "命名录音"
+        case .saving:
             return "正在保存录音"
         default:
             return "开始录音"
         }
+    }
+
+    private var isActiveSession: Bool {
+        switch state {
+        case .requestingPermission, .configuringSession, .recording, .paused, .stopping, .saving:
+            return true
+        case .idle, .naming, .saved, .permissionDenied, .failed:
+            return false
+        }
+    }
+
+    private var centerText: String {
+        switch state {
+        case .requestingPermission, .configuringSession, .stopping, .saving:
+            return "..."
+        case .recording, .paused:
+            return RokuricsRecordingFormat.clock(elapsedSeconds)
+        case .idle, .naming, .saved, .permissionDenied, .failed:
+            return "+"
+        }
+    }
+
+    private var centerTextSize: CGFloat {
+        centerText.count > 5 ? 34 : 44
+    }
+
+    private var activeStrokeColor: Color {
+        switch state {
+        case .recording:
+            return RokuricsColors.coral
+        case .paused:
+            return RokuricsColors.softTeal
+        case .requestingPermission, .configuringSession, .stopping, .saving:
+            return RokuricsColors.aqua
+        case .idle, .naming, .saved, .permissionDenied, .failed:
+            return RokuricsColors.mint
+        }
+    }
+
+    private var activeStrokeOpacity: Double {
+        isActiveSession ? 0.42 : 0.25
     }
 }
 
@@ -410,31 +479,6 @@ private struct RokuricsStopGlyph: View {
     }
 }
 
-private struct RokuricsOrbStatusPill: View {
-    let text: String
-    let tint: Color
-    let scale: CGFloat
-
-    var body: some View {
-        HStack(spacing: 7 * scale) {
-            Circle()
-                .fill(tint)
-                .frame(width: 7 * scale, height: 7 * scale)
-                .shadow(color: tint.opacity(0.30), radius: 8 * scale, y: 2 * scale)
-
-            Text(text)
-                .font(RokuricsTypography.caption(size: 12 * scale, weight: .semibold))
-                .foregroundStyle(RokuricsColors.deepText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 13 * scale)
-        .padding(.vertical, 8 * scale)
-        .rokuricsGlassCapsule(fillOpacity: 0.50, strokeOpacity: 0.46, shadowOpacity: 0.10, shadowRadius: 12 * scale, shadowY: 6 * scale)
-    }
-}
-
 private struct RokuricsProfileAvatarButton: View {
     let accessibilityLabel: String
     let size: CGFloat
@@ -456,20 +500,25 @@ private struct RokuricsProfileAvatarButton: View {
 
 private struct RokuricsHomeDashboardCard: View {
     let scale: CGFloat
-    let recordingState: RokuricsRecordingState
-    let elapsedSeconds: TimeInterval
+    let recordingCount: Int
+    let latestRecording: RecordingMetadata?
     let statusMessage: String
+    let onOpenRecordingLibrary: () -> Void
+    let onOpenMacConnection: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 RokuricsHomeDashboardColumn(
                     title: "录音",
-                    value: RokuricsRecordingFormat.durationValue(elapsedSeconds),
-                    detail: RokuricsRecordingFormat.durationUnit(elapsedSeconds),
-                    tint: recordingTint,
+                    value: "\(recordingCount)",
+                    detail: "条",
+                    tint: RokuricsColors.aqua,
                     scale: scale
                 )
+                .onTapGesture(perform: onOpenRecordingLibrary)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("打开历史录音")
 
                 RokuricsHomeDashboardDivider(scale: scale)
 
@@ -480,6 +529,9 @@ private struct RokuricsHomeDashboardCard: View {
                     tint: RokuricsColors.softTeal,
                     scale: scale
                 )
+                .onTapGesture(perform: onOpenMacConnection)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("打开 Mac 连接")
 
                 RokuricsHomeDashboardDivider(scale: scale)
 
@@ -522,32 +574,12 @@ private struct RokuricsHomeDashboardCard: View {
         .rokuricsLiquidGlassCard(cornerRadius: 30 * scale, fillOpacity: 0.40, strokeOpacity: 0.44, shadowOpacity: 0.12, shadowRadius: 20 * scale, shadowY: 11 * scale)
     }
 
-    private var recordingTint: Color {
-        recordingState.isRecording ? RokuricsColors.coral : RokuricsColors.aqua
-    }
-
     private var footerIconName: String {
-        switch recordingState {
-        case .recording:
-            return "record.circle.fill"
-        case .permissionDenied, .failed:
-            return "exclamationmark.circle.fill"
-        case .requestingPermission, .configuringSession, .stopping:
-            return "hourglass"
-        case .idle, .saved:
-            return "lock.fill"
-        }
+        latestRecording == nil ? "lock.fill" : "waveform"
     }
 
     private var footerTint: Color {
-        switch recordingState {
-        case .recording, .permissionDenied, .failed:
-            return RokuricsColors.coral
-        case .requestingPermission, .configuringSession, .stopping:
-            return RokuricsColors.softTeal
-        case .idle, .saved:
-            return RokuricsColors.aqua
-        }
+        RokuricsColors.aqua
     }
 }
 
@@ -594,7 +626,7 @@ private struct RokuricsHomeDashboardDivider: View {
     }
 }
 
-private enum RokuricsRecordingFormat {
+enum RokuricsRecordingFormat {
     static func durationValue(_ seconds: TimeInterval) -> String {
         if seconds < 60 {
             return "\(max(0, Int(seconds.rounded(.down))))"
@@ -613,8 +645,29 @@ private enum RokuricsRecordingFormat {
         let remainingSeconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, remainingSeconds)
     }
+
+    static func durationText(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "\(max(0, Int(seconds.rounded(.down)))) sec"
+        }
+
+        return String(format: "%.1f min", seconds / 60)
+    }
+
+    static func shortTime(_ date: Date) -> String {
+        shortTimeFormatter.string(from: date)
+    }
+
+    private static let shortTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 }
 
 #Preview {
-    RokuricsHomeView()
+    NavigationStack {
+        RokuricsHomeView(recordingManager: RecordingManager())
+    }
 }

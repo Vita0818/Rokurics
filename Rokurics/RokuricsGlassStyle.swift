@@ -135,6 +135,38 @@ private struct RokuricsGlassCircleModifier: ViewModifier {
     }
 }
 
+private struct RokuricsPausedBlinkModifier: ViewModifier {
+    let isPaused: Bool
+    let lowOpacity: Double
+    let duration: TimeInterval
+    @State private var isDimmed = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isPaused ? (isDimmed ? lowOpacity : 1.0) : 1.0)
+            .onAppear {
+                updateBlinking(isPaused)
+            }
+            .onChange(of: isPaused) { _, newValue in
+                updateBlinking(newValue)
+            }
+    }
+
+    private func updateBlinking(_ shouldBlink: Bool) {
+        if shouldBlink {
+            isDimmed = false
+
+            withAnimation(.easeInOut(duration: duration).repeatForever(autoreverses: true)) {
+                isDimmed = true
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.14)) {
+                isDimmed = false
+            }
+        }
+    }
+}
+
 extension View {
     func rokuricsLiquidGlassCard(
         cornerRadius: CGFloat = 28,
@@ -200,5 +232,19 @@ extension View {
 
     func rokuricsSoftShadow(opacity: Double = 0.12, radius: CGFloat = 18, y: CGFloat = 10) -> some View {
         shadow(color: RokuricsColors.shadow.opacity(opacity), radius: radius, x: 0, y: y)
+    }
+
+    func rokuricsPausedBlinking(
+        _ isPaused: Bool,
+        lowOpacity: Double = 0.35,
+        duration: TimeInterval = 0.9
+    ) -> some View {
+        modifier(
+            RokuricsPausedBlinkModifier(
+                isPaused: isPaused,
+                lowOpacity: lowOpacity,
+                duration: duration
+            )
+        )
     }
 }

@@ -7,6 +7,20 @@
 	objects = {
 
 /* Begin PBXContainerItemProxy section */
+		58A089B62FB050430065EF5A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 58E3151C2FADB91F0019DCDD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 58A089A82FB050430065EF5A;
+			remoteInfo = RokuricsMac;
+		};
+		58A089C02FB050430065EF5A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 58E3151C2FADB91F0019DCDD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 58A089A82FB050430065EF5A;
+			remoteInfo = RokuricsMac;
+		};
 		58E315322FADB9210019DCDD /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 58E3151C2FADB91F0019DCDD /* Project object */;
@@ -24,12 +38,30 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		58A089A92FB050430065EF5A /* RokuricsMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RokuricsMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		58A089B52FB050430065EF5A /* RokuricsMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		58A089BF2FB050430065EF5A /* RokuricsMacUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsMacUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		58E315242FADB91F0019DCDD /* Rokurics.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rokurics.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		58E315312FADB9210019DCDD /* RokuricsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		58E3153B2FADB9210019DCDD /* RokuricsUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		58A089AA2FB050430065EF5A /* RokuricsMac */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RokuricsMac;
+			sourceTree = "<group>";
+		};
+		58A089B82FB050430065EF5A /* RokuricsMacTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RokuricsMacTests;
+			sourceTree = "<group>";
+		};
+		58A089C22FB050430065EF5A /* RokuricsMacUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RokuricsMacUITests;
+			sourceTree = "<group>";
+		};
 		58E315262FADB91F0019DCDD /* Rokurics */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Rokurics;
@@ -48,6 +80,27 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		58A089A62FB050430065EF5A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089B22FB050430065EF5A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089BC2FB050430065EF5A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		58E315212FADB91F0019DCDD /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -78,6 +131,9 @@
 				58E315262FADB91F0019DCDD /* Rokurics */,
 				58E315342FADB9210019DCDD /* RokuricsTests */,
 				58E3153E2FADB9210019DCDD /* RokuricsUITests */,
+				58A089AA2FB050430065EF5A /* RokuricsMac */,
+				58A089B82FB050430065EF5A /* RokuricsMacTests */,
+				58A089C22FB050430065EF5A /* RokuricsMacUITests */,
 				58E315252FADB91F0019DCDD /* Products */,
 			);
 			sourceTree = "<group>";
@@ -88,6 +144,9 @@
 				58E315242FADB91F0019DCDD /* Rokurics.app */,
 				58E315312FADB9210019DCDD /* RokuricsTests.xctest */,
 				58E3153B2FADB9210019DCDD /* RokuricsUITests.xctest */,
+				58A089A92FB050430065EF5A /* RokuricsMac.app */,
+				58A089B52FB050430065EF5A /* RokuricsMacTests.xctest */,
+				58A089BF2FB050430065EF5A /* RokuricsMacUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,6 +154,74 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		58A089A82FB050430065EF5A /* RokuricsMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 58A089CD2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMac" */;
+			buildPhases = (
+				58A089A52FB050430065EF5A /* Sources */,
+				58A089A62FB050430065EF5A /* Frameworks */,
+				58A089A72FB050430065EF5A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				58A089AA2FB050430065EF5A /* RokuricsMac */,
+			);
+			name = RokuricsMac;
+			packageProductDependencies = (
+			);
+			productName = RokuricsMac;
+			productReference = 58A089A92FB050430065EF5A /* RokuricsMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+		58A089B42FB050430065EF5A /* RokuricsMacTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 58A089CE2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMacTests" */;
+			buildPhases = (
+				58A089B12FB050430065EF5A /* Sources */,
+				58A089B22FB050430065EF5A /* Frameworks */,
+				58A089B32FB050430065EF5A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				58A089B72FB050430065EF5A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				58A089B82FB050430065EF5A /* RokuricsMacTests */,
+			);
+			name = RokuricsMacTests;
+			packageProductDependencies = (
+			);
+			productName = RokuricsMacTests;
+			productReference = 58A089B52FB050430065EF5A /* RokuricsMacTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		58A089BE2FB050430065EF5A /* RokuricsMacUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 58A089CF2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMacUITests" */;
+			buildPhases = (
+				58A089BB2FB050430065EF5A /* Sources */,
+				58A089BC2FB050430065EF5A /* Frameworks */,
+				58A089BD2FB050430065EF5A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				58A089C12FB050430065EF5A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				58A089C22FB050430065EF5A /* RokuricsMacUITests */,
+			);
+			name = RokuricsMacUITests;
+			packageProductDependencies = (
+			);
+			productName = RokuricsMacUITests;
+			productReference = 58A089BF2FB050430065EF5A /* RokuricsMacUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		58E315232FADB91F0019DCDD /* Rokurics */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 58E315452FADB9210019DCDD /* Build configuration list for PBXNativeTarget "Rokurics" */;
@@ -173,6 +300,17 @@
 				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
+					58A089A82FB050430065EF5A = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+					58A089B42FB050430065EF5A = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = 58A089A82FB050430065EF5A;
+					};
+					58A089BE2FB050430065EF5A = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = 58A089A82FB050430065EF5A;
+					};
 					58E315232FADB91F0019DCDD = {
 						CreatedOnToolsVersion = 26.4.1;
 					};
@@ -203,11 +341,35 @@
 				58E315232FADB91F0019DCDD /* Rokurics */,
 				58E315302FADB9210019DCDD /* RokuricsTests */,
 				58E3153A2FADB9210019DCDD /* RokuricsUITests */,
+				58A089A82FB050430065EF5A /* RokuricsMac */,
+				58A089B42FB050430065EF5A /* RokuricsMacTests */,
+				58A089BE2FB050430065EF5A /* RokuricsMacUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		58A089A72FB050430065EF5A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089B32FB050430065EF5A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089BD2FB050430065EF5A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		58E315222FADB91F0019DCDD /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -232,6 +394,27 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		58A089A52FB050430065EF5A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089B12FB050430065EF5A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58A089BB2FB050430065EF5A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		58E315202FADB91F0019DCDD /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -256,6 +439,16 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		58A089B72FB050430065EF5A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 58A089A82FB050430065EF5A /* RokuricsMac */;
+			targetProxy = 58A089B62FB050430065EF5A /* PBXContainerItemProxy */;
+		};
+		58A089C12FB050430065EF5A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 58A089A82FB050430065EF5A /* RokuricsMac */;
+			targetProxy = 58A089C02FB050430065EF5A /* PBXContainerItemProxy */;
+		};
 		58E315332FADB9210019DCDD /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 58E315232FADB91F0019DCDD /* Rokurics */;
@@ -269,6 +462,180 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		58A089C72FB050430065EF5A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		58A089C82FB050430065EF5A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		58A089C92FB050430065EF5A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMacTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RokuricsMac.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/RokuricsMac";
+			};
+			name = Debug;
+		};
+		58A089CA2FB050430065EF5A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMacTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RokuricsMac.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/RokuricsMac";
+			};
+			name = Release;
+		};
+		58A089CB2FB050430065EF5A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMacUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = RokuricsMac;
+			};
+			name = Debug;
+		};
+		58A089CC2FB050430065EF5A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.RokuricsMacUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = RokuricsMac;
+			};
+			name = Release;
+		};
 		58E315432FADB9210019DCDD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -400,10 +767,12 @@
 				DEVELOPMENT_TEAM = L5ZXXFUZTL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSAppTransportSecurity = "{ NSAllowsLocalNetworking = YES; }";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Rokurics uses the local network to send recordings to your Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -433,10 +802,12 @@
 				DEVELOPMENT_TEAM = L5ZXXFUZTL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSAppTransportSecurity = "{ NSAllowsLocalNetworking = YES; }";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Rokurics uses the local network to send recordings to your Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -543,6 +914,33 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		58A089CD2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				58A089C72FB050430065EF5A /* Debug */,
+				58A089C82FB050430065EF5A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		58A089CE2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMacTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				58A089C92FB050430065EF5A /* Debug */,
+				58A089CA2FB050430065EF5A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		58A089CF2FB050430065EF5A /* Build configuration list for PBXNativeTarget "RokuricsMacUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				58A089CB2FB050430065EF5A /* Debug */,
+				58A089CC2FB050430065EF5A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		58E3151F2FADB91F0019DCDD /* Build configuration list for PBXProject "Rokurics" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

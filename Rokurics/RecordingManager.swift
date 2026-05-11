@@ -14,7 +14,10 @@ enum RokuricsRecordingState: Equatable {
     case requestingPermission
     case configuringSession
     case recording
+    case paused
     case stopping
+    case naming
+    case saving
     case saved
     case permissionDenied
     case failed
@@ -23,8 +26,12 @@ enum RokuricsRecordingState: Equatable {
         self == .recording
     }
 
+    var isPaused: Bool {
+        self == .paused
+    }
+
     var isBusy: Bool {
-        self == .requestingPermission || self == .configuringSession || self == .stopping
+        self == .requestingPermission || self == .configuringSession || self == .stopping || self == .naming || self == .saving
     }
 }
 
@@ -34,8 +41,12 @@ final class RecordingManager: ObservableObject {
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var lastErrorMessage: String?
     @Published private(set) var lastRecordingURL: URL?
+    @Published private(set) var recordings: [RecordingMetadata] = []
+    @Published private(set) var latestRecordingMetadata: RecordingMetadata?
     @Published private(set) var statusMessage = "录音默认仅保存在本地"
     @Published private(set) var debugMessage: String?
+    @Published private(set) var pendingDefaultTitle: String?
+    @Published private(set) var pendingTitle: String?
 
     private let fileStore: AudioFileStore
     private var audioRecorder: AVAudioRecorder?
@@ -43,13 +54,16 @@ final class RecordingManager: ObservableObject {
     private var recordingStartedAt: Date?
     private var timer: Timer?
     private var activeSettingsName: String?
+    private var pendingRecordingSave: PendingRecordingSave?
 
     init() {
         self.fileStore = AudioFileStore()
+        loadExistingRecordings()
     }
 
     init(fileStore: AudioFileStore) {
         self.fileStore = fileStore
+        loadExistingRecordings()
     }
 
     deinit {
@@ -62,15 +76,17 @@ final class RecordingManager: ObservableObject {
         switch state {
         case .recording:
             stopRecording()
-        case .requestingPermission, .configuringSession, .stopping:
+        case .requestingPermission, .configuringSession, .stopping, .naming, .saving:
             log("button ignored while busy. state=\(state)")
+        case .paused:
+            resumeRecording()
         case .idle, .saved, .permissionDenied, .failed:
             startRecording()
         }
     }
 
     func startRecording() {
-        guard !state.isBusy, state != .recording else {
+        guard !state.isBusy, state != .recording, state != .paused else {
             log("start ignored. state=\(state)")
             return
         }
@@ -97,14 +113,72 @@ final class RecordingManager: ObservableObject {
         }
     }
 
+    func pauseRecording() {
+        guard state == .recording, let recorder = audioRecorder else {
+            log("pause ignored. state=\(state)")
+            return
+        }
+
+        recorder.pause()
+        stopTimer()
+        elapsedSeconds = recorder.currentTime > 0 ? recorder.currentTime : elapsedSeconds
+        state = .paused
+        statusMessage = "已暂停"
+        log("recording paused. currentTime=\(recorder.currentTime)")
+    }
+
+    func resumeRecording() {
+        guard state == .paused, let recorder = audioRecorder else {
+            log("resume ignored. state=\(state)")
+            return
+        }
+
+        let didResume = recorder.record()
+        log("resume record: \(didResume)")
+        log("isRecording: \(recorder.isRecording)")
+
+        guard didResume else {
+            fail("继续录音失败：record() returned false")
+            return
+        }
+
+        guard recorder.isRecording else {
+            fail("继续录音失败：recorder.isRecording is false")
+            return
+        }
+
+        state = .recording
+        statusMessage = "正在录音"
+        startTimer()
+    }
+
+    func reloadRecordings() {
+        loadExistingRecordings()
+    }
+
+    var suggestedRecordingTitle: String {
+        pendingDefaultTitle ?? RecordingMetadata.defaultTitle(createdAt: recordingStartedAt ?? Date())
+    }
+
+    func updatePendingTitle(_ rawTitle: String?) {
+        let trimmedTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedTitle.isEmpty else {
+            log("pending title ignored because title is empty")
+            return
+        }
+
+        pendingTitle = trimmedTitle
+        log("pending title updated")
+    }
+
     func stopRecording() {
-        guard state == .recording else {
+        guard state == .recording || state == .paused else {
             log("stop ignored. state=\(state)")
             return
         }
 
         state = .stopping
-        statusMessage = "正在保存录音"
+        statusMessage = "正在停止录音"
         stopTimer()
 
         guard let recorder = audioRecorder else {
@@ -112,7 +186,10 @@ final class RecordingManager: ObservableObject {
             return
         }
 
-        let finalDuration = max(recorder.currentTime, secondsSinceRecordingStarted())
+        let finalDuration = recorder.currentTime > 0 ? recorder.currentTime : max(elapsedSeconds, secondsSinceRecordingStarted())
+        let createdAt = recordingStartedAt ?? Date().addingTimeInterval(-finalDuration)
+        let endedAt = Date()
+        let settingsSummary = recordingSettingsSummary()
         log("stopRecording begin. currentTime=\(recorder.currentTime), isRecording=\(recorder.isRecording)")
         recorder.stop()
         audioRecorder = nil
@@ -130,14 +207,74 @@ final class RecordingManager: ObservableObject {
             return
         }
 
+        let defaultTitle = RecordingMetadata.defaultTitle(createdAt: createdAt)
+        pendingRecordingSave = PendingRecordingSave(
+            fileURL: fileURL,
+            createdAt: createdAt,
+            endedAt: endedAt,
+            duration: finalDuration,
+            settings: settingsSummary,
+            defaultTitle: defaultTitle
+        )
+        pendingDefaultTitle = defaultTitle
         elapsedSeconds = finalDuration
-        activeRecordingURL = nil
-        recordingStartedAt = nil
         lastRecordingURL = fileURL
         lastErrorMessage = nil
-        state = .saved
-        statusMessage = "已保存 \(fileURL.lastPathComponent)"
-        log("saved recording: \(fileURL.path)")
+        state = .naming
+        statusMessage = "等待命名"
+        log("recording stopped for naming: \(fileURL.path)")
+        print("[RokuricsStorage] audio file exists: \(fileStore.fileExists(at: fileURL))")
+
+        if let pendingTitle, !pendingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalizeRecording(title: pendingTitle)
+        }
+    }
+
+    func finalizeRecording(title rawTitle: String? = nil) {
+        guard let pendingRecordingSave else {
+            log("finalize ignored. no pending recording save. state=\(state)")
+            return
+        }
+
+        state = .saving
+        statusMessage = "正在保存录音"
+
+        let trimmedTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallbackPendingTitle = pendingTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let finalTitle = trimmedTitle.isEmpty ? pendingRecordingSave.defaultTitle : trimmedTitle
+        let resolvedTitle = trimmedTitle.isEmpty && !fallbackPendingTitle.isEmpty ? fallbackPendingTitle : finalTitle
+
+        do {
+            let metadata = try makeMetadata(
+                fileURL: pendingRecordingSave.fileURL,
+                title: resolvedTitle,
+                createdAt: pendingRecordingSave.createdAt,
+                endedAt: pendingRecordingSave.endedAt,
+                duration: pendingRecordingSave.duration,
+                settings: pendingRecordingSave.settings
+            )
+            try fileStore.saveMetadata(metadata)
+            recordings = [metadata] + recordings.filter { $0.id != metadata.id }
+            latestRecordingMetadata = metadata
+            elapsedSeconds = metadata.duration
+            activeRecordingURL = nil
+            recordingStartedAt = nil
+            activeSettingsName = nil
+            pendingDefaultTitle = nil
+            pendingTitle = nil
+            self.pendingRecordingSave = nil
+            lastRecordingURL = pendingRecordingSave.fileURL
+            lastErrorMessage = nil
+            state = .saved
+            statusMessage = Self.recentRecordingStatusMessage(for: metadata, prefix: "已保存")
+            log("saved recording: \(pendingRecordingSave.fileURL.path)")
+            print("[RokuricsStorage] audio file size: \(metadata.fileSize)")
+            print("[RokuricsStorage] saved metadata: \(metadata.relativeMetadataPath)")
+        } catch {
+            elapsedSeconds = pendingRecordingSave.duration
+            lastRecordingURL = pendingRecordingSave.fileURL
+            fail("录音已保存，但 metadata 写入失败：\(error.localizedDescription)", error: error)
+        }
     }
 
     private func requestPermissionIfNeeded() async -> Bool {
@@ -268,10 +405,77 @@ final class RecordingManager: ObservableObject {
     }
 
     private func logAndValidateRecordingsDirectory() throws {
+        try fileStore.ensureStorageDirectories()
         let directoryURL = try fileStore.recordingsDirectory()
         log("recordings directory: \(directoryURL.path)")
         log("directory exists: \(fileStore.directoryExists(at: directoryURL))")
         log("directory writable: \(fileStore.isWritableDirectory(at: directoryURL))")
+    }
+
+    private func loadExistingRecordings() {
+        do {
+            try fileStore.ensureStorageDirectories()
+            let loadedRecordings = try fileStore.loadAllMetadata()
+            recordings = loadedRecordings
+            latestRecordingMetadata = loadedRecordings.first
+
+            if let latestRecordingMetadata {
+                elapsedSeconds = latestRecordingMetadata.duration
+                statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: "最近录音")
+                lastRecordingURL = try? audioURL(for: latestRecordingMetadata)
+            }
+        } catch {
+            lastErrorMessage = "读取本地录音失败：\(error.localizedDescription)"
+            statusMessage = "读取本地录音失败"
+            print("[RokuricsStorage][ERROR] load recordings failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func makeMetadata(
+        fileURL: URL,
+        title: String,
+        createdAt: Date,
+        endedAt: Date,
+        duration: TimeInterval,
+        settings: RecordingSettingsSummary
+    ) throws -> RecordingMetadata {
+        let id = fileURL.deletingPathExtension().lastPathComponent
+        let metadataURL = try fileStore.makeMetadataURL(id: id)
+        let fileSize = try fileStore.fileSize(at: fileURL)
+        let audioRelativePath = try fileStore.relativePath(for: fileURL)
+        let metadataRelativePath = try fileStore.relativePath(for: metadataURL)
+
+        print("[RokuricsStorage] audio file exists: \(fileStore.fileExists(at: fileURL))")
+        print("[RokuricsStorage] audio file size: \(fileSize)")
+
+        return RecordingMetadata(
+            id: id,
+            title: title,
+            fileName: fileURL.lastPathComponent,
+            relativeAudioPath: audioRelativePath,
+            relativeMetadataPath: metadataRelativePath,
+            createdAt: createdAt,
+            endedAt: endedAt,
+            duration: duration,
+            format: settings.format,
+            codec: settings.codec,
+            sampleRate: settings.sampleRate,
+            channels: settings.channels,
+            bitrate: settings.bitrate,
+            fileSize: fileSize,
+            uploadStatus: "localOnly",
+            transcriptionStatus: "notStarted",
+            noteStatus: "notStarted",
+            tags: []
+        )
+    }
+
+    private func audioURL(for metadata: RecordingMetadata) throws -> URL {
+        try fileStore.baseDirectory().appendingPathComponent(metadata.relativeAudioPath)
+    }
+
+    private func recordingSettingsSummary() -> RecordingSettingsSummary {
+        activeSettingsName == "fallback" ? .fallback : .primary
     }
 
     private func attemptRecorderStart(
@@ -338,6 +542,9 @@ final class RecordingManager: ObservableObject {
 
     private func permissionDenied() {
         cleanupRecorderOnly()
+        pendingRecordingSave = nil
+        pendingDefaultTitle = nil
+        pendingTitle = nil
         elapsedSeconds = 0
         state = .permissionDenied
         lastErrorMessage = "麦克风权限未开启"
@@ -368,6 +575,9 @@ final class RecordingManager: ObservableObject {
         activeRecordingURL = nil
         recordingStartedAt = nil
         activeSettingsName = nil
+        pendingRecordingSave = nil
+        pendingDefaultTitle = nil
+        pendingTitle = nil
     }
 
     private func cleanupRecorderOnly(removeActiveFile: Bool) {
@@ -408,7 +618,7 @@ final class RecordingManager: ObservableObject {
         }
 
         let recorderTime = audioRecorder?.currentTime ?? 0
-        elapsedSeconds = max(recorderTime, secondsSinceRecordingStarted())
+        elapsedSeconds = recorderTime > 0 ? recorderTime : max(elapsedSeconds, secondsSinceRecordingStarted())
     }
 
     private func secondsSinceRecordingStarted() -> TimeInterval {
@@ -457,6 +667,58 @@ final class RecordingManager: ObservableObject {
         AVEncoderBitRateKey: 128_000,
         AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
     ]
+
+    private static func recentRecordingStatusMessage(for metadata: RecordingMetadata, prefix: String) -> String {
+        "\(prefix)：\(Self.shortTimeFormatter.string(from: metadata.createdAt)) · \(Self.durationText(metadata.duration))"
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        if seconds < 60 {
+            return "\(max(0, Int(seconds.rounded(.down)))) sec"
+        }
+
+        return String(format: "%.1f min", seconds / 60)
+    }
+
+    private static let shortTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+}
+
+private struct RecordingSettingsSummary {
+    let format: String
+    let codec: String
+    let sampleRate: Double
+    let channels: Int
+    let bitrate: Int
+
+    static let primary = RecordingSettingsSummary(
+        format: "m4a",
+        codec: "AAC",
+        sampleRate: 16_000.0,
+        channels: 1,
+        bitrate: 64_000
+    )
+
+    static let fallback = RecordingSettingsSummary(
+        format: "m4a",
+        codec: "AAC",
+        sampleRate: 44_100.0,
+        channels: 1,
+        bitrate: 128_000
+    )
+}
+
+private struct PendingRecordingSave {
+    let fileURL: URL
+    let createdAt: Date
+    let endedAt: Date
+    let duration: TimeInterval
+    let settings: RecordingSettingsSummary
+    let defaultTitle: String
 }
 
 private enum RecordingManagerError: LocalizedError {
