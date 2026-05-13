@@ -11,6 +11,9 @@ import Foundation
 final class AudioInboxStore: ObservableObject {
     @Published private(set) var pendingCount = 0
     @Published private(set) var processedCount = 0
+    @Published private(set) var transcriptionPendingCount = 0
+    @Published private(set) var transcribedCount = 0
+    @Published private(set) var transcriptionActiveCount = 0
     @Published private(set) var recordingItems: [MacRecordingInboxItem] = []
 
     static let localRootDisplayPath = "~/Library/Application Support/Rokurics"
@@ -41,7 +44,10 @@ final class AudioInboxStore: ObservableObject {
         let items = recordingFileStore.loadInboxItems()
         recordingItems = items
         pendingCount = items.filter(\.hasAudio).count
-        processedCount = 0
+        transcriptionPendingCount = items.filter(\.isWaitingForTranscription).count
+        transcribedCount = items.filter(\.isTranscribed).count
+        transcriptionActiveCount = items.filter(\.isTranscriptionActive).count
+        processedCount = transcribedCount
     }
 
     // Future local data layout:

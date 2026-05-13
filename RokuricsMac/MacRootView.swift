@@ -13,6 +13,8 @@ struct MacRootView: View {
     @StateObject private var secureReceiverService = SecureReceiverService()
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
+    @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
+    @StateObject private var transcriptionSettingsStore = TranscriptionSettingsStore.shared
     @StateObject private var llmServiceConfig = LLMServiceConfig()
     @Environment(\.colorScheme) private var colorScheme
 
@@ -26,6 +28,7 @@ struct MacRootView: View {
                     secureReceiverService: secureReceiverService,
                     audioInboxStore: audioInboxStore,
                     transcriptionQueue: transcriptionQueue,
+                    transcriptionSettingsStore: transcriptionSettingsStore,
                     llmServiceConfig: llmServiceConfig
                 )
             } else {
@@ -43,11 +46,12 @@ struct MacRootView: View {
         switch item {
         case .dashboard:
             MacDashboardView(
-                secureReceiverService: secureReceiverService,
-                audioInboxStore: audioInboxStore,
-                transcriptionQueue: transcriptionQueue,
-                llmServiceConfig: llmServiceConfig,
-                onOpenIPhoneConnection: {
+                        secureReceiverService: secureReceiverService,
+                        audioInboxStore: audioInboxStore,
+                        transcriptionQueue: transcriptionQueue,
+                        transcriptionCoordinator: transcriptionCoordinator,
+                        llmServiceConfig: llmServiceConfig,
+                        onOpenIPhoneConnection: {
                     isSettingsSelected = false
                     selection = .iPhoneConnection
                 }
@@ -55,14 +59,20 @@ struct MacRootView: View {
         case .iPhoneConnection:
             MacIPhoneConnectionView(secureReceiverService: secureReceiverService)
         case .audioInbox:
-            MacAudioInboxView(audioInboxStore: audioInboxStore)
+            MacAudioInboxView(
+                audioInboxStore: audioInboxStore,
+                transcriptionCoordinator: transcriptionCoordinator
+            )
         case .transcripts:
             MacPlaceholderWorkspace(
                 title: "Transcripts",
                 systemImage: "waveform.and.magnifyingglass",
-                status: transcriptionQueue.status,
-                caption: "Whisper / MLX 稍后支持",
-                details: ["Queued: \(transcriptionQueue.queuedCount)", "Engine: 未配置"]
+                status: transcriptionCoordinator.providerDisplayName,
+                caption: "Mock 转写接口已接入，真实引擎稍后支持",
+                details: [
+                    "Queued: \(audioInboxStore.transcriptionActiveCount)",
+                    "Engine: \(transcriptionCoordinator.providerID)"
+                ]
             )
         case .notes:
             MacPlaceholderWorkspace(

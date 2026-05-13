@@ -43,6 +43,13 @@ struct RecordingReceiveRecord: Codable {
     var checksum: String?
     var audioRelativePath: String?
     var metadataRelativePath: String
+    var transcriptRelativePath: String? = nil
+    var transcriptMarkdownRelativePath: String? = nil
+    var transcriptionProviderID: String? = nil
+    var transcriptionModelName: String? = nil
+    var transcriptionStartedAt: Date? = nil
+    var transcriptionCompletedAt: Date? = nil
+    var transcriptionError: String? = nil
 }
 
 struct RecordingReceiveLogEntry: Codable {

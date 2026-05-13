@@ -11,6 +11,7 @@ struct MacSettingsView: View {
     @ObservedObject var secureReceiverService: SecureReceiverService
     @ObservedObject var audioInboxStore: AudioInboxStore
     @ObservedObject var transcriptionQueue: TranscriptionQueue
+    @ObservedObject var transcriptionSettingsStore: TranscriptionSettingsStore
     @ObservedObject var llmServiceConfig: LLMServiceConfig
     @Environment(\.colorScheme) private var colorScheme
 
@@ -36,7 +37,7 @@ struct MacSettingsView: View {
                         MacSettingsDivider()
                         MacSettingsRow(title: "配对设备", value: "\(secureReceiverService.pairedDeviceCount)", systemImage: "iphone.gen3")
                         MacSettingsDivider()
-                        MacSettingsRow(title: "转写引擎", value: transcriptionQueue.status, systemImage: "waveform.and.magnifyingglass")
+                        MacSettingsRow(title: "转写 Provider", value: transcriptionSettingsStore.selectedProviderDisplayName, systemImage: "waveform.and.magnifyingglass")
                         MacSettingsDivider()
                         MacSettingsRow(title: "AI 后端", value: llmServiceConfig.provider, systemImage: "sparkles")
                         MacSettingsDivider()
@@ -61,6 +62,8 @@ struct MacSettingsView: View {
                     .padding(18)
                     .frame(maxWidth: 680, alignment: .leading)
                     .macLiquidGlassCard(cornerRadius: 22, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.05, shadowRadius: 10, shadowY: 5)
+
+                    MacTranscriptionSettingsView(settingsStore: transcriptionSettingsStore)
 
                     Spacer(minLength: 0)
                 }
@@ -119,6 +122,7 @@ private struct MacSettingsDivider: View {
         secureReceiverService: SecureReceiverService(),
         audioInboxStore: AudioInboxStore(),
         transcriptionQueue: TranscriptionQueue(),
+        transcriptionSettingsStore: TranscriptionSettingsStore(),
         llmServiceConfig: LLMServiceConfig()
     )
 }

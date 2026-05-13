@@ -9,6 +9,7 @@ import SwiftUI
 
 struct MacAudioInboxView: View {
     @ObservedObject var audioInboxStore: AudioInboxStore
+    @ObservedObject var transcriptionCoordinator: TranscriptionCoordinator
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -26,8 +27,8 @@ struct MacAudioInboxView: View {
 
                     HStack(spacing: 12) {
                         MacInboxMetricPill(title: "真实录音", value: "\(audioInboxStore.pendingCount)", tint: MacTheme.aqua)
-                        MacInboxMetricPill(title: "待转写", value: "\(audioInboxStore.pendingCount)", tint: MacTheme.mint)
-                        MacInboxMetricPill(title: "已处理", value: "\(audioInboxStore.processedCount)", tint: MacTheme.leaf)
+                        MacInboxMetricPill(title: "待转写", value: "\(audioInboxStore.transcriptionPendingCount)", tint: MacTheme.mint)
+                        MacInboxMetricPill(title: "已转写", value: "\(audioInboxStore.transcribedCount)", tint: MacTheme.leaf)
                     }
 
                     if audioInboxStore.recordingItems.isEmpty {
@@ -40,7 +41,13 @@ struct MacAudioInboxView: View {
                     } else {
                         LazyVStack(spacing: 10) {
                             ForEach(audioInboxStore.recordingItems) { item in
-                                MacAudioInboxListRow(item: item)
+                                MacAudioInboxListRow(
+                                    item: item,
+                                    isTranscribing: transcriptionCoordinator.isTranscribing(recordingID: item.id),
+                                    onTranscribe: {
+                                        transcriptionCoordinator.startTranscription(recordingID: item.id)
+                                    }
+                                )
                             }
                         }
                         .padding(.vertical, 2)
@@ -81,6 +88,8 @@ private struct MacInboxMetricPill: View {
 
 private struct MacAudioInboxListRow: View {
     let item: MacRecordingInboxItem
+    let isTranscribing: Bool
+    let onTranscribe: () -> Void
 
     var body: some View {
         RecordingRowContent(
@@ -89,8 +98,51 @@ private struct MacAudioInboxListRow: View {
             durationText: durationText(item.duration),
             layout: .regular
         ) {
-            MacStatusPill(text: item.statusText, systemImage: nil, tint: MacTheme.mint)
-                .frame(width: 76, alignment: .trailing)
+            HStack(spacing: 8) {
+                MacStatusPill(text: visibleStatusText, systemImage: nil, tint: statusTint)
+                    .frame(width: 86, alignment: .trailing)
+                    .help(item.transcriptionError ?? visibleStatusText)
+
+                if shouldShowActionButton {
+                    Button(action: onTranscribe) {
+                        Text(item.transcriptionActionText)
+                            .font(MacTypography.chineseCaption(size: 12, weight: .bold))
+                            .foregroundStyle(MacTheme.deepText(for: colorScheme))
+                            .lineLimit(1)
+                            .frame(width: 54)
+                            .padding(.vertical, 7)
+                            .macGlassCapsule(fillOpacity: 0.34, strokeOpacity: 0.30)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isTranscribing)
+                }
+            }
+            .frame(width: 154, alignment: .trailing)
+        }
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var visibleStatusText: String {
+        isTranscribing ? "转写中" : item.statusText
+    }
+
+    private var shouldShowActionButton: Bool {
+        item.canStartTranscription && !isTranscribing
+    }
+
+    private var statusTint: Color {
+        if isTranscribing || item.isTranscriptionActive {
+            return MacTheme.aqua
+        }
+
+        switch item.transcriptionStatus {
+        case "transcribed":
+            return MacTheme.leaf
+        case "failed":
+            return MacTheme.coral
+        default:
+            return MacTheme.mint
         }
     }
 

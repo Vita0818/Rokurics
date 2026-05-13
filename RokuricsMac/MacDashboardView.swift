@@ -11,6 +11,7 @@ struct MacDashboardView: View {
     @ObservedObject var secureReceiverService: SecureReceiverService
     @ObservedObject var audioInboxStore: AudioInboxStore
     @ObservedObject var transcriptionQueue: TranscriptionQueue
+    @ObservedObject var transcriptionCoordinator: TranscriptionCoordinator
     @ObservedObject var llmServiceConfig: LLMServiceConfig
     let onOpenIPhoneConnection: () -> Void
     @Environment(\.colorScheme) private var colorScheme
@@ -35,7 +36,10 @@ struct MacDashboardView: View {
                             onOpenDetails: onOpenIPhoneConnection
                         )
                         MacAudioInboxCard(audioInboxStore: audioInboxStore, secureReceiverService: secureReceiverService)
-                        MacTranscriptionCard(transcriptionQueue: transcriptionQueue)
+                        MacTranscriptionCard(
+                            audioInboxStore: audioInboxStore,
+                            transcriptionCoordinator: transcriptionCoordinator
+                        )
                         MacAIProcessingCard(llmServiceConfig: llmServiceConfig)
                     }
                 }
@@ -61,6 +65,7 @@ struct MacDashboardView: View {
         secureReceiverService: SecureReceiverService(),
         audioInboxStore: AudioInboxStore(),
         transcriptionQueue: TranscriptionQueue(),
+        transcriptionCoordinator: TranscriptionCoordinator(),
         llmServiceConfig: LLMServiceConfig(),
         onOpenIPhoneConnection: {}
     )

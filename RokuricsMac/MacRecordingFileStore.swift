@@ -14,6 +14,7 @@ enum MacRecordingFileStoreError: LocalizedError {
     case metadataAlreadyExists
     case metadataMissing
     case audioAlreadyExists
+    case audioMissing
     case fileTooLarge
     case storageFailed(String)
 
@@ -31,6 +32,8 @@ enum MacRecordingFileStoreError: LocalizedError {
             return "recording_metadata_missing"
         case .audioAlreadyExists:
             return "recording_audio_exists"
+        case .audioMissing:
+            return "recording_audio_missing"
         case .fileTooLarge:
             return "file_too_large"
         case .storageFailed(let reason):
@@ -44,7 +47,7 @@ enum MacRecordingFileStoreError: LocalizedError {
             return 413
         case .metadataAlreadyExists, .audioAlreadyExists:
             return 409
-        case .invalidRecordingID, .unsafeDestination, .metadataMissing:
+        case .invalidRecordingID, .unsafeDestination, .metadataMissing, .audioMissing:
             return 400
         case .unableToCreateDirectory, .storageFailed:
             return 500
@@ -63,6 +66,14 @@ enum MacRecordingFileStoreError: LocalizedError {
             return "Internal Server Error"
         }
     }
+}
+
+struct MacRecordingTranscriptionSource {
+    let recordingID: String
+    let title: String
+    let createdAt: Date
+    let audioFileURL: URL
+    let metadataFileURL: URL?
 }
 
 final class MacRecordingFileStore {
@@ -320,7 +331,10 @@ final class MacRecordingFileStore {
                         transcriptionStatus: record.transcriptionStatus,
                         noteStatus: record.noteStatus,
                         receiveStatus: record.status,
-                        hasAudio: hasAudio
+                        hasAudio: hasAudio,
+                        transcriptRelativePath: record.transcriptRelativePath,
+                        transcriptMarkdownRelativePath: record.transcriptMarkdownRelativePath,
+                        transcriptionError: record.transcriptionError
                     ))
                 }
             }
@@ -329,6 +343,92 @@ final class MacRecordingFileStore {
         } catch {
             print("[RokuricsRecordingStore][ERROR] inbox load failed: \(error)")
             return []
+        }
+    }
+
+    func transcriptionSource(for recordingID: String) throws -> MacRecordingTranscriptionSource {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let record = try loadReceiveRecord(at: receiveURL)
+        let fallbackAudioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
+        let audioURL = record.audioRelativePath
+            .map { rootURL.appendingPathComponent($0, isDirectory: false).standardizedFileURL }
+            ?? fallbackAudioURL
+
+        guard isInsideRoot(audioURL), fileManager.fileExists(atPath: audioURL.path) else {
+            throw MacRecordingFileStoreError.audioMissing
+        }
+
+        let metadataURL = rootURL.appendingPathComponent(record.metadataRelativePath, isDirectory: false).standardizedFileURL
+        let safeMetadataURL = isInsideRoot(metadataURL) && fileManager.fileExists(atPath: metadataURL.path) ? metadataURL : nil
+
+        return MacRecordingTranscriptionSource(
+            recordingID: record.recordingID,
+            title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
+            createdAt: record.createdAt,
+            audioFileURL: audioURL,
+            metadataFileURL: safeMetadataURL
+        )
+    }
+
+    func updateTranscriptionStatus(
+        recordingID: String,
+        status: String,
+        transcriptRelativePath: String?,
+        transcriptMarkdownRelativePath: String?,
+        providerID: String?,
+        modelName: String?,
+        startedAt: Date?,
+        completedAt: Date?,
+        errorMessage: String?
+    ) throws {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        do {
+            var record = try loadReceiveRecord(at: receiveURL)
+            record.updatedAt = Date()
+            record.transcriptionStatus = status
+            record.processingStatus = status
+            record.transcriptRelativePath = transcriptRelativePath
+            record.transcriptMarkdownRelativePath = transcriptMarkdownRelativePath
+            record.transcriptionProviderID = providerID
+            record.transcriptionModelName = modelName
+            record.transcriptionStartedAt = startedAt
+            record.transcriptionCompletedAt = completedAt
+            record.transcriptionError = errorMessage
+
+            try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            try appendReceiveLog(
+                recordingID: recordingID,
+                event: "transcription_\(status)",
+                sourceDeviceID: record.sourceDeviceID,
+                status: status
+            )
+            postInboxChanged()
+            print("[RokuricsRecordingStore] transcription status updated: \(recordingID) -> \(status)")
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            print("[RokuricsRecordingStore][ERROR] transcription status update failed: \(error)")
+            throw MacRecordingFileStoreError.storageFailed("transcription_status_update_failed")
         }
     }
 
