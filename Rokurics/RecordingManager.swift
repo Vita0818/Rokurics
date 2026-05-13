@@ -156,6 +156,32 @@ final class RecordingManager: ObservableObject {
         loadExistingRecordings()
     }
 
+    var pendingUploadCount: Int {
+        recordings.filter { metadata in
+            RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) != .uploaded
+        }.count
+    }
+
+    func updateUploadStatus(recordingID: String, status: RecordingUploadStatus) throws {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingID }) else {
+            reloadRecordings()
+            guard let reloadedIndex = recordings.firstIndex(where: { $0.id == recordingID }) else {
+                return
+            }
+
+            let updated = recordings[reloadedIndex].updatingUploadStatus(status)
+            try fileStore.updateMetadata(updated)
+            recordings[reloadedIndex] = updated
+            refreshLatestRecordingAfterMetadataUpdate(updated)
+            return
+        }
+
+        let updated = recordings[index].updatingUploadStatus(status)
+        try fileStore.updateMetadata(updated)
+        recordings[index] = updated
+        refreshLatestRecordingAfterMetadataUpdate(updated)
+    }
+
     var suggestedRecordingTitle: String {
         pendingDefaultTitle ?? RecordingMetadata.defaultTitle(createdAt: recordingStartedAt ?? Date())
     }
@@ -471,7 +497,13 @@ final class RecordingManager: ObservableObject {
     }
 
     private func audioURL(for metadata: RecordingMetadata) throws -> URL {
-        try fileStore.baseDirectory().appendingPathComponent(metadata.relativeAudioPath)
+        try fileStore.audioURL(for: metadata)
+    }
+
+    private func refreshLatestRecordingAfterMetadataUpdate(_ metadata: RecordingMetadata) {
+        if latestRecordingMetadata?.id == metadata.id {
+            latestRecordingMetadata = metadata
+        }
     }
 
     private func recordingSettingsSummary() -> RecordingSettingsSummary {

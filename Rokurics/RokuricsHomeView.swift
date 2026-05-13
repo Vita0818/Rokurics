@@ -9,6 +9,7 @@ import SwiftUI
 
 struct RokuricsHomeView: View {
     @ObservedObject var recordingManager: RecordingManager
+    @ObservedObject var macConnectionStore: SecureMacConnectionStore
     @State private var isRecordingSessionPresented = false
     @State private var isRecordingLibraryPresented = false
     @State private var isMacConnectionPresented = false
@@ -36,8 +37,8 @@ struct RokuricsHomeView: View {
                     RokuricsHomeDashboardCard(
                         scale: metrics.dashboardScale,
                         recordingCount: recordingManager.recordings.count,
-                        latestRecording: recordingManager.latestRecordingMetadata,
-                        statusMessage: homeStatusMessage,
+                        pendingUploadCount: recordingManager.pendingUploadCount,
+                        isMacPaired: macConnectionStore.isPaired,
                         onOpenRecordingLibrary: openRecordingLibrary,
                         onOpenMacConnection: openMacConnection
                     )
@@ -53,10 +54,16 @@ struct RokuricsHomeView: View {
             RecordingSessionView(recordingManager: recordingManager)
         }
         .navigationDestination(isPresented: $isRecordingLibraryPresented) {
-            RecordingLibraryView(recordingManager: recordingManager)
+            RecordingLibraryView(
+                recordingManager: recordingManager,
+                macConnectionStore: macConnectionStore
+            )
         }
         .navigationDestination(isPresented: $isMacConnectionPresented) {
-            MacConnectionView()
+            MacConnectionView(connectionStore: macConnectionStore)
+        }
+        .onAppear {
+            macConnectionStore.refreshFromStorage()
         }
     }
 
@@ -73,14 +80,6 @@ struct RokuricsHomeView: View {
                 size: 46 * metrics.headerScale
             )
         }
-    }
-
-    private var homeStatusMessage: String {
-        if let latestRecordingMetadata = recordingManager.latestRecordingMetadata {
-            return "最近录音：\(RokuricsRecordingFormat.shortTime(latestRecordingMetadata.createdAt)) · \(RokuricsRecordingFormat.durationText(latestRecordingMetadata.duration))"
-        }
-
-        return "录音默认仅保存在本地"
     }
 
     private func openRecordingSession() {
@@ -501,115 +500,80 @@ private struct RokuricsProfileAvatarButton: View {
 private struct RokuricsHomeDashboardCard: View {
     let scale: CGFloat
     let recordingCount: Int
-    let latestRecording: RecordingMetadata?
-    let statusMessage: String
+    let pendingUploadCount: Int
+    let isMacPaired: Bool
     let onOpenRecordingLibrary: () -> Void
     let onOpenMacConnection: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                RokuricsHomeDashboardColumn(
-                    title: "录音",
-                    value: "\(recordingCount)",
-                    detail: "条",
-                    tint: RokuricsColors.aqua,
-                    scale: scale
-                )
-                .onTapGesture(perform: onOpenRecordingLibrary)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("打开历史录音")
+        HStack(spacing: 0) {
+            RokuricsHomeDashboardColumn(
+                title: "录音",
+                value: "\(recordingCount)",
+                tint: RokuricsColors.aqua,
+                scale: scale
+            )
+            .onTapGesture(perform: onOpenRecordingLibrary)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("打开历史录音，\(recordingCount) 条")
 
-                RokuricsHomeDashboardDivider(scale: scale)
+            RokuricsHomeDashboardDivider(scale: scale)
 
-                RokuricsHomeDashboardColumn(
-                    title: "Mac",
-                    value: "未连",
-                    detail: "8787",
-                    tint: RokuricsColors.softTeal,
-                    scale: scale
-                )
-                .onTapGesture(perform: onOpenMacConnection)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("打开 Mac 连接")
+            RokuricsHomeDashboardColumn(
+                title: "队列",
+                value: "\(pendingUploadCount)",
+                tint: RokuricsColors.mint,
+                scale: scale
+            )
 
-                RokuricsHomeDashboardDivider(scale: scale)
+            RokuricsHomeDashboardDivider(scale: scale)
 
-                RokuricsHomeDashboardColumn(
-                    title: "队列",
-                    value: "0",
-                    detail: "待传",
-                    tint: RokuricsColors.mint,
-                    scale: scale
-                )
-            }
-            .frame(minHeight: 104 * scale)
-
-            Rectangle()
-                .fill(RokuricsColors.softText.opacity(0.12))
-                .frame(height: 1)
-                .padding(.horizontal, 20 * scale)
-
-            HStack(spacing: 8 * scale) {
-                Image(systemName: footerIconName)
-                    .font(.system(size: 11 * scale, weight: .semibold))
-                    .foregroundStyle(footerTint)
-
-                Text(statusMessage)
-                    .font(RokuricsTypography.caption(size: 12 * scale, weight: .semibold))
-                    .foregroundStyle(RokuricsColors.softText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-
-                Spacer(minLength: 12 * scale)
-
-                Text("本地")
-                    .font(RokuricsTypography.caption(size: 11 * scale, weight: .semibold))
-                    .foregroundStyle(RokuricsColors.tertiaryText)
-            }
-            .padding(.horizontal, 20 * scale)
-            .frame(maxWidth: .infinity, minHeight: 44 * scale)
+            RokuricsHomeDashboardColumn(
+                title: "Mac",
+                value: isMacPaired ? "" : "-",
+                systemImage: isMacPaired ? "checkmark" : nil,
+                tint: RokuricsColors.softTeal,
+                scale: scale
+            )
+            .onTapGesture(perform: onOpenMacConnection)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(isMacPaired ? "打开 Mac 连接，已配对" : "打开 Mac 连接，未配对")
         }
+        .frame(maxWidth: .infinity, minHeight: 104 * scale)
         .frame(maxWidth: .infinity)
         .rokuricsLiquidGlassCard(cornerRadius: 30 * scale, fillOpacity: 0.40, strokeOpacity: 0.44, shadowOpacity: 0.12, shadowRadius: 20 * scale, shadowY: 11 * scale)
-    }
-
-    private var footerIconName: String {
-        latestRecording == nil ? "lock.fill" : "waveform"
-    }
-
-    private var footerTint: Color {
-        RokuricsColors.aqua
     }
 }
 
 private struct RokuricsHomeDashboardColumn: View {
     let title: String
     let value: String
-    let detail: String
+    var systemImage: String? = nil
     let tint: Color
     let scale: CGFloat
 
     var body: some View {
-        VStack(spacing: 7 * scale) {
+        VStack(spacing: 9 * scale) {
             Text(title)
                 .font(RokuricsTypography.caption(size: 13 * scale, weight: .semibold))
                 .foregroundStyle(RokuricsColors.softText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
 
-            Text(value)
-                .font(RokuricsTypography.largeNumber(size: 28 * scale, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.70)
-
-            Text(detail)
-                .font(RokuricsTypography.caption(size: 12 * scale, weight: .semibold))
-                .foregroundStyle(RokuricsColors.tertiaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.76)
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 27 * scale, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(height: 34 * scale)
+                    .accessibilityHidden(true)
+            } else {
+                Text(value)
+                    .font(RokuricsTypography.largeNumber(size: 28 * scale, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(tint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.70)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 104 * scale)
         .contentShape(Rectangle())
@@ -668,6 +632,9 @@ enum RokuricsRecordingFormat {
 
 #Preview {
     NavigationStack {
-        RokuricsHomeView(recordingManager: RecordingManager())
+        RokuricsHomeView(
+            recordingManager: RecordingManager(),
+            macConnectionStore: SecureMacConnectionStore()
+        )
     }
 }

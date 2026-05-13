@@ -176,6 +176,14 @@ struct AudioFileStore {
         }
     }
 
+    func updateMetadata(_ metadata: RecordingMetadata) throws {
+        try saveMetadata(metadata)
+    }
+
+    func audioURL(for metadata: RecordingMetadata) throws -> URL {
+        try baseDirectory().appendingPathComponent(metadata.relativeAudioPath)
+    }
+
     func loadAllMetadata() throws -> [RecordingMetadata] {
         let metadataURL = try metadataDirectory()
         storageLog("metadata directory: \(metadataURL.path)")

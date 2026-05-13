@@ -19,7 +19,7 @@ struct MacTranscriptionCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(transcriptionQueue.status)
-                        .font(MacTypography.chineseTitle(size: 32))
+                        .font(MacTypography.statusDisplay(for: transcriptionQueue.status, size: 32))
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
                         .lineLimit(1)
 

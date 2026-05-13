@@ -14,12 +14,32 @@ enum RequestVerificationResult {
 
 @MainActor
 final class RequestVerifier {
+    private struct PathRule {
+        let maxBodyBytes: Int
+        let allowedContentTypePrefixes: [String]
+        let requiredUploadType: String?
+    }
+
     private let pairedDeviceStore: PairedDeviceStore
     private var recentNoncesByDeviceID: [String: [String: Date]] = [:]
     private let timestampWindow: TimeInterval = 5 * 60
-    private let maxBodyBytes = 1 * 1024 * 1024
-    private let allowedContentType = "application/json"
-    private let allowedPaths: Set<String> = ["/upload-secure-test"]
+    private let pathRules: [String: PathRule] = [
+        "/upload-secure-test": PathRule(
+            maxBodyBytes: 1 * 1024 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/upload-recording-metadata": PathRule(
+            maxBodyBytes: MacRecordingFileStore.metadataMaxBytes,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: "recording-metadata"
+        ),
+        "/upload-recording-audio": PathRule(
+            maxBodyBytes: MacRecordingFileStore.audioMaxBytes,
+            allowedContentTypePrefixes: ["audio/mp4", "audio/m4a", "application/octet-stream"],
+            requiredUploadType: "recording-audio"
+        )
+    ]
 
     init(pairedDeviceStore: PairedDeviceStore) {
         self.pairedDeviceStore = pairedDeviceStore
@@ -30,11 +50,11 @@ final class RequestVerifier {
             return reject("method_not_allowed")
         }
 
-        guard allowedPaths.contains(path) else {
+        guard let pathRule = pathRules[path] else {
             return reject("path_not_allowed")
         }
 
-        guard body.count <= maxBodyBytes else {
+        guard body.count <= pathRule.maxBodyBytes else {
             return reject("body_too_large")
         }
 
@@ -42,8 +62,15 @@ final class RequestVerifier {
             result[header.key.lowercased()] = header.value
         }
 
-        guard normalizedHeaders["content-type"]?.lowercased().hasPrefix(allowedContentType) == true else {
+        let contentType = normalizedHeaders["content-type"]?.lowercased() ?? ""
+        guard pathRule.allowedContentTypePrefixes.contains(where: { contentType.hasPrefix($0) }) else {
             return reject("content_type_not_allowed")
+        }
+
+        if let requiredUploadType = pathRule.requiredUploadType {
+            guard normalizedHeaders["x-rokurics-upload-type"] == requiredUploadType else {
+                return reject("upload_type_mismatch")
+            }
         }
 
         guard

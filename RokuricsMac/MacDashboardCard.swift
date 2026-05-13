@@ -64,7 +64,7 @@ struct MacStatusPill: View {
             }
 
             Text(text)
-                .font(MacTypography.englishCaption(size: 12, weight: .semibold))
+                .font(MacTypography.pillFont(for: text, size: 12, weight: .semibold))
                 .lineLimit(1)
         }
         .foregroundStyle(tint)

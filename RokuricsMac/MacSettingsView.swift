@@ -16,27 +16,23 @@ struct MacSettingsView: View {
 
     var body: some View {
         ZStack {
-            MacTheme.pageGradient
+            MacTheme.pageGradient(for: colorScheme)
                 .ignoresSafeArea()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Settings")
-                            .font(MacTypography.englishTitle(size: 40))
-                            .foregroundStyle(MacTheme.deepText(for: colorScheme))
-
-                        Text("Local-first defaults for the Mac processing center")
-                            .font(MacTypography.englishBody(size: 14, weight: .medium))
-                            .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    }
+                    MacPageHeader(
+                        systemImage: "person.fill",
+                        title: .english("Settings"),
+                        subtitle: "Local-first defaults for the Mac processing center"
+                    )
 
                     VStack(spacing: 0) {
                         MacSettingsRow(title: "安全接收端口", value: "\(secureReceiverService.port)", systemImage: "number")
                         MacSettingsDivider()
                         MacSettingsRow(title: "HTTPS 状态", value: secureReceiverService.httpsStatusText, systemImage: "lock.shield")
                         MacSettingsDivider()
-                        MacSettingsRow(title: "Mac 指纹", value: secureReceiverService.formattedFingerprint, systemImage: "fingerprint")
+                        MacSettingsRow(title: "Mac 指纹", value: secureReceiverService.formattedFingerprint, systemImage: "lock.shield")
                         MacSettingsDivider()
                         MacSettingsRow(title: "配对设备", value: "\(secureReceiverService.pairedDeviceCount)", systemImage: "iphone.gen3")
                         MacSettingsDivider()
@@ -44,7 +40,7 @@ struct MacSettingsView: View {
                         MacSettingsDivider()
                         MacSettingsRow(title: "AI 后端", value: llmServiceConfig.provider, systemImage: "sparkles")
                         MacSettingsDivider()
-                        MacSettingsRow(title: "本地目录", value: AudioInboxStore.localRootDisplayPath, systemImage: "folder")
+                        MacSettingsRow(title: "本地目录", value: audioInboxStore.libraryRootDisplayPath, systemImage: "folder")
                         MacSettingsDivider()
                         MacSettingsRow(title: "隐私原则", value: "音频默认不上云", systemImage: "lock.shield")
                     }

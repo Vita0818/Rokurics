@@ -9,7 +9,9 @@ import SwiftUI
 
 struct RecordingLibraryView: View {
     @ObservedObject var recordingManager: RecordingManager
+    @ObservedObject var macConnectionStore: SecureMacConnectionStore
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var uploadCoordinator = RecordingUploadCoordinator()
 
     var body: some View {
         ZStack {
@@ -29,7 +31,19 @@ struct RecordingLibraryView: View {
                     ScrollView(showsIndicators: false) {
                         LazyVStack(spacing: 12) {
                             ForEach(recordingManager.recordings) { metadata in
-                                RecentRecordingRow(metadata: metadata)
+                                UploadableRecordingRow(
+                                    metadata: metadata,
+                                    uploadStatus: uploadCoordinator.displayStatus(for: metadata),
+                                    isMacPaired: macConnectionStore.isPaired,
+                                    errorMessage: uploadCoordinator.errorMessage(for: metadata),
+                                    onUpload: {
+                                        uploadCoordinator.upload(
+                                            metadata: metadata,
+                                            settings: macConnectionStore.snapshot,
+                                            recordingManager: recordingManager
+                                        )
+                                    }
+                                )
                             }
                         }
                         .padding(.horizontal, 22)
@@ -41,6 +55,7 @@ struct RecordingLibraryView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
+            macConnectionStore.refreshFromStorage()
             recordingManager.reloadRecordings()
         }
     }
@@ -95,60 +110,11 @@ struct RecordingLibraryView: View {
     }
 }
 
-private struct RecentRecordingRow: View {
-    let metadata: RecordingMetadata
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(RokuricsColors.aqua, .white.opacity(0.84))
-                .frame(width: 46, height: 46)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(metadata.title)
-                    .font(RokuricsTypography.headline(size: 16, weight: .semibold))
-                    .foregroundStyle(RokuricsColors.deepText)
-                    .lineLimit(1)
-
-                Text("\(Self.dateFormatter.string(from: metadata.createdAt)) · \(RokuricsRecordingFormat.durationText(metadata.duration)) · \(Self.fileSizeFormatter.string(fromByteCount: metadata.fileSize))")
-                    .font(RokuricsTypography.caption(size: 12, weight: .semibold))
-                    .foregroundStyle(RokuricsColors.softText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-            }
-
-            Spacer(minLength: 8)
-
-            Text("本地")
-                .font(RokuricsTypography.caption(size: 11, weight: .semibold))
-                .foregroundStyle(RokuricsColors.aqua)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .rokuricsGlassCapsule(fillOpacity: 0.32, strokeOpacity: 0.30, shadowOpacity: 0.03, shadowRadius: 5, shadowY: 2)
-        }
-        .padding(15)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .rokuricsLiquidGlassCard(cornerRadius: 24, fillOpacity: 0.38, strokeOpacity: 0.38, shadowOpacity: 0.08, shadowRadius: 12, shadowY: 7)
-    }
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = "MM-dd HH:mm"
-        return formatter
-    }()
-
-    private static let fileSizeFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB]
-        formatter.countStyle = .file
-        return formatter
-    }()
-}
-
 #Preview {
     NavigationStack {
-        RecordingLibraryView(recordingManager: RecordingManager())
+        RecordingLibraryView(
+            recordingManager: RecordingManager(),
+            macConnectionStore: SecureMacConnectionStore()
+        )
     }
 }

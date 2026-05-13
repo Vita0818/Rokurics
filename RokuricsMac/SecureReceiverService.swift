@@ -22,6 +22,7 @@ final class SecureReceiverService: ObservableObject {
     @Published private(set) var pairedDeviceCount = 0
     @Published private(set) var acceptedUploadCount = 0
     @Published private(set) var lastAcceptedFileName = "暂无"
+    @Published private(set) var lastReceivedRecordingID = "暂无"
     @Published private(set) var lastError: String?
 
     let identityManager: MacIdentityManager
@@ -29,6 +30,7 @@ final class SecureReceiverService: ObservableObject {
     let pairingManager: PairingManager
     let requestVerifier: RequestVerifier
     let receivedFileStore: ReceivedFileStore
+    let recordingFileStore: MacRecordingFileStore
 
     private var httpsServer: SecureLocalHTTPSServer?
     private let expiryFormatter: DateFormatter = {
@@ -44,12 +46,14 @@ final class SecureReceiverService: ObservableObject {
         let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
         let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
         let receivedFileStore = ReceivedFileStore()
+        let recordingFileStore = MacRecordingFileStore()
 
         self.identityManager = identityManager
         self.pairedDeviceStore = pairedDeviceStore
         self.pairingManager = pairingManager
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
+        self.recordingFileStore = recordingFileStore
 
         identityManager.loadOrCreateIdentity()
         acceptedUploadCount = receivedFileStore.savedFileCount()
@@ -76,6 +80,13 @@ final class SecureReceiverService: ObservableObject {
         pairedDeviceCount == 0 ? "未配对设备" : "\(pairedDeviceCount) 台已配对"
     }
 
+    var latestPairedDevice: PairedDevice? {
+        pairedDeviceStore.devices.sorted { first, second in
+            (first.lastSeenAt ?? first.pairedAt) > (second.lastSeenAt ?? second.pairedAt)
+        }
+        .first
+    }
+
     var tlsBlockerText: String {
         identityManager.status.tlsBlocker ?? "HTTPS 身份未就绪"
     }
@@ -97,6 +108,7 @@ final class SecureReceiverService: ObservableObject {
             pairingManager: pairingManager,
             requestVerifier: requestVerifier,
             receivedFileStore: receivedFileStore,
+            recordingFileStore: recordingFileStore,
             onReady: { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.isHTTPSRunning = true
@@ -121,6 +133,12 @@ final class SecureReceiverService: ObservableObject {
                 Task { @MainActor [weak self] in
                     self?.acceptedUploadCount = self?.receivedFileStore.savedFileCount() ?? 0
                     self?.lastAcceptedFileName = fileName
+                    self?.lastError = nil
+                }
+            },
+            onRecordingAccepted: { [weak self] recordingID in
+                Task { @MainActor [weak self] in
+                    self?.lastReceivedRecordingID = recordingID
                     self?.lastError = nil
                 }
             }
@@ -157,6 +175,13 @@ final class SecureReceiverService: ObservableObject {
         pairingManager.beginPairing()
         refreshPairingState()
         lastError = nil
+    }
+
+    func disconnectPairedDevices() {
+        pairingManager.invalidatePairing(reason: "mac_ui_disconnect")
+        pairedDeviceStore.clearAll()
+        refreshPairingState()
+        lastError = pairedDeviceStore.lastError
     }
 
     func refreshSecurityState() {

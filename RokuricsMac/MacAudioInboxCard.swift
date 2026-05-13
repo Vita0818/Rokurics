@@ -19,27 +19,28 @@ struct MacAudioInboxCard: View {
         } content: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(secureReceiverService.acceptedUploadCount)")
+                    Text("\(audioInboxStore.pendingCount)")
                         .font(MacTypography.number(size: 46))
                         .foregroundStyle(MacTheme.aqua)
                         .lineLimit(1)
 
                     Spacer()
 
-                    MacStatusPill(text: "安全测试", systemImage: "lock.doc", tint: MacTheme.leaf)
+                    MacStatusPill(text: "真实录音", systemImage: "waveform", tint: MacTheme.leaf)
                 }
 
                 Spacer(minLength: 12)
 
-                Text("仅允许已配对 HTTPS JSON")
+                Text("已配对 iPhone 上传的本地音频")
                     .font(MacTypography.chineseBody(size: 14, weight: .medium))
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
                     .lineLimit(1)
 
                 Spacer(minLength: 12)
 
-                Text(secureReceiverService.lastAcceptedFileName == "暂无" ? "HTTPS 未就绪，HTTP 已隔离" : secureReceiverService.lastAcceptedFileName)
-                    .font(MacTypography.englishCaption(size: 12, weight: .semibold))
+                let footerText = audioInboxStore.latestRecordingItem?.title ?? "HTTPS + HMAC，HTTP 已隔离"
+                Text(footerText)
+                    .font(footerText.macContainsCJK ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.englishCaption(size: 12, weight: .semibold))
                     .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
                     .lineLimit(1)
                     .truncationMode(.middle)

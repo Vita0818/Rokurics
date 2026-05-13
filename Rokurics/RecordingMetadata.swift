@@ -29,6 +29,29 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
 }
 
 extension RecordingMetadata {
+    func updatingUploadStatus(_ uploadStatus: RecordingUploadStatus) -> RecordingMetadata {
+        RecordingMetadata(
+            id: id,
+            title: title,
+            fileName: fileName,
+            relativeAudioPath: relativeAudioPath,
+            relativeMetadataPath: relativeMetadataPath,
+            createdAt: createdAt,
+            endedAt: endedAt,
+            duration: duration,
+            format: format,
+            codec: codec,
+            sampleRate: sampleRate,
+            channels: channels,
+            bitrate: bitrate,
+            fileSize: fileSize,
+            uploadStatus: uploadStatus.rawValue,
+            transcriptionStatus: transcriptionStatus,
+            noteStatus: noteStatus,
+            tags: tags
+        )
+    }
+
     static func defaultTitle(createdAt: Date) -> String {
         "录音 \(Self.titleDateFormatter.string(from: createdAt))"
     }

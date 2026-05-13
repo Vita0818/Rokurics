@@ -22,10 +22,10 @@ struct MacDashboardView: View {
 
     var body: some View {
         ZStack {
-            MacTheme.pageGradient
+            MacTheme.pageGradient(for: colorScheme)
                 .ignoresSafeArea()
 
-            ScrollView {
+            MacDetailContentContainer(maxWidth: 1180) {
                 VStack(alignment: .leading, spacing: 26) {
                     header
 
@@ -39,20 +39,20 @@ struct MacDashboardView: View {
                         MacAIProcessingCard(llmServiceConfig: llmServiceConfig)
                     }
                 }
-                .padding(.horizontal, 34)
-                .padding(.top, 30)
-                .padding(.bottom, 34)
-                .frame(maxWidth: 1180, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .scrollContentBackground(.hidden)
         }
     }
 
     private var header: some View {
-        Text("Rokurics")
-            .font(MacTypography.brandTitle(size: 42))
-            .foregroundStyle(MacTheme.deepText(for: colorScheme))
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Rokurics")
+                .font(MacTypography.englishBrand(size: 42))
+                .foregroundStyle(MacTheme.deepText(for: colorScheme))
+
+            Text("Dashboard")
+                .font(MacTypography.englishBody(size: 14, weight: .medium))
+                .foregroundStyle(MacTheme.softText(for: colorScheme))
+        }
     }
 }
 

@@ -24,7 +24,7 @@ struct MacAIProcessingCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(llmServiceConfig.provider)
-                        .font(MacTypography.chineseTitle(size: 32))
+                        .font(MacTypography.statusDisplay(for: llmServiceConfig.provider, size: 32))
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
                         .lineLimit(1)
 

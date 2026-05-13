@@ -20,6 +20,8 @@ struct SecurePairingResult {
     let deviceID: String
     let sharedSecretBase64URL: String
     let pairedAt: String
+    var macName: String = ""
+    var macModel: String = ""
 
     var deviceIDPrefix: String {
         String(deviceID.prefix(12))
@@ -32,6 +34,16 @@ struct SecurePairingResult {
 
 struct SecureUploadResult {
     let fileName: String
+}
+
+struct SecureUploadServerResponse: Decodable {
+    let ok: Bool
+    let message: String?
+    let fileName: String?
+    let recordingID: String?
+    let metadataFileName: String?
+    let audioFileName: String?
+    let error: String?
 }
 
 struct SecureHTTPSHealthCheckResult {
@@ -71,21 +83,8 @@ enum SecureMacUploadError: LocalizedError {
     }
 }
 
-final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegate, URLSessionTaskDelegate {
+final class SecureMacUploadClient: ObservableObject {
     static let isHTTPSUploadEnabled = true
-
-    private let pinningLock = NSLock()
-    private var expectedFingerprint = ""
-    private var lastPinningError: SecureMacUploadError?
-    private var didReceiveServerTrustChallenge = false
-    private var diagnosticHandler: ((String) -> Void)?
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 15
-        config.waitsForConnectivity = false
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
 
     private struct PairRequest: Encodable {
         let pairingCode: String
@@ -98,6 +97,10 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         let deviceID: String?
         let sharedSecret: String?
         let pairedAt: String?
+        let macName: String?
+        let macModel: String?
+        let macDisplayName: String?
+        let macDeviceModel: String?
         let error: String?
     }
 
@@ -106,14 +109,6 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         let message: String?
         let fileName: String?
         let error: String?
-    }
-
-    override init() {
-        super.init()
-    }
-
-    deinit {
-        session.invalidateAndCancel()
     }
 
     func healthCheck(
@@ -125,28 +120,32 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         print("[RokuricsHTTPSCheck] health check started")
         let expectedFingerprint = try normalizedExpectedFingerprint(macFingerprint)
         let url = try secureURL(host: host, port: port, path: "/health")
+        let pinnedSession = makePinnedSession(expectedFingerprint: expectedFingerprint, diagnostics: diagnostics)
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
         print("[RokuricsHTTPSCheck] url: \(url.absoluteString)")
-        preparePinning(expectedFingerprint: expectedFingerprint, diagnostics: diagnostics)
-        emitDiagnosticStep("开始连接")
-        emitDiagnosticStep("请求地址：\(url.absoluteString)")
-        emitDiagnosticStep("等待 TLS challenge")
+        pinnedSession.context.emitDiagnosticStep("开始连接")
+        pinnedSession.context.emitDiagnosticStep("请求地址：\(url.absoluteString)")
+        pinnedSession.context.emitDiagnosticStep("等待 TLS challenge")
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("close", forHTTPHeaderField: "Connection")
-        emitDiagnosticStep("已发送 /health")
+        pinnedSession.context.emitDiagnosticStep("已发送 /health")
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await pinnedSession.session.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             let responseBody = String(data: data, encoding: .utf8) ?? "<non-utf8>"
             print("[RokuricsHTTPSCheck] response status code: \(statusCode)")
             print("[RokuricsHTTPSCheck] response body: \(responseBody)")
-            emitDiagnosticStep("收到 \(statusCode)")
+            pinnedSession.context.emitDiagnosticStep("收到 \(statusCode)")
 
-            guard didReceiveTLSChallenge else {
+            guard pinnedSession.context.didReceiveTLSChallenge else {
                 let reason = "未收到 TLS challenge。"
-                emitDiagnosticStep(reason)
+                pinnedSession.context.emitDiagnosticStep(reason)
                 throw SecureMacUploadError.httpsUnavailable(reason)
             }
 
@@ -156,15 +155,15 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
 
             return SecureHTTPSHealthCheckResult(statusCode: statusCode, body: responseBody)
         } catch {
-            if let pinningError = currentPinningError {
+            if let pinningError = pinnedSession.context.currentPinningError {
                 print("[RokuricsHTTPSCheck][ERROR] \(pinningError.localizedDescription)")
-                emitDiagnosticStep("失败：\(pinningError.localizedDescription)")
+                pinnedSession.context.emitDiagnosticStep("失败：\(pinningError.localizedDescription)")
                 throw pinningError
             }
 
-            let mappedError = mapHealthCheckError(error)
+            let mappedError = mapHealthCheckError(error, context: pinnedSession.context)
             print("[RokuricsHTTPSCheck][ERROR] \(mappedError.localizedDescription)")
-            emitDiagnosticStep("失败：\(mappedError.localizedDescription)")
+            pinnedSession.context.emitDiagnosticStep("失败：\(mappedError.localizedDescription)")
             throw mappedError
         }
     }
@@ -176,7 +175,11 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
     func pair(host: String, port: Int, pairingCode: String, macFingerprint: String) async throws -> SecurePairingResult {
         let expectedFingerprint = try normalizedExpectedFingerprint(macFingerprint)
         let url = try secureURL(host: host, port: port, path: "/pair")
-        preparePinning(expectedFingerprint: expectedFingerprint, diagnostics: nil)
+        let pinnedSession = makePinnedSession(expectedFingerprint: expectedFingerprint, diagnostics: nil)
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
         let pairRequest = PairRequest(
             pairingCode: pairingCode.trimmingCharacters(in: .whitespacesAndNewlines),
             deviceName: UIDevice.current.name,
@@ -192,7 +195,7 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         print("[RokuricsPairing] pairing payload size: \(body.count)")
 
         do {
-            let (data, response) = try await session.upload(for: request, from: body)
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: body)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             print("[RokuricsPairing] response status code: \(statusCode)")
 
@@ -201,11 +204,17 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
                 throw SecureMacUploadError.serverRejected(pairResponse.error ?? "pairing_failed")
             }
 
-            let result = SecurePairingResult(deviceID: deviceID, sharedSecretBase64URL: sharedSecret, pairedAt: pairedAt)
+            let result = SecurePairingResult(
+                deviceID: deviceID,
+                sharedSecretBase64URL: sharedSecret,
+                pairedAt: pairedAt,
+                macName: pairResponse.macName ?? pairResponse.macDisplayName ?? "",
+                macModel: pairResponse.macModel ?? pairResponse.macDeviceModel ?? ""
+            )
             print("[RokuricsPairing] pairing success: deviceIDPrefix=\(result.deviceIDPrefix), secretPrefix=\(result.secretPrefix)")
             return result
         } catch {
-            if let pinningError = currentPinningError {
+            if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
             print("[RokuricsPairing] pairing error: \(error.localizedDescription)")
@@ -256,7 +265,11 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
     func uploadTestFile(settings: SecureMacConnectionSnapshot) async throws -> SecureUploadResult {
         let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
         let preparedRequest = try prepareSignedTestUpload(settings: settings)
-        preparePinning(expectedFingerprint: expectedFingerprint, diagnostics: nil)
+        let pinnedSession = makePinnedSession(expectedFingerprint: expectedFingerprint, diagnostics: nil)
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
         print("[RokuricsSecureUpload] target URL: \(preparedRequest.url.absoluteString)")
         print("[RokuricsSecureUpload] payload size: \(preparedRequest.body.count)")
         print("[RokuricsSecureUpload] request headers: \(preparedRequest.headers.keys.sorted())")
@@ -268,7 +281,7 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         }
 
         do {
-            let (data, response) = try await session.upload(for: request, from: preparedRequest.body)
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: preparedRequest.body)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             print("[RokuricsSecureUpload] response status code: \(statusCode)")
             print("[RokuricsSecureUpload] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
@@ -281,12 +294,232 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
             print("[RokuricsSecureUpload] secure upload success: \(fileName)")
             return SecureUploadResult(fileName: fileName)
         } catch {
-            if let pinningError = currentPinningError {
+            if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
             print("[RokuricsSecureUpload] errors: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    func uploadSignedData(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        body: Data,
+        contentType: String,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> SecureUploadServerResponse {
+        guard settings.isPaired else {
+            throw SecureMacUploadError.notPaired
+        }
+
+        let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
+        let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
+        let now = Date()
+        let bodySHA256 = SecureUploadUtilities.sha256Hex(body)
+        let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
+        let nonce = SecureUploadUtilities.randomBase64URLToken()
+        let signaturePayload = [
+            "POST",
+            path,
+            timestamp,
+            nonce,
+            bodySHA256
+        ].joined(separator: "\n")
+
+        guard let signature = SecureUploadUtilities.hmacSHA256Base64URL(
+            message: signaturePayload,
+            secretBase64URL: settings.sharedSecretBase64URL
+        ) else {
+            throw SecureMacUploadError.invalidSecret
+        }
+
+        let pinnedSession = makePinnedSession(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: nil,
+            requestTimeout: requestTimeout,
+            resourceTimeout: resourceTimeout
+        )
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.deviceID, forHTTPHeaderField: "X-Rokurics-Device-ID")
+        request.setValue(timestamp, forHTTPHeaderField: "X-Rokurics-Timestamp")
+        request.setValue(nonce, forHTTPHeaderField: "X-Rokurics-Nonce")
+        request.setValue(bodySHA256, forHTTPHeaderField: "X-Rokurics-Body-SHA256")
+        request.setValue(signature, forHTTPHeaderField: "X-Rokurics-Signature")
+        request.setValue(recordingID, forHTTPHeaderField: "X-Rokurics-Recording-ID")
+        request.setValue(fileName, forHTTPHeaderField: "X-Rokurics-Filename")
+        request.setValue(uploadType, forHTTPHeaderField: "X-Rokurics-Upload-Type")
+
+        print("[RokuricsRecordingUpload] target URL: \(url.absoluteString)")
+        print("[RokuricsRecordingUpload] uploadType=\(uploadType), bodySize=\(body.count), recordingIDPrefix=\(String(recordingID.prefix(12)))")
+
+        do {
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: body)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("[RokuricsRecordingUpload] response status code: \(statusCode)")
+            print("[RokuricsRecordingUpload] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
+
+            let uploadResponse = try JSONDecoder().decode(SecureUploadServerResponse.self, from: data)
+            guard uploadResponse.ok else {
+                throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "recording_upload_failed")
+            }
+
+            return uploadResponse
+        } catch {
+            if let pinningError = pinnedSession.context.currentPinningError {
+                throw pinningError
+            }
+            print("[RokuricsRecordingUpload] errors: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private struct PinnedSession {
+        let session: URLSession
+        let context: PinnedRequestContext
+        let delegate: PinnedURLSessionDelegate
+    }
+
+    private func makePinnedSession(
+        expectedFingerprint: String,
+        diagnostics: ((String) -> Void)?,
+        requestTimeout: TimeInterval = 10,
+        resourceTimeout: TimeInterval = 15
+    ) -> PinnedSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = requestTimeout
+        config.timeoutIntervalForResource = resourceTimeout
+        config.waitsForConnectivity = false
+
+        let context = PinnedRequestContext(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: diagnostics
+        )
+        let delegate = PinnedURLSessionDelegate(context: context)
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+
+        return PinnedSession(session: session, context: context, delegate: delegate)
+    }
+
+    private func secureURL(host: String, port: Int, path: String) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.port = port
+        components.path = path
+
+        guard let url = components.url else {
+            throw SecureMacUploadError.invalidURL
+        }
+
+        return url
+    }
+
+    private func normalizedExpectedFingerprint(_ fingerprint: String) throws -> String {
+        let normalized = SecureUploadUtilities.normalizedCertificateFingerprint(fingerprint)
+        guard normalized.count == 64 else {
+            throw SecureMacUploadError.invalidFingerprint
+        }
+        return normalized
+    }
+
+    private static func secureTestFileName(createdAt: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return "rokurics_secure_test_\(formatter.string(from: createdAt)).json"
+    }
+
+    private func mapHealthCheckError(_ error: Error, context: PinnedRequestContext) -> Error {
+        if let secureError = error as? SecureMacUploadError {
+            return secureError
+        }
+
+        guard let urlError = error as? URLError else {
+            return error
+        }
+
+        switch urlError.code {
+        case .timedOut where !context.didReceiveTLSChallenge:
+            return SecureMacUploadError.httpsUnavailable("连接超时，未收到 TLS challenge。")
+        case .timedOut:
+            return SecureMacUploadError.httpsUnavailable("连接超时。")
+        case .cannotConnectToHost:
+            return SecureMacUploadError.httpsUnavailable("连接被拒绝或 Mac 未监听该地址。")
+        case .notConnectedToInternet, .networkConnectionLost:
+            return SecureMacUploadError.httpsUnavailable("网络连接中断。")
+        default:
+            return urlError
+        }
+    }
+}
+
+private final class PinnedRequestContext {
+    private let lock = NSLock()
+    private let expectedFingerprint: String
+    private let diagnosticHandler: ((String) -> Void)?
+    private var pinningError: SecureMacUploadError?
+    private var receivedServerTrustChallenge = false
+
+    init(expectedFingerprint: String, diagnostics: ((String) -> Void)?) {
+        self.expectedFingerprint = expectedFingerprint
+        self.diagnosticHandler = diagnostics
+    }
+
+    var currentExpectedFingerprint: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return expectedFingerprint
+    }
+
+    var currentPinningError: SecureMacUploadError? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pinningError
+    }
+
+    var didReceiveTLSChallenge: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedServerTrustChallenge
+    }
+
+    func markServerTrustChallengeReceived() {
+        lock.lock()
+        receivedServerTrustChallenge = true
+        lock.unlock()
+    }
+
+    func setPinningError(_ error: SecureMacUploadError) {
+        lock.lock()
+        pinningError = error
+        lock.unlock()
+    }
+
+    func emitDiagnosticStep(_ step: String) {
+        lock.lock()
+        let handler = diagnosticHandler
+        lock.unlock()
+        handler?(step)
+    }
+}
+
+private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
+    private let context: PinnedRequestContext
+
+    init(context: PinnedRequestContext) {
+        self.context = context
     }
 
     func urlSession(
@@ -320,14 +553,14 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
             return
         }
 
-        markServerTrustChallengeReceived()
-        emitDiagnosticStep("已收到 TLS challenge")
+        context.markServerTrustChallengeReceived()
+        context.emitDiagnosticStep("已收到 TLS challenge")
 
         guard let serverTrust = challenge.protectionSpace.serverTrust else {
-            setPinningError(.fingerprintMismatch)
+            context.setPinningError(.fingerprintMismatch)
             print("[RokuricsPinning] fingerprint mismatch: no_server_trust")
             print("[RokuricsPinning] completionHandler cancel")
-            emitDiagnosticStep("失败：未收到 serverTrust")
+            context.emitDiagnosticStep("失败：未收到 serverTrust")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -336,10 +569,10 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         print("[RokuricsPinning] certificate count: \(certificateChain.count)")
 
         guard let certificate = certificateChain.first else {
-            setPinningError(.fingerprintMismatch)
+            context.setPinningError(.fingerprintMismatch)
             print("[RokuricsPinning] fingerprint mismatch: no_server_certificate")
             print("[RokuricsPinning] completionHandler cancel")
-            emitDiagnosticStep("失败：未收到服务器证书")
+            context.emitDiagnosticStep("失败：未收到服务器证书")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -348,125 +581,26 @@ final class SecureMacUploadClient: NSObject, ObservableObject, URLSessionDelegat
         let calculatedFingerprint = SecureUploadUtilities.normalizedCertificateFingerprint(
             SecureUploadUtilities.sha256Hex(certificateData)
         )
-        let expectedFingerprint = currentExpectedFingerprint
-        emitDiagnosticStep("已计算证书指纹")
+        let expectedFingerprint = context.currentExpectedFingerprint
+        context.emitDiagnosticStep("已计算证书指纹")
         print("[RokuricsPinning] calculated fingerprint prefix/suffix: \(calculatedFingerprint.shortFingerprintForLog)")
         print("[RokuricsPinning] expected fingerprint prefix/suffix: \(expectedFingerprint.shortFingerprintForLog)")
         print("[RokuricsPinning] normalized calculated length: \(calculatedFingerprint.count)")
         print("[RokuricsPinning] normalized expected length: \(expectedFingerprint.count)")
 
         guard calculatedFingerprint == expectedFingerprint else {
-            setPinningError(.fingerprintMismatch)
+            context.setPinningError(.fingerprintMismatch)
             print("[RokuricsPinning] fingerprint mismatch")
             print("[RokuricsPinning] completionHandler cancel")
-            emitDiagnosticStep("指纹不匹配")
+            context.emitDiagnosticStep("指纹不匹配")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
 
         print("[RokuricsPinning] fingerprint match")
         print("[RokuricsPinning] completionHandler useCredential")
-        emitDiagnosticStep("指纹匹配")
+        context.emitDiagnosticStep("指纹匹配")
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
-    }
-
-    private func secureURL(host: String, port: Int, path: String) throws -> URL {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = host
-        components.port = port
-        components.path = path
-
-        guard let url = components.url else {
-            throw SecureMacUploadError.invalidURL
-        }
-
-        return url
-    }
-
-    private func normalizedExpectedFingerprint(_ fingerprint: String) throws -> String {
-        let normalized = SecureUploadUtilities.normalizedCertificateFingerprint(fingerprint)
-        guard normalized.count == 64 else {
-            throw SecureMacUploadError.invalidFingerprint
-        }
-        return normalized
-    }
-
-    private static func secureTestFileName(createdAt: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        return "rokurics_secure_test_\(formatter.string(from: createdAt)).json"
-    }
-
-    private func preparePinning(expectedFingerprint: String, diagnostics: ((String) -> Void)?) {
-        pinningLock.lock()
-        self.expectedFingerprint = expectedFingerprint
-        self.lastPinningError = nil
-        self.didReceiveServerTrustChallenge = false
-        self.diagnosticHandler = diagnostics
-        pinningLock.unlock()
-    }
-
-    private var currentExpectedFingerprint: String {
-        pinningLock.lock()
-        defer { pinningLock.unlock() }
-        return expectedFingerprint
-    }
-
-    private var currentPinningError: SecureMacUploadError? {
-        pinningLock.lock()
-        defer { pinningLock.unlock() }
-        return lastPinningError
-    }
-
-    private var didReceiveTLSChallenge: Bool {
-        pinningLock.lock()
-        defer { pinningLock.unlock() }
-        return didReceiveServerTrustChallenge
-    }
-
-    private func setPinningError(_ error: SecureMacUploadError) {
-        pinningLock.lock()
-        lastPinningError = error
-        pinningLock.unlock()
-    }
-
-    private func markServerTrustChallengeReceived() {
-        pinningLock.lock()
-        didReceiveServerTrustChallenge = true
-        pinningLock.unlock()
-    }
-
-    private func emitDiagnosticStep(_ step: String) {
-        pinningLock.lock()
-        let handler = diagnosticHandler
-        pinningLock.unlock()
-        handler?(step)
-    }
-
-    private func mapHealthCheckError(_ error: Error) -> Error {
-        if let secureError = error as? SecureMacUploadError {
-            return secureError
-        }
-
-        guard let urlError = error as? URLError else {
-            return error
-        }
-
-        switch urlError.code {
-        case .timedOut where !didReceiveTLSChallenge:
-            return SecureMacUploadError.httpsUnavailable("连接超时，未收到 TLS challenge。")
-        case .timedOut:
-            return SecureMacUploadError.httpsUnavailable("连接超时。")
-        case .cannotConnectToHost:
-            return SecureMacUploadError.httpsUnavailable("连接被拒绝或 Mac 未监听该地址。")
-        case .notConnectedToInternet, .networkConnectionLost:
-            return SecureMacUploadError.httpsUnavailable("网络连接中断。")
-        default:
-            return urlError
-        }
     }
 }
 

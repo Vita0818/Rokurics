@@ -40,8 +40,7 @@ struct DeviceConnectionCard: View {
 
                 VStack(alignment: .trailing, spacing: 6) {
                     Text("8787")
-                        .font(RokuricsTypography.largeNumber(size: 24, weight: .bold))
-                        .monospacedDigit()
+                        .font(RokuricsTypography.technicalLarge(size: 24, weight: .bold))
                         .foregroundStyle(RokuricsColors.softTeal)
 
                     Text("端口")

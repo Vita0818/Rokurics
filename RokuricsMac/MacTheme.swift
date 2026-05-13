@@ -52,6 +52,22 @@ enum MacTheme {
             : Color(red: 0.28, green: 0.68, blue: 0.64)
     }
 
+    static func pageGradient(for colorScheme: ColorScheme) -> LinearGradient {
+        if colorScheme == .dark {
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.035, green: 0.095, blue: 0.11),
+                    Color(red: 0.055, green: 0.16, blue: 0.17),
+                    Color(red: 0.075, green: 0.12, blue: 0.16)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+
+        return pageGradient
+    }
+
     static let pageGradient = LinearGradient(
         colors: [
             Color(red: 0.95, green: 1.00, blue: 0.98),

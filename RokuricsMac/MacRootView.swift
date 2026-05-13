@@ -14,6 +14,7 @@ struct MacRootView: View {
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var llmServiceConfig = LLMServiceConfig()
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationSplitView {
@@ -33,7 +34,7 @@ struct MacRootView: View {
         }
         .navigationTitle("")
         .toolbar(removing: .title)
-        .background(MacTheme.pageGradient)
+        .background(MacTheme.pageGradient(for: colorScheme))
         .frame(minWidth: 1040, minHeight: 690)
     }
 
@@ -54,13 +55,7 @@ struct MacRootView: View {
         case .iPhoneConnection:
             MacIPhoneConnectionView(secureReceiverService: secureReceiverService)
         case .audioInbox:
-            MacPlaceholderWorkspace(
-                title: "Audio Inbox",
-                systemImage: "tray.and.arrow.down",
-                status: "\(secureReceiverService.acceptedUploadCount)",
-                caption: "只接受已配对 HTTPS 测试 JSON，真实音频稍后支持",
-                details: ["Real audio: \(audioInboxStore.pendingCount)", "Paired: \(secureReceiverService.pairedDeviceCount)"]
-            )
+            MacAudioInboxView(audioInboxStore: audioInboxStore)
         case .transcripts:
             MacPlaceholderWorkspace(
                 title: "Transcripts",
@@ -91,54 +86,170 @@ private struct MacPlaceholderWorkspace: View {
 
     var body: some View {
         ZStack {
-            MacTheme.pageGradient
+            MacTheme.pageGradient(for: colorScheme)
                 .ignoresSafeArea()
 
-            VStack(alignment: .leading, spacing: 26) {
-                HStack(spacing: 14) {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
-                        .background(MacTheme.accentGradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            MacDetailContentContainer(maxWidth: 940) {
+                VStack(alignment: .leading, spacing: 26) {
+                    MacPageHeader(
+                        systemImage: systemImage,
+                        title: .english(title),
+                        subtitle: caption
+                    )
 
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(title)
-                            .font(MacTypography.englishTitle(size: 36))
-                            .foregroundStyle(MacTheme.deepText(for: colorScheme))
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text(status)
+                            .font(MacTypography.statusDisplay(for: status, size: 44))
+                            .foregroundStyle(MacTheme.aqua)
 
-                        Text(caption)
-                            .font(MacTypography.chineseBody(size: 14))
-                            .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(status)
-                        .font(MacTypography.number(size: 44))
-                        .foregroundStyle(MacTheme.aqua)
-
-                    HStack(spacing: 10) {
-                        ForEach(details, id: \.self) { detail in
-                            Text(detail)
-                                .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
-                                .foregroundStyle(MacTheme.softText(for: colorScheme))
-                                .lineLimit(1)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .macGlassCapsule(fillOpacity: 0.34, strokeOpacity: 0.32)
+                        HStack(spacing: 10) {
+                            ForEach(details, id: \.self) { detail in
+                                MacDetailPillText(text: detail)
+                            }
                         }
                     }
-                }
-                .padding(26)
-                .frame(maxWidth: 560, alignment: .leading)
-                .macLiquidGlassCard(cornerRadius: 28, material: .thinMaterial)
+                    .padding(26)
+                    .frame(maxWidth: 560, alignment: .leading)
+                    .macLiquidGlassCard(cornerRadius: 28, material: .thinMaterial)
 
-                Spacer()
+                    Spacer()
+                }
             }
-            .padding(34)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+}
+
+struct MacDetailContentContainer<Content: View>: View {
+    var maxWidth: CGFloat = 1180
+    var horizontalPadding: CGFloat = 34
+    var topPadding: CGFloat = 30
+    var bottomPadding: CGFloat = 34
+    let content: Content
+
+    init(
+        maxWidth: CGFloat = 1180,
+        horizontalPadding: CGFloat = 34,
+        topPadding: CGFloat = 30,
+        bottomPadding: CGFloat = 34,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.maxWidth = maxWidth
+        self.horizontalPadding = horizontalPadding
+        self.topPadding = topPadding
+        self.bottomPadding = bottomPadding
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                content
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.top, topPadding)
+                    .padding(.bottom, bottomPadding)
+                    .frame(maxWidth: maxWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(minHeight: proxy.size.height, alignment: .top)
+            }
+            .scrollContentBackground(.hidden)
+        }
+    }
+}
+
+struct MacPageHeader: View {
+    enum Title {
+        case english(String)
+        case brand(String)
+        case mixed(english: String, chinese: String)
+    }
+
+    let systemImage: String
+    let title: Title
+    let subtitle: String?
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Image(systemName: systemImage)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 54, height: 54)
+                .background(MacTheme.accentGradient, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 6) {
+                titleView
+
+                if let subtitle {
+                    MacMixedCaptionText(text: subtitle)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var titleView: some View {
+        switch title {
+        case .english(let value):
+            Text(value)
+                .font(MacTypography.englishLargeTitle(size: 40))
+                .foregroundStyle(MacTheme.deepText(for: colorScheme))
+        case .brand(let value):
+            Text(value)
+                .font(MacTypography.englishBrand(size: 42))
+                .foregroundStyle(MacTheme.deepText(for: colorScheme))
+        case .mixed(let english, let chinese):
+            MacMixedLanguageTitle(english: english, chinese: chinese, englishSize: 40, chineseSize: 38)
+                .foregroundStyle(MacTheme.deepText(for: colorScheme))
+        }
+    }
+}
+
+private struct MacMixedCaptionText: View {
+    let text: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        if let supportRange = text.range(of: "稍后支持") {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(String(text[..<supportRange.lowerBound]).trimmingCharacters(in: .whitespaces))
+                    .font(MacTypography.englishBody(size: 14, weight: .medium))
+
+                Text("稍后支持")
+                    .font(MacTypography.chineseBody(size: 14, weight: .medium))
+            }
+            .foregroundStyle(MacTheme.softText(for: colorScheme))
+        } else {
+            Text(text)
+                .font(text.macContainsCJK ? MacTypography.chineseBody(size: 14) : MacTypography.englishBody(size: 14))
+                .foregroundStyle(MacTheme.softText(for: colorScheme))
+        }
+    }
+}
+
+private struct MacDetailPillText: View {
+    let text: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            if let colonIndex = text.firstIndex(of: ":") {
+                let label = String(text[...colonIndex])
+                let value = String(text[text.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                Text(label)
+                    .font(MacTypography.englishCaption(size: 12, weight: .semibold))
+
+                Text(value)
+                    .font(value.macContainsCJK ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.numberBody(size: 12, weight: .semibold))
+            } else {
+                Text(text)
+                    .font(MacTypography.pillFont(for: text, size: 12, weight: .semibold))
+            }
+        }
+        .foregroundStyle(MacTheme.softText(for: colorScheme))
+        .lineLimit(1)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .macGlassCapsule(fillOpacity: 0.34, strokeOpacity: 0.32)
     }
 }
 

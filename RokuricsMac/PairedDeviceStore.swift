@@ -70,6 +70,11 @@ final class PairedDeviceStore: ObservableObject {
         save()
     }
 
+    func clearAll() {
+        devices.removeAll()
+        save()
+    }
+
     private func load() {
         do {
             try fileManager.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)

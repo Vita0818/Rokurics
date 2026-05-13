@@ -7,6 +7,7 @@
 
 import Foundation
 import Network
+import SystemConfiguration
 
 enum SecureHTTPSServerError: LocalizedError {
     case tlsIdentityUnavailable(String)
@@ -24,6 +25,7 @@ final class SecureLocalHTTPSServer {
     typealias FailedHandler = @Sendable (String) -> Void
     typealias PairingChangedHandler = @Sendable () -> Void
     typealias UploadAcceptedHandler = @Sendable (String) -> Void
+    typealias RecordingAcceptedHandler = @Sendable (String) -> Void
 
     private struct HTTPRequest {
         let method: String
@@ -49,6 +51,8 @@ final class SecureLocalHTTPSServer {
         let deviceID: String
         let sharedSecret: String
         let pairedAt: String
+        let macName: String
+        let macModel: String?
     }
 
     private struct HealthResponse: Encodable {
@@ -74,18 +78,29 @@ final class SecureLocalHTTPSServer {
         let fileName: String
     }
 
+    private struct RecordingUploadSuccessResponse: Encodable {
+        let ok: Bool
+        let message: String
+        let recordingID: String
+        let metadataFileName: String?
+        let audioFileName: String?
+        let receiveFileName: String
+    }
+
     private let port: Int
     private let identityManager: MacIdentityManager
     private let pairingManager: PairingManager
     private let requestVerifier: RequestVerifier
     private let receivedFileStore: ReceivedFileStore
+    private let recordingFileStore: MacRecordingFileStore
     private let onReady: ReadyHandler
     private let onFailed: FailedHandler
     private let onPairingChanged: PairingChangedHandler
     private let onUploadAccepted: UploadAcceptedHandler
+    private let onRecordingAccepted: RecordingAcceptedHandler
     private let queue = DispatchQueue(label: "RokuricsMac.SecureLocalHTTPSServer")
     private let maxHeaderBytes = 16 * 1024
-    private let maxBodyBytes = 1 * 1024 * 1024
+    private let maxAllowedBodyBytes = MacRecordingFileStore.audioMaxBytes
     private var listener: NWListener?
     private var activeConnections: [UUID: NWConnection] = [:]
 
@@ -95,20 +110,24 @@ final class SecureLocalHTTPSServer {
         pairingManager: PairingManager,
         requestVerifier: RequestVerifier,
         receivedFileStore: ReceivedFileStore,
+        recordingFileStore: MacRecordingFileStore,
         onReady: @escaping ReadyHandler,
         onFailed: @escaping FailedHandler,
         onPairingChanged: @escaping PairingChangedHandler,
-        onUploadAccepted: @escaping UploadAcceptedHandler
+        onUploadAccepted: @escaping UploadAcceptedHandler,
+        onRecordingAccepted: @escaping RecordingAcceptedHandler
     ) {
         self.port = port
         self.identityManager = identityManager
         self.pairingManager = pairingManager
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
+        self.recordingFileStore = recordingFileStore
         self.onReady = onReady
         self.onFailed = onFailed
         self.onPairingChanged = onPairingChanged
         self.onUploadAccepted = onUploadAccepted
+        self.onRecordingAccepted = onRecordingAccepted
     }
 
     func start() throws {
@@ -215,7 +234,7 @@ final class SecureLocalHTTPSServer {
                 nextBuffer.append(chunk)
             }
 
-            if nextBuffer.count > self.maxHeaderBytes + self.maxBodyBytes {
+            if nextBuffer.count > self.maxHeaderBytes + self.maxAllowedBodyBytes {
                 self.sendError(statusCode: 413, reason: "Payload Too Large", error: "body_too_large", on: connection)
                 return
             }
@@ -224,7 +243,11 @@ final class SecureLocalHTTPSServer {
             case .complete(let request):
                 self.handleRequest(request, on: connection)
             case .invalid(let reason):
-                self.sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+                if reason == "body_too_large" {
+                    self.sendError(statusCode: 413, reason: "Payload Too Large", error: reason, on: connection)
+                } else {
+                    self.sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+                }
             case .incomplete:
                 if isComplete {
                     self.sendError(statusCode: 400, reason: "Bad Request", error: "bad_request", on: connection)
@@ -275,19 +298,19 @@ final class SecureLocalHTTPSServer {
             return .invalid("bad_content_length")
         }
 
-        guard contentLength <= maxBodyBytes else {
+        let bodyStart = headerRange.upperBound
+        let rawPath = requestParts[1]
+        let path = rawPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? rawPath
+        print("[RokuricsHTTPS] request path: \(path)")
+
+        guard contentLength <= bodyLimit(for: path) else {
             return .invalid("body_too_large")
         }
 
-        let bodyStart = headerRange.upperBound
         let bodyEnd = bodyStart + contentLength
         guard buffer.count >= bodyEnd else {
             return .incomplete
         }
-
-        let rawPath = requestParts[1]
-        let path = rawPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? rawPath
-        print("[RokuricsHTTPS] request path: \(path)")
 
         return .complete(HTTPRequest(
             method: requestParts[0],
@@ -320,6 +343,14 @@ final class SecureLocalHTTPSServer {
         case ("POST", "/upload-secure-test"):
             Task { @MainActor [weak self] in
                 self?.handleSecureUploadRequest(request, on: connection)
+            }
+        case ("POST", "/upload-recording-metadata"):
+            Task { @MainActor [weak self] in
+                self?.handleRecordingMetadataUploadRequest(request, on: connection)
+            }
+        case ("POST", "/upload-recording-audio"):
+            Task { @MainActor [weak self] in
+                self?.handleRecordingAudioUploadRequest(request, on: connection)
             }
         default:
             if request.method != "GET" && request.method != "POST" {
@@ -365,7 +396,9 @@ final class SecureLocalHTTPSServer {
                     ok: true,
                     deviceID: result.device.id,
                     sharedSecret: result.sharedSecretBase64URL,
-                    pairedAt: ISO8601DateFormatter().string(from: result.device.pairedAt)
+                    pairedAt: ISO8601DateFormatter().string(from: result.device.pairedAt),
+                    macName: MacSystemInfoProvider.macName,
+                    macModel: MacSystemInfoProvider.macModel
                 ),
                 on: connection
             )
@@ -399,6 +432,90 @@ final class SecureLocalHTTPSServer {
         case .rejected(let reason):
             print("[RokuricsSecureUpload] upload rejected: \(reason)")
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleRecordingMetadataUploadRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        print("[RokuricsRecordingUpload] metadata upload request received")
+
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let metadata = try Self.recordingMetadataDecoder.decode(IncomingRecordingMetadata.self, from: request.body)
+                let result = try recordingFileStore.saveMetadata(metadata, sourceDevice: device)
+                onRecordingAccepted(result.recordingID)
+                print("[RokuricsRecordingUpload] metadata accepted: \(result.recordingID)")
+                sendJSON(
+                    statusCode: 200,
+                    reason: "OK",
+                    body: RecordingUploadSuccessResponse(
+                        ok: true,
+                        message: "recording metadata received",
+                        recordingID: result.recordingID,
+                        metadataFileName: result.metadataFileName,
+                        audioFileName: result.audioFileName,
+                        receiveFileName: result.receiveFileName
+                    ),
+                    on: connection
+                )
+            } catch let error as MacRecordingFileStoreError {
+                print("[RokuricsRecordingUpload] metadata rejected: \(error.localizedDescription)")
+                sendError(statusCode: error.responseStatusCode, reason: error.responseReason, error: error.localizedDescription, on: connection)
+            } catch {
+                print("[RokuricsRecordingUpload] metadata rejected: bad_metadata")
+                sendError(statusCode: 400, reason: "Bad Request", error: "bad_metadata", on: connection)
+            }
+        case .rejected(let reason):
+            print("[RokuricsRecordingUpload] metadata rejected: \(reason)")
+            sendError(statusCode: reason == "body_too_large" ? 413 : 400, reason: reason == "body_too_large" ? "Payload Too Large" : "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleRecordingAudioUploadRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        print("[RokuricsRecordingUpload] audio upload request received")
+
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let headers = Self.normalizedHeaders(request.headers)
+                guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    sendError(statusCode: 400, reason: "Bad Request", error: "missing_recording_id", on: connection)
+                    return
+                }
+
+                let result = try recordingFileStore.saveAudio(
+                    body: request.body,
+                    recordingID: recordingID,
+                    requestedFileName: headers["x-rokurics-filename"],
+                    sourceDevice: device
+                )
+                onRecordingAccepted(result.recordingID)
+                print("[RokuricsRecordingUpload] audio accepted: \(result.recordingID)")
+                sendJSON(
+                    statusCode: 200,
+                    reason: "OK",
+                    body: RecordingUploadSuccessResponse(
+                        ok: true,
+                        message: "recording audio received",
+                        recordingID: result.recordingID,
+                        metadataFileName: result.metadataFileName,
+                        audioFileName: result.audioFileName,
+                        receiveFileName: result.receiveFileName
+                    ),
+                    on: connection
+                )
+            } catch let error as MacRecordingFileStoreError {
+                print("[RokuricsRecordingUpload] audio rejected: \(error.localizedDescription)")
+                sendError(statusCode: error.responseStatusCode, reason: error.responseReason, error: error.localizedDescription, on: connection)
+            } catch {
+                print("[RokuricsRecordingUpload] audio rejected: audio_storage_failed")
+                sendError(statusCode: 500, reason: "Internal Server Error", error: "audio_storage_failed", on: connection)
+            }
+        case .rejected(let reason):
+            print("[RokuricsRecordingUpload] audio rejected: \(reason)")
+            sendError(statusCode: reason == "body_too_large" ? 413 : 400, reason: reason == "body_too_large" ? "Payload Too Large" : "Bad Request", error: reason, on: connection)
         }
     }
 
@@ -441,5 +558,72 @@ final class SecureLocalHTTPSServer {
         headers.reduce(into: [String: String]()) { result, header in
             result[header.key.lowercased()] = header.value
         }
+    }
+
+    private func bodyLimit(for path: String) -> Int {
+        switch path {
+        case "/upload-recording-audio":
+            return MacRecordingFileStore.audioMaxBytes
+        default:
+            return 1 * 1024 * 1024
+        }
+    }
+
+    private static let recordingMetadataDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}
+
+private enum MacSystemInfoProvider {
+    static var macName: String {
+        [
+            computerName(),
+            Host.current().localizedName,
+            sanitizedHostName(ProcessInfo.processInfo.hostName)
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+    }
+
+    static var macModel: String? {
+        let normalizedName = macName.lowercased()
+
+        if normalizedName.contains("macbook pro") {
+            return "MacBook Pro"
+        }
+
+        if normalizedName.contains("macbook air") {
+            return "MacBook Air"
+        }
+
+        if normalizedName.contains("macbook") {
+            return "MacBook"
+        }
+
+        if normalizedName.contains("imac") {
+            return "iMac"
+        }
+
+        if normalizedName.contains("mac mini") || normalizedName.contains("mac-mini") {
+            return "Mac mini"
+        }
+
+        if normalizedName.contains("mac studio") || normalizedName.contains("mac-studio") {
+            return "Mac Studio"
+        }
+
+        return nil
+    }
+
+    private static func computerName() -> String? {
+        SCDynamicStoreCopyComputerName(nil, nil) as String?
+    }
+
+    private static func sanitizedHostName(_ hostName: String) -> String {
+        hostName
+            .replacingOccurrences(of: ".local", with: "")
+            .replacingOccurrences(of: "-", with: " ")
     }
 }

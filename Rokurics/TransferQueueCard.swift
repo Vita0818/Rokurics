@@ -8,11 +8,19 @@
 import SwiftUI
 
 struct TransferQueueCard: View {
+    let pendingUploadCount: Int
+    let completedUploadCount: Int
+
+    init(pendingUploadCount: Int = 0, completedUploadCount: Int = 0) {
+        self.pendingUploadCount = pendingUploadCount
+        self.completedUploadCount = completedUploadCount
+    }
+
     var body: some View {
         RokuricsDashboardCard(title: "本地传输队列", systemImage: "arrow.triangle.2.circlepath") {
             HStack(spacing: 10) {
-                RokuricsMetricTile(title: "待传输", value: "0", tint: RokuricsColors.aqua)
-                RokuricsMetricTile(title: "已完成", value: "0", tint: RokuricsColors.mint)
+                RokuricsMetricTile(title: "待传输", value: "\(pendingUploadCount)", tint: RokuricsColors.aqua)
+                RokuricsMetricTile(title: "已完成", value: "\(completedUploadCount)", tint: RokuricsColors.mint)
             }
 
             HStack(spacing: 10) {
