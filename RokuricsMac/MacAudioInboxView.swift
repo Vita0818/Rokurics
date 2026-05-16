@@ -31,6 +31,11 @@ struct MacAudioInboxView: View {
                         MacInboxMetricPill(title: "已转写", value: "\(audioInboxStore.transcribedCount)", tint: MacTheme.leaf)
                     }
 
+                    Text("调试标记：1848")
+                        .font(MacTypography.chineseCaption(size: 10, weight: .medium))
+                        .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
+                        .opacity(0.64)
+
                     if audioInboxStore.recordingItems.isEmpty {
                         Text("暂无收到的录音")
                             .font(MacTypography.chineseBody(size: 15, weight: .medium))
@@ -96,6 +101,7 @@ private struct MacAudioInboxListRow: View {
             title: item.title,
             dateTimeText: Self.dateTimeFormatter.string(from: item.receivedAt),
             durationText: durationText(item.duration),
+            diagnosticText: item.failureReasonSummary,
             layout: .regular
         ) {
             HStack(spacing: 8) {
@@ -174,6 +180,7 @@ private struct RecordingRowContent<Trailing: View>: View {
     let title: String
     let dateTimeText: String
     let durationText: String
+    let diagnosticText: String?
     let layout: RecordingRowLayout
     private let trailing: Trailing
     @Environment(\.colorScheme) private var colorScheme
@@ -182,12 +189,14 @@ private struct RecordingRowContent<Trailing: View>: View {
         title: String,
         dateTimeText: String,
         durationText: String,
+        diagnosticText: String? = nil,
         layout: RecordingRowLayout,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.title = title
         self.dateTimeText = dateTimeText
         self.durationText = durationText
+        self.diagnosticText = diagnosticText
         self.layout = layout
         self.trailing = trailing()
     }
@@ -208,6 +217,15 @@ private struct RecordingRowContent<Trailing: View>: View {
                 )
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
                 .lineLimit(1)
+
+                if let diagnosticText {
+                    Text(diagnosticText)
+                        .font(MacTypography.chineseCaption(size: 11, weight: .medium))
+                        .foregroundStyle(MacTheme.coral.opacity(0.82))
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .help(diagnosticText)
+                }
             }
             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
 

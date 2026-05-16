@@ -161,6 +161,7 @@
 				58A089A52FB050430065EF5A /* Sources */,
 				58A089A62FB050430065EF5A /* Frameworks */,
 				58A089A72FB050430065EF5A /* Resources */,
+				58B148001848000000000001 /* Embed whisper.cpp Helper */,
 			);
 			buildRules = (
 			);
@@ -393,6 +394,52 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		58B148001848000000000001 /* Embed whisper.cpp Helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed_whisper_helper.sh",
+				/Users/vita/ThirdParty/whisper.cpp/build/bin/whisper-cli,
+				/Users/vita/ThirdParty/whisper.cpp/build/src/libwhisper.1.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/src/libwhisper.1.8.4.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml.0.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml.0.10.2.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml-base.0.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml-base.0.10.2.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml-cpu.0.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/libggml-cpu.0.10.2.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/ggml-blas/libggml-blas.0.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/ggml-blas/libggml-blas.0.10.2.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/ggml-metal/libggml-metal.0.dylib,
+				/Users/vita/ThirdParty/whisper.cpp/build/ggml/src/ggml-metal/libggml-metal.0.10.2.dylib,
+			);
+			name = "Embed whisper.cpp Helper";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/rokurics-whisper",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libwhisper.1.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libggml.0.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libggml-base.0.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libggml-cpu.0.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libggml-blas.0.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Whisper/libggml-metal.0.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/Scripts/embed_whisper_helper.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		58A089A52FB050430065EF5A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -467,6 +514,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RokuricsMac/RokuricsMac.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -484,6 +532,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -511,6 +560,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RokuricsMac/RokuricsMac.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -528,6 +578,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";

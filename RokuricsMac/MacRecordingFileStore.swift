@@ -424,6 +424,7 @@ final class MacRecordingFileStore {
             )
             postInboxChanged()
             print("[RokuricsRecordingStore] transcription status updated: \(recordingID) -> \(status)")
+            debugLogTranscriptionStatusUpdate(receiveURL: receiveURL, recordingID: recordingID, status: status, errorMessage: errorMessage)
         } catch let error as MacRecordingFileStoreError {
             throw error
         } catch {
@@ -585,6 +586,23 @@ final class MacRecordingFileStore {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: Self.inboxDidChangeNotification, object: nil)
         }
+    }
+
+    private func debugLogTranscriptionStatusUpdate(
+        receiveURL: URL,
+        recordingID: String,
+        status: String,
+        errorMessage: String?
+    ) {
+        #if DEBUG
+        print(
+            "[RokuricsRecordingStore] receive.json updated: " +
+            "recordingID=\(recordingID), " +
+            "status=\(status), " +
+            "receiveJSON=\(receiveURL.path), " +
+            "errorSummary=\(errorMessage.map { String($0.prefix(1000)) } ?? "nil")"
+        )
+        #endif
     }
 
     private static let dayFormatter: DateFormatter = {
