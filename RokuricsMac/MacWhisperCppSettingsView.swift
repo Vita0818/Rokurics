@@ -33,7 +33,7 @@ struct MacWhisperCppSettingsView: View {
                         .font(MacTypography.chineseCaption(size: 12, weight: .medium))
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
 
-                    Text("调试标记：1848")
+                    Text("调试标记：1110")
                         .font(MacTypography.chineseCaption(size: 10, weight: .medium))
                         .foregroundStyle(MacTheme.softText(for: colorScheme).opacity(0.68))
                 }

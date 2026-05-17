@@ -13,8 +13,10 @@ enum AudioFileStoreError: LocalizedError {
     case fileRemovalFailed(URL, Error)
     case pathOutsideRokuricsDirectory(URL)
     case fileAttributesFailed(URL, Error)
+    case metadataReadFailed(URL, Error)
     case metadataWriteFailed(URL, Error)
     case metadataDirectoryReadFailed(URL, Error)
+    case recordingNotFound(String)
 
     var errorDescription: String? {
         switch self {
@@ -28,27 +30,45 @@ enum AudioFileStoreError: LocalizedError {
             return "文件不在 Rokurics 本地目录中：\(url.path)"
         case let .fileAttributesFailed(url, error):
             return "读取文件信息失败：\(url.path) - \(error.localizedDescription)"
+        case let .metadataReadFailed(url, error):
+            return "metadata 读取失败：\(url.path) - \(error.localizedDescription)"
         case let .metadataWriteFailed(url, error):
             return "metadata 写入失败：\(url.path) - \(error.localizedDescription)"
         case let .metadataDirectoryReadFailed(url, error):
             return "metadata 目录读取失败：\(url.path) - \(error.localizedDescription)"
+        case let .recordingNotFound(id):
+            return "未找到录音：\(id)"
         }
     }
 }
 
 struct AudioFileStore {
     private let fileManager: FileManager
+    private let rootDirectoryOverride: URL?
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, rootDirectoryURL: URL? = nil) {
         self.fileManager = fileManager
+        rootDirectoryOverride = rootDirectoryURL?.standardizedFileURL
     }
 
     func baseDirectory() throws -> URL {
+        if let rootDirectoryOverride {
+            do {
+                try fileManager.createDirectory(at: rootDirectoryOverride, withIntermediateDirectories: true)
+            } catch {
+                throw AudioFileStoreError.directoryCreationFailed(rootDirectoryOverride, error)
+            }
+
+            return rootDirectoryOverride
+        }
+
         guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
             throw AudioFileStoreError.documentsDirectoryUnavailable
         }
 
-        let directoryURL = documentsURL.appendingPathComponent("Rokurics", isDirectory: true)
+        let directoryURL = documentsURL
+            .appendingPathComponent("Rokurics", isDirectory: true)
+            .standardizedFileURL
 
         do {
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
@@ -101,9 +121,16 @@ struct AudioFileStore {
     }
 
     func makeMetadataURL(id: String) throws -> URL {
-        try metadataDirectory()
+        let url = try metadataDirectory()
             .appendingPathComponent(id)
             .appendingPathExtension("json")
+            .standardizedFileURL
+
+        guard try isInsideBaseDirectory(url) else {
+            throw AudioFileStoreError.pathOutsideRokuricsDirectory(url)
+        }
+
+        return url
     }
 
     func fileExists(at url: URL) -> Bool {
@@ -121,6 +148,10 @@ struct AudioFileStore {
     }
 
     func removeFileIfExists(at url: URL) throws {
+        guard try isInsideBaseDirectory(url) else {
+            throw AudioFileStoreError.pathOutsideRokuricsDirectory(url)
+        }
+
         guard fileExists(at: url) else {
             return
         }
@@ -180,11 +211,80 @@ struct AudioFileStore {
         try saveMetadata(metadata)
     }
 
-    func audioURL(for metadata: RecordingMetadata) throws -> URL {
-        try baseDirectory().appendingPathComponent(metadata.relativeAudioPath)
+    func loadMetadata(id: String) throws -> RecordingMetadata {
+        let metadataURL = try makeMetadataURL(id: id)
+        guard fileExists(at: metadataURL) else {
+            throw AudioFileStoreError.recordingNotFound(id)
+        }
+
+        do {
+            let data = try Data(contentsOf: metadataURL)
+            return try Self.metadataDecoder.decode(RecordingMetadata.self, from: data)
+        } catch {
+            throw AudioFileStoreError.metadataReadFailed(metadataURL, error)
+        }
     }
 
-    func loadAllMetadata() throws -> [RecordingMetadata] {
+    func updateTitle(recordingID: String, rawTitle: String) throws -> RecordingMetadata {
+        let metadata = try loadMetadata(id: recordingID)
+        let title = RecordingTitleEditRules.normalizedTitle(rawTitle, fallback: metadata.title)
+        let updatedMetadata = metadata.updatingTitle(title)
+        try saveMetadata(updatedMetadata)
+        return updatedMetadata
+    }
+
+    func deleteRecording(id: String) throws {
+        _ = try moveRecordingToTrash(id: id)
+    }
+
+    @discardableResult
+    func moveRecordingToTrash(id: String) throws -> RecordingMetadata {
+        let metadata = try loadMetadata(id: id)
+        return try moveRecordingToTrash(metadata)
+    }
+
+    @discardableResult
+    func moveRecordingToTrash(_ metadata: RecordingMetadata, deletedAt: Date = Date()) throws -> RecordingMetadata {
+        let updatedMetadata = metadata.updatingTrashState(isDeleted: true, deletedAt: deletedAt)
+        try saveMetadata(updatedMetadata)
+        return updatedMetadata
+    }
+
+    @discardableResult
+    func restoreRecording(id: String) throws -> RecordingMetadata {
+        let metadata = try loadMetadata(id: id)
+        let updatedMetadata = metadata.updatingTrashState(isDeleted: false, deletedAt: nil)
+        try saveMetadata(updatedMetadata)
+        return updatedMetadata
+    }
+
+    func deleteRecording(_ metadata: RecordingMetadata) throws {
+        try moveRecordingToTrash(metadata)
+    }
+
+    func permanentlyDeleteRecording(id: String) throws {
+        let metadata = try loadMetadata(id: id)
+        try permanentlyDeleteRecording(metadata)
+    }
+
+    func permanentlyDeleteRecording(_ metadata: RecordingMetadata) throws {
+        let audioURL = try localFileURL(relativePath: metadata.relativeAudioPath)
+        let metadataURL = try localFileURL(relativePath: metadata.relativeMetadataPath)
+
+        guard try isInsideBaseDirectory(audioURL),
+              try isInsideBaseDirectory(metadataURL) else {
+            throw AudioFileStoreError.pathOutsideRokuricsDirectory(audioURL)
+        }
+
+        try removeFileIfExists(at: audioURL)
+        try removeFileIfExists(at: metadataURL)
+    }
+
+    func audioURL(for metadata: RecordingMetadata) throws -> URL {
+        try localFileURL(relativePath: metadata.relativeAudioPath)
+    }
+
+    func loadAllMetadata(includeDeleted: Bool = false) throws -> [RecordingMetadata] {
         let metadataURL = try metadataDirectory()
         storageLog("metadata directory: \(metadataURL.path)")
 
@@ -211,10 +311,17 @@ struct AudioFileStore {
                     return nil
                 }
             }
+            .filter { includeDeleted || !$0.isDeleted }
             .sorted { $0.createdAt > $1.createdAt }
 
         storageLog("loaded recordings count: \(recordings.count)")
         return recordings
+    }
+
+    func loadTrashedMetadata() throws -> [RecordingMetadata] {
+        try loadAllMetadata(includeDeleted: true)
+            .filter(\.isDeleted)
+            .sorted { ($0.deletedAt ?? $0.createdAt) > ($1.deletedAt ?? $1.createdAt) }
     }
 
     func latestMetadata() throws -> RecordingMetadata? {
@@ -227,6 +334,25 @@ struct AudioFileStore {
 
     private func errorLog(_ message: String) {
         print("[RokuricsStorage][ERROR] \(message)")
+    }
+
+    private func localFileURL(relativePath: String) throws -> URL {
+        let url = try baseDirectory()
+            .appendingPathComponent(relativePath, isDirectory: false)
+            .standardizedFileURL
+
+        guard try isInsideBaseDirectory(url) else {
+            throw AudioFileStoreError.pathOutsideRokuricsDirectory(url)
+        }
+
+        return url
+    }
+
+    private func isInsideBaseDirectory(_ url: URL) throws -> Bool {
+        let baseURL = try baseDirectory().standardizedFileURL
+        let basePath = baseURL.path
+        let filePath = url.standardizedFileURL.path
+        return filePath == basePath || filePath.hasPrefix(basePath + "/")
     }
 
     private static let fileDateFormatter: DateFormatter = {

@@ -16,11 +16,53 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     let sourceDeviceName: String
     let transcriptionStatus: String
     let noteStatus: String
+    let noteRelativePath: String?
+    let noteError: String?
     let receiveStatus: String
     let hasAudio: Bool
     let transcriptRelativePath: String?
     let transcriptMarkdownRelativePath: String?
     let transcriptionError: String?
+    let isDeleted: Bool
+    let deletedAt: Date?
+
+    init(
+        id: String,
+        title: String,
+        receivedAt: Date,
+        duration: TimeInterval,
+        fileSize: Int64,
+        sourceDeviceName: String,
+        transcriptionStatus: String,
+        noteStatus: String,
+        receiveStatus: String,
+        hasAudio: Bool,
+        transcriptRelativePath: String?,
+        transcriptMarkdownRelativePath: String?,
+        transcriptionError: String?,
+        isDeleted: Bool = false,
+        deletedAt: Date? = nil,
+        noteRelativePath: String? = nil,
+        noteError: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.receivedAt = receivedAt
+        self.duration = duration
+        self.fileSize = fileSize
+        self.sourceDeviceName = sourceDeviceName
+        self.transcriptionStatus = transcriptionStatus
+        self.noteStatus = RecordingReceiveRecord.normalizedNoteStatus(noteStatus)
+        self.noteRelativePath = noteRelativePath
+        self.noteError = noteError
+        self.receiveStatus = receiveStatus
+        self.hasAudio = hasAudio
+        self.transcriptRelativePath = transcriptRelativePath
+        self.transcriptMarkdownRelativePath = transcriptMarkdownRelativePath
+        self.transcriptionError = transcriptionError
+        self.isDeleted = isDeleted
+        self.deletedAt = deletedAt
+    }
 
     var statusText: String {
         switch transcriptionStatus {
@@ -53,6 +95,22 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
 
     var isTranscriptionActive: Bool {
         transcriptionStatus == "queued" || transcriptionStatus == "transcribing"
+    }
+
+    var isNoteGenerating: Bool {
+        noteStatus == "generating"
+    }
+
+    var isNoteGenerated: Bool {
+        noteStatus == "generated" && noteRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    var isNoteFailed: Bool {
+        noteStatus == "failed"
+    }
+
+    var canStartNoteGeneration: Bool {
+        isTranscribed && !isNoteGenerating
     }
 
     var failureReasonSummary: String? {

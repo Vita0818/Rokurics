@@ -12,7 +12,7 @@ struct MacSettingsView: View {
     @ObservedObject var audioInboxStore: AudioInboxStore
     @ObservedObject var transcriptionQueue: TranscriptionQueue
     @ObservedObject var transcriptionSettingsStore: TranscriptionSettingsStore
-    @ObservedObject var llmServiceConfig: LLMServiceConfig
+    @ObservedObject var noteGenerationSettingsStore: NoteGenerationSettingsStore
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -39,7 +39,7 @@ struct MacSettingsView: View {
                         MacSettingsDivider()
                         MacSettingsRow(title: "转写 Provider", value: transcriptionSettingsStore.selectedProviderDisplayName, systemImage: "waveform.and.magnifyingglass")
                         MacSettingsDivider()
-                        MacSettingsRow(title: "AI 后端", value: llmServiceConfig.provider, systemImage: "sparkles")
+                        MacSettingsRow(title: "AI 后端", value: noteGenerationSettingsStore.selectedProviderDisplayName, systemImage: "sparkles")
                         MacSettingsDivider()
                         MacSettingsRow(title: "本地目录", value: audioInboxStore.libraryRootDisplayPath, systemImage: "folder")
                         MacSettingsDivider()
@@ -54,7 +54,7 @@ struct MacSettingsView: View {
                             .font(MacTypography.englishCaption(size: 12, weight: .semibold))
                             .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
 
-                        Text(llmServiceConfig.endpoint)
+                        Text(noteGenerationSettingsStore.endpointDisplay)
                             .font(MacTypography.englishBody(size: 14, weight: .medium))
                             .foregroundStyle(MacTheme.softText(for: colorScheme))
                             .textSelection(.enabled)
@@ -64,6 +64,8 @@ struct MacSettingsView: View {
                     .macLiquidGlassCard(cornerRadius: 22, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.05, shadowRadius: 10, shadowY: 5)
 
                     MacTranscriptionSettingsView(settingsStore: transcriptionSettingsStore)
+
+                    MacNoteGenerationSettingsView(settingsStore: noteGenerationSettingsStore)
 
                     Spacer(minLength: 0)
                 }
@@ -123,6 +125,6 @@ private struct MacSettingsDivider: View {
         audioInboxStore: AudioInboxStore(),
         transcriptionQueue: TranscriptionQueue(),
         transcriptionSettingsStore: TranscriptionSettingsStore(),
-        llmServiceConfig: LLMServiceConfig()
+        noteGenerationSettingsStore: NoteGenerationSettingsStore()
     )
 }

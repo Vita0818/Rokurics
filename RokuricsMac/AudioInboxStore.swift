@@ -15,6 +15,7 @@ final class AudioInboxStore: ObservableObject {
     @Published private(set) var transcribedCount = 0
     @Published private(set) var transcriptionActiveCount = 0
     @Published private(set) var recordingItems: [MacRecordingInboxItem] = []
+    @Published private(set) var trashItems: [MacRecordingInboxItem] = []
 
     static let localRootDisplayPath = "~/Library/Application Support/Rokurics"
 
@@ -42,12 +43,37 @@ final class AudioInboxStore: ObservableObject {
 
     func refreshRecordingInbox() {
         let items = recordingFileStore.loadInboxItems()
+        let deletedItems = recordingFileStore.loadTrashedInboxItems()
         recordingItems = items
+        trashItems = deletedItems
         pendingCount = items.filter(\.hasAudio).count
         transcriptionPendingCount = items.filter(\.isWaitingForTranscription).count
         transcribedCount = items.filter(\.isTranscribed).count
         transcriptionActiveCount = items.filter(\.isTranscriptionActive).count
         processedCount = transcribedCount
+    }
+
+    func renameRecording(recordingID: String, rawTitle: String) throws {
+        let updatedItem = try recordingFileStore.updateDisplayTitle(recordingID: recordingID, rawTitle: rawTitle)
+        if let index = recordingItems.firstIndex(where: { $0.id == recordingID }) {
+            recordingItems[index] = updatedItem
+        }
+        refreshRecordingInbox()
+    }
+
+    func deleteRecording(recordingID: String) throws {
+        try recordingFileStore.deleteRecording(recordingID: recordingID)
+        refreshRecordingInbox()
+    }
+
+    func restoreRecording(recordingID: String) throws {
+        try recordingFileStore.restoreRecording(recordingID: recordingID)
+        refreshRecordingInbox()
+    }
+
+    func permanentlyDeleteRecording(recordingID: String) throws {
+        try recordingFileStore.permanentlyDeleteRecording(recordingID: recordingID)
+        refreshRecordingInbox()
     }
 
     // Future local data layout:

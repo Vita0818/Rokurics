@@ -14,8 +14,9 @@ struct MacRootView: View {
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
+    @StateObject private var noteGenerationCoordinator = NoteGenerationCoordinator()
     @StateObject private var transcriptionSettingsStore = TranscriptionSettingsStore.shared
-    @StateObject private var llmServiceConfig = LLMServiceConfig()
+    @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -29,7 +30,7 @@ struct MacRootView: View {
                     audioInboxStore: audioInboxStore,
                     transcriptionQueue: transcriptionQueue,
                     transcriptionSettingsStore: transcriptionSettingsStore,
-                    llmServiceConfig: llmServiceConfig
+                    noteGenerationSettingsStore: noteGenerationSettingsStore
                 )
             } else {
                 detailView(for: selection ?? .dashboard)
@@ -46,12 +47,10 @@ struct MacRootView: View {
         switch item {
         case .dashboard:
             MacDashboardView(
-                        secureReceiverService: secureReceiverService,
-                        audioInboxStore: audioInboxStore,
-                        transcriptionQueue: transcriptionQueue,
-                        transcriptionCoordinator: transcriptionCoordinator,
-                        llmServiceConfig: llmServiceConfig,
-                        onOpenIPhoneConnection: {
+                secureReceiverService: secureReceiverService,
+                audioInboxStore: audioInboxStore,
+                noteGenerationSettingsStore: noteGenerationSettingsStore,
+                onOpenIPhoneConnection: {
                     isSettingsSelected = false
                     selection = .iPhoneConnection
                 }
@@ -61,18 +60,8 @@ struct MacRootView: View {
         case .audioInbox:
             MacAudioInboxView(
                 audioInboxStore: audioInboxStore,
-                transcriptionCoordinator: transcriptionCoordinator
-            )
-        case .transcripts:
-            MacPlaceholderWorkspace(
-                title: "Transcripts",
-                systemImage: "waveform.and.magnifyingglass",
-                status: transcriptionCoordinator.providerDisplayName,
-                caption: "Mock 转写接口已接入，真实引擎稍后支持",
-                details: [
-                    "Queued: \(audioInboxStore.transcriptionActiveCount)",
-                    "Engine: \(transcriptionCoordinator.providerID)"
-                ]
+                transcriptionCoordinator: transcriptionCoordinator,
+                noteGenerationCoordinator: noteGenerationCoordinator
             )
         case .notes:
             MacPlaceholderWorkspace(

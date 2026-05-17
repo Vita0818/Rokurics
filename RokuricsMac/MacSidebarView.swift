@@ -10,12 +10,11 @@ import SwiftUI
 enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
     case dashboard
     case audioInbox
-    case transcripts
     case notes
     case iPhoneConnection
 
     static var allCases: [MacSidebarItem] {
-        [.dashboard, .iPhoneConnection, .audioInbox, .transcripts, .notes]
+        [.dashboard, .iPhoneConnection, .audioInbox, .notes]
     }
 
     var id: String { rawValue }
@@ -24,7 +23,6 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return "仪表盘"
         case .audioInbox: return "音频收件箱"
-        case .transcripts: return "转写"
         case .notes: return "笔记"
         case .iPhoneConnection: return "iPhone 连接"
         }
@@ -34,7 +32,6 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return "rectangle.3.group"
         case .audioInbox: return "tray.and.arrow.down"
-        case .transcripts: return "waveform.and.magnifyingglass"
         case .notes: return "doc.text"
         case .iPhoneConnection: return "iphone"
         }

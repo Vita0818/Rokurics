@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct MacAIProcessingCard: View {
-    @ObservedObject var llmServiceConfig: LLMServiceConfig
+    @ObservedObject var noteGenerationSettingsStore: NoteGenerationSettingsStore
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -23,8 +23,8 @@ struct MacAIProcessingCard: View {
         } content: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(llmServiceConfig.provider)
-                        .font(MacTypography.statusDisplay(for: llmServiceConfig.provider, size: 32))
+                    Text(noteGenerationSettingsStore.selectedProviderDisplayName)
+                        .font(MacTypography.statusDisplay(for: noteGenerationSettingsStore.selectedProviderDisplayName, size: 32))
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
                         .lineLimit(1)
 
@@ -36,10 +36,10 @@ struct MacAIProcessingCard: View {
                 Spacer(minLength: 12)
 
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text("LM Studio / API")
+                    Text(providerSubtitle)
                         .font(MacTypography.englishBody(size: 14, weight: .medium))
 
-                    Text("稍后支持")
+                    Text("可切换")
                         .font(MacTypography.chineseBody(size: 14, weight: .medium))
                 }
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
@@ -47,12 +47,23 @@ struct MacAIProcessingCard: View {
 
                 Spacer(minLength: 12)
 
-                Text(llmServiceConfig.endpoint)
+                Text(noteGenerationSettingsStore.endpointDisplay)
                     .font(MacTypography.englishCaption(size: 12, weight: .semibold))
                     .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+        }
+    }
+
+    private var providerSubtitle: String {
+        switch noteGenerationSettingsStore.selectedProviderKind {
+        case .mock:
+            return "Mock"
+        case .openAICompatible:
+            return "OpenAI-compatible"
+        case .anthropicMessages:
+            return "Claude Messages"
         }
     }
 }

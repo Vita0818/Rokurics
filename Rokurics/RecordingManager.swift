@@ -42,6 +42,7 @@ final class RecordingManager: ObservableObject {
     @Published private(set) var lastErrorMessage: String?
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var recordings: [RecordingMetadata] = []
+    @Published private(set) var trashedRecordings: [RecordingMetadata] = []
     @Published private(set) var latestRecordingMetadata: RecordingMetadata?
     @Published private(set) var statusMessage = "录音默认仅保存在本地"
     @Published private(set) var debugMessage: String?
@@ -182,6 +183,74 @@ final class RecordingManager: ObservableObject {
         refreshLatestRecordingAfterMetadataUpdate(updated)
     }
 
+    func renameRecording(recordingID: String, rawTitle: String) throws {
+        guard let existing = recordings.first(where: { $0.id == recordingID }) ?? (try? fileStore.loadMetadata(id: recordingID)) else {
+            throw AudioFileStoreError.recordingNotFound(recordingID)
+        }
+
+        let title = RecordingTitleEditRules.normalizedTitle(rawTitle, fallback: existing.title)
+        guard title != existing.title else {
+            return
+        }
+
+        do {
+            let updated = try fileStore.updateTitle(recordingID: recordingID, rawTitle: title)
+            replaceRecordingInMemory(updated)
+            lastErrorMessage = nil
+            statusMessage = Self.recentRecordingStatusMessage(for: updated, prefix: "已重命名")
+        } catch {
+            lastErrorMessage = RecordingLocalOperationCopy.renameFailure
+            throw error
+        }
+    }
+
+    func deleteRecording(recordingID: String) throws {
+        guard let metadata = recordings.first(where: { $0.id == recordingID }) ?? (try? fileStore.loadMetadata(id: recordingID)) else {
+            throw AudioFileStoreError.recordingNotFound(recordingID)
+        }
+
+        do {
+            let trashedMetadata = try fileStore.moveRecordingToTrash(metadata)
+            recordings.removeAll { $0.id == recordingID }
+            replaceTrashedRecordingInMemory(trashedMetadata)
+            refreshLatestRecordingAfterDeletion()
+            lastErrorMessage = nil
+            log("moved recording to trash: \(recordingID)")
+        } catch {
+            lastErrorMessage = RecordingLocalOperationCopy.deleteFailure
+            throw error
+        }
+    }
+
+    func restoreRecording(recordingID: String) throws {
+        do {
+            let restoredMetadata = try fileStore.restoreRecording(id: recordingID)
+            trashedRecordings.removeAll { $0.id == recordingID }
+            replaceRecordingInMemory(restoredMetadata)
+            latestRecordingMetadata = recordings.first
+            lastErrorMessage = nil
+            statusMessage = Self.recentRecordingStatusMessage(for: restoredMetadata, prefix: "已恢复")
+            log("restored recording: \(recordingID)")
+        } catch {
+            lastErrorMessage = RecordingLocalOperationCopy.restoreFailure
+            throw error
+        }
+    }
+
+    func permanentlyDeleteRecording(recordingID: String) throws {
+        do {
+            try fileStore.permanentlyDeleteRecording(id: recordingID)
+            recordings.removeAll { $0.id == recordingID }
+            trashedRecordings.removeAll { $0.id == recordingID }
+            refreshLatestRecordingAfterDeletion()
+            lastErrorMessage = nil
+            log("permanently deleted recording: \(recordingID)")
+        } catch {
+            lastErrorMessage = RecordingLocalOperationCopy.deleteFailure
+            throw error
+        }
+    }
+
     var suggestedRecordingTitle: String {
         pendingDefaultTitle ?? RecordingMetadata.defaultTitle(createdAt: recordingStartedAt ?? Date())
     }
@@ -267,8 +336,10 @@ final class RecordingManager: ObservableObject {
 
         let trimmedTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fallbackPendingTitle = pendingTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let finalTitle = trimmedTitle.isEmpty ? pendingRecordingSave.defaultTitle : trimmedTitle
-        let resolvedTitle = trimmedTitle.isEmpty && !fallbackPendingTitle.isEmpty ? fallbackPendingTitle : finalTitle
+        let normalizedRawTitle = RecordingTitleEditRules.normalizedTitle(trimmedTitle, fallback: pendingRecordingSave.defaultTitle)
+        let normalizedPendingTitle = RecordingTitleEditRules.normalizedTitle(fallbackPendingTitle, fallback: pendingRecordingSave.defaultTitle)
+        let finalTitle = trimmedTitle.isEmpty ? pendingRecordingSave.defaultTitle : normalizedRawTitle
+        let resolvedTitle = trimmedTitle.isEmpty && !fallbackPendingTitle.isEmpty ? normalizedPendingTitle : finalTitle
 
         do {
             let metadata = try makeMetadata(
@@ -281,6 +352,7 @@ final class RecordingManager: ObservableObject {
             )
             try fileStore.saveMetadata(metadata)
             recordings = [metadata] + recordings.filter { $0.id != metadata.id }
+            trashedRecordings.removeAll { $0.id == metadata.id }
             latestRecordingMetadata = metadata
             elapsedSeconds = metadata.duration
             activeRecordingURL = nil
@@ -442,7 +514,9 @@ final class RecordingManager: ObservableObject {
         do {
             try fileStore.ensureStorageDirectories()
             let loadedRecordings = try fileStore.loadAllMetadata()
+            let loadedTrashedRecordings = try fileStore.loadTrashedMetadata()
             recordings = loadedRecordings
+            trashedRecordings = loadedTrashedRecordings
             latestRecordingMetadata = loadedRecordings.first
 
             if let latestRecordingMetadata {
@@ -503,6 +577,39 @@ final class RecordingManager: ObservableObject {
     private func refreshLatestRecordingAfterMetadataUpdate(_ metadata: RecordingMetadata) {
         if latestRecordingMetadata?.id == metadata.id {
             latestRecordingMetadata = metadata
+        }
+    }
+
+    private func refreshLatestRecordingAfterDeletion() {
+        latestRecordingMetadata = recordings.first
+        if let latestRecordingMetadata {
+            statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: "最近录音")
+            lastRecordingURL = try? audioURL(for: latestRecordingMetadata)
+            elapsedSeconds = latestRecordingMetadata.duration
+        } else {
+            statusMessage = "录音默认仅保存在本地"
+            lastRecordingURL = nil
+            elapsedSeconds = 0
+        }
+    }
+
+    private func replaceRecordingInMemory(_ metadata: RecordingMetadata) {
+        if let index = recordings.firstIndex(where: { $0.id == metadata.id }) {
+            recordings[index] = metadata
+        } else {
+            recordings.append(metadata)
+            recordings.sort { $0.createdAt > $1.createdAt }
+        }
+
+        refreshLatestRecordingAfterMetadataUpdate(metadata)
+    }
+
+    private func replaceTrashedRecordingInMemory(_ metadata: RecordingMetadata) {
+        if let index = trashedRecordings.firstIndex(where: { $0.id == metadata.id }) {
+            trashedRecordings[index] = metadata
+        } else {
+            trashedRecordings.append(metadata)
+            trashedRecordings.sort { ($0.deletedAt ?? $0.createdAt) > ($1.deletedAt ?? $1.createdAt) }
         }
     }
 

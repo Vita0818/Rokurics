@@ -76,6 +76,21 @@ struct MacRecordingTranscriptionSource {
     let metadataFileURL: URL?
 }
 
+struct MacRecordingNoteGenerationSource {
+    let recordingID: String
+    let sanitizedRecordingID: String
+    let title: String
+    let createdAt: Date
+    let duration: TimeInterval
+    let transcriptionStatus: String
+    let transcriptRelativePath: String?
+    let transcriptMarkdownRelativePath: String?
+    let transcriptionProviderID: String?
+    let transcriptionModelName: String?
+    let transcriptURL: URL?
+    let transcriptMarkdownURL: URL?
+}
+
 final class MacRecordingFileStore {
     static let metadataMaxBytes = 1 * 1024 * 1024
     // First real-audio upload version keeps whole-file uploads capped.
@@ -90,25 +105,33 @@ final class MacRecordingFileStore {
     private let fileManager: FileManager
     private let rootURL: URL
     private let audioInboxURL: URL
+    private let transcriptsURL: URL
     private let metadataIndexURL: URL
     private let receiveLogURL: URL
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
         self.fileManager = fileManager
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        rootURL = applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
-            .standardizedFileURL
-        audioInboxURL = rootURL
+        if let rootURL {
+            self.rootURL = rootURL.standardizedFileURL
+        } else {
+            let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? fileManager.temporaryDirectory
+            self.rootURL = applicationSupportURL
+                .appendingPathComponent("Rokurics", isDirectory: true)
+                .standardizedFileURL
+        }
+        audioInboxURL = self.rootURL
             .appendingPathComponent("audio", isDirectory: true)
             .appendingPathComponent("inbox", isDirectory: true)
             .standardizedFileURL
-        metadataIndexURL = rootURL
+        transcriptsURL = self.rootURL
+            .appendingPathComponent("transcripts", isDirectory: true)
+            .standardizedFileURL
+        metadataIndexURL = self.rootURL
             .appendingPathComponent("metadata", isDirectory: true)
             .appendingPathComponent("recordings-index.json", isDirectory: false)
             .standardizedFileURL
-        receiveLogURL = rootURL
+        receiveLogURL = self.rootURL
             .appendingPathComponent("system", isDirectory: true)
             .appendingPathComponent("receive-log.json", isDirectory: false)
             .standardizedFileURL
@@ -173,7 +196,7 @@ final class MacRecordingFileStore {
                 metadataFileName: "metadata.json",
                 status: "metadataReceived",
                 transcriptionStatus: metadata.transcriptionStatus,
-                noteStatus: metadata.noteStatus,
+                noteStatus: RecordingReceiveRecord.normalizedNoteStatus(metadata.noteStatus),
                 processingStatus: "notStarted",
                 suggestedCategory: nil,
                 course: nil,
@@ -275,7 +298,7 @@ final class MacRecordingFileStore {
         }
     }
 
-    func loadInboxItems() -> [MacRecordingInboxItem] {
+    func loadInboxItems(includeDeleted: Bool = false) -> [MacRecordingInboxItem] {
         guard fileManager.fileExists(atPath: audioInboxURL.path) else {
             return []
         }
@@ -310,6 +333,10 @@ final class MacRecordingFileStore {
                         continue
                     }
 
+                    guard includeDeleted || !record.isDeleted else {
+                        continue
+                    }
+
                     let audioURL = recordingDirectory.appendingPathComponent("audio.m4a", isDirectory: false)
                     let hasAudio = fileManager.fileExists(atPath: audioURL.path)
                     let fileSize: Int64
@@ -321,21 +348,7 @@ final class MacRecordingFileStore {
                         fileSize = record.fileSize
                     }
 
-                    items.append(MacRecordingInboxItem(
-                        id: record.recordingID,
-                        title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
-                        receivedAt: record.receivedAt,
-                        duration: record.duration,
-                        fileSize: fileSize,
-                        sourceDeviceName: record.sourceDeviceName.isEmpty ? "iPhone" : record.sourceDeviceName,
-                        transcriptionStatus: record.transcriptionStatus,
-                        noteStatus: record.noteStatus,
-                        receiveStatus: record.status,
-                        hasAudio: hasAudio,
-                        transcriptRelativePath: record.transcriptRelativePath,
-                        transcriptMarkdownRelativePath: record.transcriptMarkdownRelativePath,
-                        transcriptionError: record.transcriptionError
-                    ))
+                    items.append(inboxItem(from: record, hasAudio: hasAudio, fileSize: fileSize))
                 }
             }
 
@@ -343,6 +356,135 @@ final class MacRecordingFileStore {
         } catch {
             print("[RokuricsRecordingStore][ERROR] inbox load failed: \(error)")
             return []
+        }
+    }
+
+    func loadTrashedInboxItems() -> [MacRecordingInboxItem] {
+        loadInboxItems(includeDeleted: true)
+            .filter(\.isDeleted)
+            .sorted { ($0.deletedAt ?? $0.receivedAt) > ($1.deletedAt ?? $1.receivedAt) }
+    }
+
+    func updateDisplayTitle(recordingID: String, rawTitle: String) throws -> MacRecordingInboxItem {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        do {
+            var record = try loadReceiveRecord(at: receiveURL)
+            let currentTitle = record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle
+            let title = RecordingTitleEditRules.normalizedTitle(rawTitle, fallback: currentTitle)
+            record.normalizedTitle = title
+            record.updatedAt = Date()
+            try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            postInboxChanged()
+
+            let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false)
+            let hasAudio = fileManager.fileExists(atPath: audioURL.path)
+            let fileSize = fileSizeForInboxItem(record: record, audioURL: audioURL, hasAudio: hasAudio)
+            return inboxItem(from: record, hasAudio: hasAudio, fileSize: fileSize)
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            throw MacRecordingFileStoreError.storageFailed("recording_title_update_failed")
+        }
+    }
+
+    func deleteRecording(recordingID: String) throws {
+        try updateTrashState(recordingID: recordingID, isDeleted: true, deletedAt: Date(), event: "recording_moved_to_trash")
+    }
+
+    func restoreRecording(recordingID: String) throws {
+        try updateTrashState(recordingID: recordingID, isDeleted: false, deletedAt: nil, event: "recording_restored")
+    }
+
+    func permanentlyDeleteRecording(recordingID: String) throws {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID)?.standardizedFileURL else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        guard isInsideAudioInboxDirectory(recordingDirectoryURL),
+              recordingDirectoryURL.path != audioInboxURL.path else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        let record: RecordingReceiveRecord?
+        if fileManager.fileExists(atPath: receiveURL.path) {
+            record = try? loadReceiveRecord(at: receiveURL)
+        } else {
+            record = nil
+        }
+
+        var index = loadIndex()
+        index.directoriesByRecordingID.removeValue(forKey: recordingID)
+        try saveIndex(index)
+
+        do {
+            for transcriptDirectoryURL in transcriptDirectoriesToDelete(from: record) {
+                try removeDirectoryIfExists(transcriptDirectoryURL, requiredRoot: transcriptsURL)
+            }
+
+            try removeDirectoryIfExists(recordingDirectoryURL, requiredRoot: audioInboxURL)
+            if let record {
+                try? appendReceiveLog(
+                    recordingID: recordingID,
+                    event: "recording_permanently_deleted",
+                    sourceDeviceID: record.sourceDeviceID,
+                    status: "deleted"
+                )
+            }
+            postInboxChanged()
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            throw MacRecordingFileStoreError.storageFailed("recording_delete_failed")
+        }
+    }
+
+    private func updateTrashState(recordingID: String, isDeleted: Bool, deletedAt: Date?, event: String) throws {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID)?.standardizedFileURL else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        guard isInsideAudioInboxDirectory(recordingDirectoryURL),
+              recordingDirectoryURL.path != audioInboxURL.path else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        do {
+            var record = try loadReceiveRecord(at: receiveURL)
+            record.isDeleted = isDeleted
+            record.deletedAt = deletedAt
+            record.updatedAt = Date()
+            try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            try? appendReceiveLog(
+                recordingID: recordingID,
+                event: event,
+                sourceDeviceID: record.sourceDeviceID,
+                status: isDeleted ? "deleted" : record.status
+            )
+            postInboxChanged()
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            throw MacRecordingFileStoreError.storageFailed("recording_trash_update_failed")
         }
     }
 
@@ -377,6 +519,39 @@ final class MacRecordingFileStore {
             createdAt: record.createdAt,
             audioFileURL: audioURL,
             metadataFileURL: safeMetadataURL
+        )
+    }
+
+    func noteGenerationSource(for recordingID: String) throws -> MacRecordingNoteGenerationSource {
+        try ensureLibraryDirectories()
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let record = try loadReceiveRecord(at: receiveURL)
+        let transcriptURL = resolvedRootFileURL(relativePath: record.transcriptRelativePath)
+        let transcriptMarkdownURL = resolvedRootFileURL(relativePath: record.transcriptMarkdownRelativePath)
+            ?? fallbackTranscriptMarkdownURL(from: record.transcriptRelativePath)
+
+        return MacRecordingNoteGenerationSource(
+            recordingID: record.recordingID,
+            sanitizedRecordingID: record.sanitizedRecordingID,
+            title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
+            createdAt: record.createdAt,
+            duration: record.duration,
+            transcriptionStatus: record.transcriptionStatus,
+            transcriptRelativePath: record.transcriptRelativePath,
+            transcriptMarkdownRelativePath: record.transcriptMarkdownRelativePath,
+            transcriptionProviderID: record.transcriptionProviderID,
+            transcriptionModelName: record.transcriptionModelName,
+            transcriptURL: transcriptURL,
+            transcriptMarkdownURL: transcriptMarkdownURL
         )
     }
 
@@ -433,6 +608,78 @@ final class MacRecordingFileStore {
         }
     }
 
+    func updateNoteGenerationStatus(
+        recordingID: String,
+        status: String,
+        noteRelativePath: String?,
+        generatedAt: Date?,
+        providerID: String?,
+        modelName: String?,
+        endpointDescription: String?,
+        errorMessage: String?
+    ) throws {
+        try ensureLibraryDirectories()
+
+        guard noteRelativePath == nil || resolvedRootFileURL(relativePath: noteRelativePath) != nil else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        do {
+            var record = try loadReceiveRecord(at: receiveURL)
+            let normalizedStatus = RecordingReceiveRecord.normalizedNoteStatus(status)
+            record.updatedAt = Date()
+            record.noteStatus = normalizedStatus
+
+            if let noteRelativePath {
+                record.noteRelativePath = noteRelativePath
+            } else if normalizedStatus == "generated" || normalizedStatus == "notGenerated" {
+                record.noteRelativePath = nil
+            }
+
+            if let generatedAt {
+                record.noteGeneratedAt = generatedAt
+            } else if normalizedStatus == "generated" || normalizedStatus == "notGenerated" {
+                record.noteGeneratedAt = nil
+            }
+
+            if let providerID {
+                record.noteProviderID = providerID
+            }
+            if let modelName {
+                record.noteModelName = modelName
+            }
+            if let endpointDescription {
+                record.noteEndpointDescription = endpointDescription
+            }
+            record.noteError = errorMessage
+
+            try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            try appendReceiveLog(
+                recordingID: recordingID,
+                event: "note_generation_\(record.noteStatus)",
+                sourceDeviceID: record.sourceDeviceID,
+                status: record.noteStatus
+            )
+            postInboxChanged()
+            print("[RokuricsRecordingStore] note status updated: \(recordingID) -> \(record.noteStatus)")
+            debugLogNoteStatusUpdate(receiveURL: receiveURL, recordingID: recordingID, status: record.noteStatus, errorMessage: errorMessage)
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            print("[RokuricsRecordingStore][ERROR] note status update failed: \(error)")
+            throw MacRecordingFileStoreError.storageFailed("note_status_update_failed")
+        }
+    }
+
     private func ensureLibraryDirectories() throws {
         let directories = [
             rootURL,
@@ -441,7 +688,7 @@ final class MacRecordingFileStore {
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("processing", isDirectory: true),
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("processed", isDirectory: true),
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("archived", isDirectory: true),
-            rootURL.appendingPathComponent("transcripts", isDirectory: true),
+            transcriptsURL,
             rootURL.appendingPathComponent("notes", isDirectory: true),
             rootURL.appendingPathComponent("exports", isDirectory: true),
             rootURL.appendingPathComponent("metadata", isDirectory: true),
@@ -495,6 +742,38 @@ final class MacRecordingFileStore {
     private func loadReceiveRecord(at url: URL) throws -> RecordingReceiveRecord {
         let data = try Data(contentsOf: url)
         return try Self.jsonDecoder.decode(RecordingReceiveRecord.self, from: data)
+    }
+
+    private func inboxItem(from record: RecordingReceiveRecord, hasAudio: Bool, fileSize: Int64) -> MacRecordingInboxItem {
+        MacRecordingInboxItem(
+            id: record.recordingID,
+            title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
+            receivedAt: record.receivedAt,
+            duration: record.duration,
+            fileSize: fileSize,
+            sourceDeviceName: record.sourceDeviceName.isEmpty ? "iPhone" : record.sourceDeviceName,
+            transcriptionStatus: record.transcriptionStatus,
+            noteStatus: record.noteStatus,
+            receiveStatus: record.status,
+            hasAudio: hasAudio,
+            transcriptRelativePath: record.transcriptRelativePath,
+            transcriptMarkdownRelativePath: record.transcriptMarkdownRelativePath,
+            transcriptionError: record.transcriptionError,
+            isDeleted: record.isDeleted,
+            deletedAt: record.deletedAt,
+            noteRelativePath: record.noteRelativePath,
+            noteError: record.noteError
+        )
+    }
+
+    private func fileSizeForInboxItem(record: RecordingReceiveRecord, audioURL: URL, hasAudio: Bool) -> Int64 {
+        if hasAudio,
+           let attributes = try? fileManager.attributesOfItem(atPath: audioURL.path),
+           let size = attributes[.size] as? NSNumber {
+            return size.int64Value
+        }
+
+        return record.fileSize
     }
 
     private func loadIndex() -> RecordingIndex {
@@ -554,10 +833,108 @@ final class MacRecordingFileStore {
         return String(filePath.dropFirst(rootPath.count))
     }
 
+    private func resolvedRootFileURL(relativePath: String?) -> URL? {
+        guard let relativePath else {
+            return nil
+        }
+
+        let trimmedPath = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty,
+              !trimmedPath.hasPrefix("/") else {
+            return nil
+        }
+
+        let url = rootURL.appendingPathComponent(trimmedPath, isDirectory: false).standardizedFileURL
+        return isInsideRoot(url) ? url : nil
+    }
+
+    private func fallbackTranscriptMarkdownURL(from transcriptRelativePath: String?) -> URL? {
+        guard let transcriptRelativePath,
+              !transcriptRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let directory = (transcriptRelativePath as NSString).deletingLastPathComponent
+        guard !directory.isEmpty else {
+            return nil
+        }
+
+        let markdownRelativePath = (directory as NSString).appendingPathComponent("transcript.md")
+        return resolvedRootFileURL(relativePath: markdownRelativePath)
+    }
+
     private func isInsideRoot(_ url: URL) -> Bool {
         let rootPath = rootURL.standardizedFileURL.path
         let filePath = url.standardizedFileURL.path
         return filePath == rootPath || filePath.hasPrefix(rootPath + "/")
+    }
+
+    private func isInsideAudioInboxDirectory(_ url: URL) -> Bool {
+        isInside(url, requiredRoot: audioInboxURL)
+    }
+
+    private func isInsideTranscriptsDirectory(_ url: URL) -> Bool {
+        isInside(url, requiredRoot: transcriptsURL)
+    }
+
+    private func isInside(_ url: URL, requiredRoot: URL) -> Bool {
+        let rootPath = requiredRoot.standardizedFileURL.path
+        let filePath = url.standardizedFileURL.path
+        return filePath == rootPath || filePath.hasPrefix(rootPath + "/")
+    }
+
+    private func transcriptDirectoriesToDelete(from record: RecordingReceiveRecord?) -> [URL] {
+        guard let record else {
+            return []
+        }
+
+        let relativePaths = [
+            record.transcriptRelativePath,
+            record.transcriptMarkdownRelativePath
+        ]
+        .compactMap { $0 }
+
+        var directories: [URL] = []
+        for relativePath in relativePaths {
+            let url = rootURL.appendingPathComponent(relativePath, isDirectory: false).standardizedFileURL
+            guard isInsideTranscriptsDirectory(url) else {
+                continue
+            }
+
+            let directoryURL = url.deletingLastPathComponent().standardizedFileURL
+            guard isInsideTranscriptsDirectory(directoryURL),
+                  directoryURL.path != transcriptsURL.path,
+                  !directories.contains(directoryURL) else {
+                continue
+            }
+
+            directories.append(directoryURL)
+        }
+
+        return directories
+    }
+
+    private func removeDirectoryIfExists(_ url: URL, requiredRoot: URL) throws {
+        let targetURL = url.standardizedFileURL
+        guard isInside(targetURL, requiredRoot: requiredRoot),
+              targetURL.path != requiredRoot.standardizedFileURL.path else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: targetURL.path, isDirectory: &isDirectory) else {
+            return
+        }
+
+        guard isDirectory.boolValue else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        do {
+            try fileManager.removeItem(at: targetURL)
+        } catch {
+            throw MacRecordingFileStoreError.storageFailed("recording_delete_failed")
+        }
     }
 
     private func sanitizedPathComponent(_ value: String) -> String {
@@ -599,6 +976,23 @@ final class MacRecordingFileStore {
             "[RokuricsRecordingStore] receive.json updated: " +
             "recordingID=\(recordingID), " +
             "status=\(status), " +
+            "receiveJSON=\(receiveURL.path), " +
+            "errorSummary=\(errorMessage.map { String($0.prefix(1000)) } ?? "nil")"
+        )
+        #endif
+    }
+
+    private func debugLogNoteStatusUpdate(
+        receiveURL: URL,
+        recordingID: String,
+        status: String,
+        errorMessage: String?
+    ) {
+        #if DEBUG
+        print(
+            "[RokuricsRecordingStore] receive.json note updated: " +
+            "recordingID=\(recordingID), " +
+            "noteStatus=\(status), " +
             "receiveJSON=\(receiveURL.path), " +
             "errorSummary=\(errorMessage.map { String($0.prefix(1000)) } ?? "nil")"
         )
