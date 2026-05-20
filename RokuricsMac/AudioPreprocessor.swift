@@ -11,6 +11,12 @@ protocol AudioConverting {
     func convertToWhisperWAV(inputURL: URL, outputURL: URL) async throws
 }
 
+extension AudioConverting {
+    func convertToWhisperWAV(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>?) async throws {
+        try await convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL)
+    }
+}
+
 struct AudioPreprocessor {
     private static let directlyReadableExtensions: Set<String> = ["wav", "wave"]
 
@@ -67,12 +73,16 @@ struct AudioPreprocessor {
         try fileManager.createDirectory(at: workingDirectoryURL, withIntermediateDirectories: true)
 
         let outputURL = workingDirectoryURL
-            .appendingPathComponent("audio.wav", isDirectory: false)
+            .appendingPathComponent(outputFileName(for: request), isDirectory: false)
             .standardizedFileURL
 
         debugLogConversionPaths(request: request, workingDirectoryURL: workingDirectoryURL, outputURL: outputURL)
         do {
-            try await converter.convertToWhisperWAV(inputURL: request.audioFileURL, outputURL: outputURL)
+            try await converter.convertToWhisperWAV(
+                inputURL: request.audioFileURL,
+                outputURL: outputURL,
+                timeRange: request.chunkDescriptor.map { $0.startTime...$0.endTime }
+            )
         } catch let error as TranscriptionError {
             throw error
         } catch {
@@ -191,11 +201,15 @@ struct AudioPreprocessor {
         let ffmpegConverter: any AudioConverting
 
         func convertToWhisperWAV(inputURL: URL, outputURL: URL) async throws {
+            try await convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL, timeRange: nil)
+        }
+
+        func convertToWhisperWAV(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>?) async throws {
             do {
-                try await nativeConverter.convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL)
+                try await nativeConverter.convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL, timeRange: timeRange)
             } catch {
                 debugLogFallback(error: error, inputURL: inputURL, outputURL: outputURL)
-                try await ffmpegConverter.convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL)
+                try await ffmpegConverter.convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL, timeRange: timeRange)
             }
         }
 
@@ -234,6 +248,14 @@ struct AudioPreprocessor {
         }
 
         return workingDirectoryURL
+    }
+
+    private func outputFileName(for request: TranscriptionRequest) -> String {
+        guard let chunkDescriptor = request.chunkDescriptor else {
+            return "audio.wav"
+        }
+
+        return "\(chunkDescriptor.id).wav"
     }
 
     private func isInside(_ url: URL, parent: URL) -> Bool {

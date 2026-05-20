@@ -26,6 +26,7 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
     let transcriptionStatus: String
     let noteStatus: String
     let tags: [String]
+    let studyFiling: StudyFilingPath?
     let isDeleted: Bool
     let deletedAt: Date?
 
@@ -48,6 +49,7 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         transcriptionStatus: String,
         noteStatus: String,
         tags: [String],
+        studyFiling: StudyFilingPath? = nil,
         isDeleted: Bool = false,
         deletedAt: Date? = nil
     ) {
@@ -69,6 +71,7 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         self.transcriptionStatus = transcriptionStatus
         self.noteStatus = noteStatus
         self.tags = tags
+        self.studyFiling = studyFiling?.isEmpty == true ? nil : studyFiling
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
     }
@@ -92,6 +95,7 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         case transcriptionStatus
         case noteStatus
         case tags
+        case studyFiling
         case isDeleted
         case deletedAt
     }
@@ -116,6 +120,8 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         transcriptionStatus = try container.decode(String.self, forKey: .transcriptionStatus)
         noteStatus = try container.decode(String.self, forKey: .noteStatus)
         tags = try container.decode([String].self, forKey: .tags)
+        let decodedStudyFiling = try container.decodeIfPresent(StudyFilingPath.self, forKey: .studyFiling)
+        studyFiling = decodedStudyFiling?.isEmpty == true ? nil : decodedStudyFiling
         isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
@@ -142,6 +148,7 @@ extension RecordingMetadata {
             transcriptionStatus: transcriptionStatus,
             noteStatus: noteStatus,
             tags: tags,
+            studyFiling: studyFiling,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )
@@ -167,6 +174,7 @@ extension RecordingMetadata {
             transcriptionStatus: transcriptionStatus,
             noteStatus: noteStatus,
             tags: tags,
+            studyFiling: studyFiling,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )
@@ -192,6 +200,33 @@ extension RecordingMetadata {
             transcriptionStatus: transcriptionStatus,
             noteStatus: noteStatus,
             tags: tags,
+            studyFiling: studyFiling,
+            isDeleted: isDeleted,
+            deletedAt: deletedAt
+        )
+    }
+
+    func updatingStudyFiling(_ studyFiling: StudyFilingPath?) -> RecordingMetadata {
+        RecordingMetadata(
+            id: id,
+            title: title,
+            fileName: fileName,
+            relativeAudioPath: relativeAudioPath,
+            relativeMetadataPath: relativeMetadataPath,
+            createdAt: createdAt,
+            endedAt: endedAt,
+            duration: duration,
+            format: format,
+            codec: codec,
+            sampleRate: sampleRate,
+            channels: channels,
+            bitrate: bitrate,
+            fileSize: fileSize,
+            uploadStatus: uploadStatus,
+            transcriptionStatus: transcriptionStatus,
+            noteStatus: noteStatus,
+            tags: tags,
+            studyFiling: studyFiling,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )

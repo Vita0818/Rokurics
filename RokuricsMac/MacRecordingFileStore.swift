@@ -72,6 +72,7 @@ struct MacRecordingTranscriptionSource {
     let recordingID: String
     let title: String
     let createdAt: Date
+    let duration: TimeInterval
     let audioFileURL: URL
     let metadataFileURL: URL?
 }
@@ -95,7 +96,7 @@ final class MacRecordingFileStore {
     static let metadataMaxBytes = 1 * 1024 * 1024
     // First real-audio upload version keeps whole-file uploads capped.
     // Future chunked upload can raise this limit without changing the library layout.
-    static let audioMaxBytes = 50 * 1024 * 1024
+    static let audioMaxBytes = 512 * 1024 * 1024
     static let inboxDidChangeNotification = Notification.Name("RokuricsMacRecordingInboxDidChange")
 
     private struct RecordingIndex: Codable {
@@ -202,6 +203,7 @@ final class MacRecordingFileStore {
                 course: nil,
                 category: nil,
                 tags: metadata.tags,
+                studyFiling: metadata.studyFiling,
                 createdAt: metadata.createdAt,
                 duration: metadata.duration,
                 fileSize: metadata.fileSize,
@@ -298,6 +300,114 @@ final class MacRecordingFileStore {
         }
     }
 
+    func temporaryAudioUploadURL(recordingID: String) throws -> URL {
+        try ensureLibraryDirectories()
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let temporaryDirectoryURL = recordingDirectoryURL
+            .appendingPathComponent("uploading", isDirectory: true)
+            .standardizedFileURL
+        let temporaryURL = temporaryDirectoryURL
+            .appendingPathComponent("audio-\(UUID().uuidString.lowercased()).tmp", isDirectory: false)
+            .standardizedFileURL
+
+        guard isInsideAudioInboxDirectory(temporaryDirectoryURL),
+              isInsideAudioInboxDirectory(temporaryURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        try fileManager.createDirectory(at: temporaryDirectoryURL, withIntermediateDirectories: true)
+        return temporaryURL
+    }
+
+    func discardTemporaryUpload(at temporaryURL: URL) {
+        let url = temporaryURL.standardizedFileURL
+        guard isInsideAudioInboxDirectory(url) else {
+            return
+        }
+
+        try? fileManager.removeItem(at: url)
+    }
+
+    func saveAudio(
+        temporaryFileURL: URL,
+        recordingID: String,
+        requestedFileName: String?,
+        sourceDevice: PairedDevice,
+        checksum: String,
+        fileSize: Int64
+    ) throws -> RecordingReceiveResult {
+        guard fileSize <= Int64(Self.audioMaxBytes) else {
+            throw MacRecordingFileStoreError.fileTooLarge
+        }
+
+        try ensureLibraryDirectories()
+        guard !sanitizedPathComponent(recordingID).isEmpty else {
+            throw MacRecordingFileStoreError.invalidRecordingID
+        }
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        let metadataURL = recordingDirectoryURL.appendingPathComponent("metadata.json", isDirectory: false).standardizedFileURL
+        let tempURL = temporaryFileURL.standardizedFileURL
+
+        guard isInsideRoot(recordingDirectoryURL),
+              isInsideRoot(audioURL),
+              isInsideRoot(receiveURL),
+              isInsideRoot(metadataURL),
+              isInsideAudioInboxDirectory(tempURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        guard fileManager.fileExists(atPath: metadataURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        guard !fileManager.fileExists(atPath: audioURL.path) else {
+            throw MacRecordingFileStoreError.audioAlreadyExists
+        }
+
+        do {
+            let sanitizedOriginalName = sanitizedFileName(requestedFileName)
+            try fileManager.moveItem(at: tempURL, to: audioURL)
+            var record = try loadReceiveRecord(at: receiveURL)
+            record.updatedAt = Date()
+            record.sourceDeviceID = sourceDevice.id
+            if record.sourceDeviceName.isEmpty {
+                record.sourceDeviceName = sourceDevice.deviceName
+            }
+            record.audioFileName = "audio.m4a"
+            record.originalAudioFileName = sanitizedOriginalName.isEmpty ? nil : sanitizedOriginalName
+            record.status = "received"
+            record.processingStatus = "notStarted"
+            record.checksum = checksum
+            record.audioRelativePath = try relativePath(for: audioURL)
+            record.fileSize = fileSize
+            try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            try appendReceiveLog(recordingID: recordingID, event: "audio_received", sourceDeviceID: sourceDevice.id, status: record.status)
+            postInboxChanged()
+            print("[RokuricsRecordingStore] audio saved: \(audioURL.path)")
+            return RecordingReceiveResult(
+                recordingID: recordingID,
+                directoryURL: recordingDirectoryURL,
+                metadataFileName: "metadata.json",
+                audioFileName: "audio.m4a",
+                receiveFileName: "receive.json"
+            )
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            print("[RokuricsRecordingStore][ERROR] audio save failed: \(error)")
+            throw MacRecordingFileStoreError.storageFailed("audio_storage_failed")
+        }
+    }
+
     func loadInboxItems(includeDeleted: Bool = false) -> [MacRecordingInboxItem] {
         guard fileManager.fileExists(atPath: audioInboxURL.path) else {
             return []
@@ -348,7 +458,14 @@ final class MacRecordingFileStore {
                         fileSize = record.fileSize
                     }
 
-                    items.append(inboxItem(from: record, hasAudio: hasAudio, fileSize: fileSize))
+                    items.append(
+                        inboxItem(
+                            from: record,
+                            hasAudio: hasAudio,
+                            fileSize: fileSize,
+                            receiveRelativePath: try? relativePath(for: receiveURL)
+                        )
+                    )
                 }
             }
 
@@ -389,7 +506,12 @@ final class MacRecordingFileStore {
             let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false)
             let hasAudio = fileManager.fileExists(atPath: audioURL.path)
             let fileSize = fileSizeForInboxItem(record: record, audioURL: audioURL, hasAudio: hasAudio)
-            return inboxItem(from: record, hasAudio: hasAudio, fileSize: fileSize)
+            return inboxItem(
+                from: record,
+                hasAudio: hasAudio,
+                fileSize: fileSize,
+                receiveRelativePath: try? relativePath(for: receiveURL)
+            )
         } catch let error as MacRecordingFileStoreError {
             throw error
         } catch {
@@ -517,6 +639,7 @@ final class MacRecordingFileStore {
             recordingID: record.recordingID,
             title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
             createdAt: record.createdAt,
+            duration: record.duration,
             audioFileURL: audioURL,
             metadataFileURL: safeMetadataURL
         )
@@ -564,7 +687,9 @@ final class MacRecordingFileStore {
         modelName: String?,
         startedAt: Date?,
         completedAt: Date?,
-        errorMessage: String?
+        errorMessage: String?,
+        mode: ProcessingMode? = nil,
+        chunks: [RecordingTranscriptionChunkRecord]? = nil
     ) throws {
         try ensureLibraryDirectories()
 
@@ -582,13 +707,27 @@ final class MacRecordingFileStore {
             record.updatedAt = Date()
             record.transcriptionStatus = status
             record.processingStatus = status
-            record.transcriptRelativePath = transcriptRelativePath
-            record.transcriptMarkdownRelativePath = transcriptMarkdownRelativePath
+            if let transcriptRelativePath {
+                record.transcriptRelativePath = transcriptRelativePath
+            } else if status == "notStarted" {
+                record.transcriptRelativePath = nil
+            }
+            if let transcriptMarkdownRelativePath {
+                record.transcriptMarkdownRelativePath = transcriptMarkdownRelativePath
+            } else if status == "notStarted" {
+                record.transcriptMarkdownRelativePath = nil
+            }
             record.transcriptionProviderID = providerID
             record.transcriptionModelName = modelName
             record.transcriptionStartedAt = startedAt
             record.transcriptionCompletedAt = completedAt
             record.transcriptionError = errorMessage
+            if let mode {
+                record.transcriptionMode = mode
+            }
+            if let chunks {
+                record.transcriptionChunks = chunks
+            }
 
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
             try appendReceiveLog(
@@ -616,7 +755,9 @@ final class MacRecordingFileStore {
         providerID: String?,
         modelName: String?,
         endpointDescription: String?,
-        errorMessage: String?
+        errorMessage: String?,
+        mode: ProcessingMode? = nil,
+        sections: [RecordingNoteSectionRecord]? = nil
     ) throws {
         try ensureLibraryDirectories()
 
@@ -661,6 +802,12 @@ final class MacRecordingFileStore {
                 record.noteEndpointDescription = endpointDescription
             }
             record.noteError = errorMessage
+            if let mode {
+                record.noteGenerationMode = mode
+            }
+            if let sections {
+                record.noteSections = sections
+            }
 
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
             try appendReceiveLog(
@@ -744,7 +891,12 @@ final class MacRecordingFileStore {
         return try Self.jsonDecoder.decode(RecordingReceiveRecord.self, from: data)
     }
 
-    private func inboxItem(from record: RecordingReceiveRecord, hasAudio: Bool, fileSize: Int64) -> MacRecordingInboxItem {
+    private func inboxItem(
+        from record: RecordingReceiveRecord,
+        hasAudio: Bool,
+        fileSize: Int64,
+        receiveRelativePath: String? = nil
+    ) -> MacRecordingInboxItem {
         MacRecordingInboxItem(
             id: record.recordingID,
             title: record.normalizedTitle.isEmpty ? record.originalTitle : record.normalizedTitle,
@@ -756,9 +908,12 @@ final class MacRecordingFileStore {
             noteStatus: record.noteStatus,
             receiveStatus: record.status,
             hasAudio: hasAudio,
+            audioRelativePath: record.audioRelativePath,
+            receiveRelativePath: receiveRelativePath,
             transcriptRelativePath: record.transcriptRelativePath,
             transcriptMarkdownRelativePath: record.transcriptMarkdownRelativePath,
             transcriptionError: record.transcriptionError,
+            studyFiling: record.studyFiling,
             isDeleted: record.isDeleted,
             deletedAt: record.deletedAt,
             noteRelativePath: record.noteRelativePath,

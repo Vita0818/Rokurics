@@ -7,46 +7,89 @@
 
 import SwiftUI
 
+enum MacTranscriptionSettingsMode {
+    case provider
+    case model
+    case authorizationAndTest
+}
+
 struct MacTranscriptionSettingsView: View {
     @ObservedObject var settingsStore: TranscriptionSettingsStore
-    @Environment(\.colorScheme) private var colorScheme
+    let mode: MacTranscriptionSettingsMode
+
+    init(settingsStore: TranscriptionSettingsStore, mode: MacTranscriptionSettingsMode = .provider) {
+        self.settingsStore = settingsStore
+        self.mode = mode
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("转写设置")
-                            .font(MacTypography.chineseTitle(size: 24, weight: .bold))
-                            .foregroundStyle(MacTheme.deepText(for: colorScheme))
-
-                        Text("选择当前转写 Provider")
-                            .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                            .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    }
-
-                    Spacer()
-
-                    MacStatusPill(
-                        text: settingsStore.selectedProviderDisplayName,
-                        systemImage: "waveform.and.magnifyingglass",
-                        tint: settingsStore.selectedProviderKind == .mock ? MacTheme.aqua : MacTheme.leaf
-                    )
-                }
-
-                MacTranscriptionProviderPicker(settingsStore: settingsStore)
-            }
-            .padding(20)
-            .frame(maxWidth: 680, alignment: .leading)
-            .macLiquidGlassCard(cornerRadius: 22, material: .thinMaterial, fillOpacity: 0.44, strokeOpacity: 0.40, shadowOpacity: 0.07, shadowRadius: 12, shadowY: 6)
-
-            if settingsStore.selectedProviderKind == .whisperCpp {
-                MacWhisperCppSettingsView(settingsStore: settingsStore)
-                    .padding(20)
-                    .frame(maxWidth: 680, alignment: .leading)
-                    .macLiquidGlassCard(cornerRadius: 22, material: .thinMaterial, fillOpacity: 0.44, strokeOpacity: 0.40, shadowOpacity: 0.07, shadowRadius: 12, shadowY: 6)
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            switch mode {
+            case .provider:
+                providerSettings
+            case .model:
+                modelSettings
+            case .authorizationAndTest:
+                authorizationAndTestSettings
             }
         }
     }
-}
 
+    private var providerSettings: some View {
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            RokuricsSettingsGroup(title: "Provider") {
+                RokuricsSettingsPickerRow(title: "转写 Provider", selection: providerBinding) {
+                    ForEach(TranscriptionProviderKind.allCases) { providerKind in
+                        Text(providerKind.displayName)
+                            .tag(providerKind)
+                            .disabled(!providerKind.isEnabledInCurrentBuild)
+                    }
+                }
+
+                RokuricsSettingsDivider()
+
+                RokuricsSettingsRow(
+                    title: "状态",
+                    valueText: settingsStore.selectedProviderKind.isEnabledInCurrentBuild ? "可用" : "暂未启用"
+                )
+            }
+        }
+    }
+
+    private var modelSettings: some View {
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            if settingsStore.selectedProviderKind == .whisperCpp {
+                MacWhisperCppSettingsView(settingsStore: settingsStore, mode: .model)
+            } else {
+                RokuricsSettingsGroup(title: "模型") {
+                    RokuricsSettingsRow(title: "当前模型", valueText: "Mock")
+                }
+            }
+        }
+    }
+
+    private var authorizationAndTestSettings: some View {
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            if settingsStore.selectedProviderKind == .whisperCpp {
+                MacWhisperCppSettingsView(settingsStore: settingsStore, mode: .authorizationAndTest)
+            } else {
+                RokuricsSettingsGroup(title: "授权与测试") {
+                    RokuricsSettingsRow(title: "Provider", valueText: "Mock Transcription")
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsRow(title: "状态", valueText: "无需外部配置")
+                }
+            }
+        }
+    }
+
+    private var providerBinding: Binding<TranscriptionProviderKind> {
+        Binding {
+            settingsStore.selectedProviderKind
+        } set: { newValue in
+            guard newValue.isEnabledInCurrentBuild else {
+                return
+            }
+            settingsStore.selectedProviderKind = newValue
+        }
+    }
+}

@@ -8,8 +8,14 @@
 import AppKit
 import SwiftUI
 
+enum MacWhisperCppSettingsMode {
+    case model
+    case authorizationAndTest
+}
+
 struct MacWhisperCppSettingsView: View {
     @ObservedObject var settingsStore: TranscriptionSettingsStore
+    let mode: MacWhisperCppSettingsMode
     @State private var isCheckingConfiguration = false
     @State private var isTestingWhisperLaunch = false
     @State private var isRefreshingFileDiagnostics = false
@@ -19,191 +25,179 @@ struct MacWhisperCppSettingsView: View {
     @State private var fileVisibilityConclusion: String?
     @State private var pendingExecutableDirectoryFallbackURL: URL?
     @State private var pendingFFmpegDirectoryFallbackURL: URL?
+    @State private var isAdvancedDiagnosticsExpanded = false
     @Environment(\.colorScheme) private var colorScheme
 
+    init(settingsStore: TranscriptionSettingsStore, mode: MacWhisperCppSettingsMode = .authorizationAndTest) {
+        self.settingsStore = settingsStore
+        self.mode = mode
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("whisper.cpp 配置")
-                        .font(MacTypography.chineseHeadline(size: 17))
-                        .foregroundStyle(MacTheme.deepText(for: colorScheme))
+        switch mode {
+        case .model:
+            modelSettings
+        case .authorizationAndTest:
+            authorizationAndTestSettings
+        }
+    }
 
-                    Text("优先使用内置 helper，本机模型由你选择")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                        .foregroundStyle(MacTheme.softText(for: colorScheme))
-
-                    Text("调试标记：1110")
-                        .font(MacTypography.chineseCaption(size: 10, weight: .medium))
-                        .foregroundStyle(MacTheme.softText(for: colorScheme).opacity(0.68))
-                }
-
-                Spacer()
-
-                MacStatusPill(
-                    text: settingsStore.lastValidationStatus.displayText,
-                    systemImage: validationIcon,
-                    tint: validationTint
+    private var modelSettings: some View {
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            RokuricsSettingsGroup(title: "模型") {
+                RokuricsSettingsRow(
+                    title: "当前模型",
+                    valueText: settingsStore.whisperConfiguration.currentModelDisplayName
+                )
+                RokuricsSettingsDivider()
+                RokuricsSettingsRow(
+                    title: "模型等级",
+                    valueText: settingsStore.whisperConfiguration.modelKind.displayName
+                )
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "选择模型",
+                    valueText: currentDraft.modelAuthorizationState.displayText,
+                    systemImage: "cube",
+                    tint: authorizationTint(for: currentDraft.modelAuthorizationState),
+                    action: chooseModel
                 )
             }
+        }
+    }
 
-            VStack(spacing: 12) {
-                pathRow(
-                    title: "可执行文件路径",
-                    value: executablePathBinding,
-                    placeholder: "/path/to/whisper.cpp/main",
-                    authorizationLabel: "whisper-cli",
-                    authorizationState: currentDraft.executableAuthorizationState,
-                    buttonTitle: "选择文件",
-                    action: chooseExecutable,
-                    directoryButtonTitle: "选择所在文件夹",
-                    directoryAction: chooseExecutableParentDirectory
+    private var authorizationAndTestSettings: some View {
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            RokuricsSettingsGroup(title: "模型") {
+                RokuricsSettingsRow(title: "当前模型", valueText: settingsStore.whisperConfiguration.currentModelDisplayName)
+                RokuricsSettingsDivider()
+                RokuricsSettingsPickerRow(title: "默认语言", selection: languageBinding) {
+                    Text("auto").tag("auto")
+                    Text("zh").tag("zh")
+                    Text("en").tag("en")
+                }
+                RokuricsSettingsDivider()
+                RokuricsSettingsToggleRow(title: "JSON Segments", isOn: preferSegmentOutputBinding)
+            }
+
+            RokuricsSettingsGroup(title: "授权") {
+                RokuricsSettingsActionRow(
+                    title: "whisper-cli",
+                    valueText: currentDraft.executableAuthorizationState.displayText,
+                    systemImage: "terminal",
+                    tint: authorizationTint(for: currentDraft.executableAuthorizationState),
+                    action: chooseExecutable
                 )
-
-                pathRow(
-                    title: "模型文件路径",
-                    value: modelPathBinding,
-                    placeholder: "/path/to/ggml-model.bin",
-                    authorizationLabel: "model",
-                    authorizationState: currentDraft.modelAuthorizationState,
-                    buttonTitle: "选择模型",
-                    action: chooseModel,
-                    directoryButtonTitle: nil,
-                    directoryAction: nil
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "模型文件",
+                    valueText: currentDraft.modelAuthorizationState.displayText,
+                    systemImage: "cube",
+                    tint: authorizationTint(for: currentDraft.modelAuthorizationState),
+                    action: chooseModel
                 )
-
-                pathRow(
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
                     title: "whisper.cpp 根目录",
-                    value: whisperCppRootDirectoryPathBinding,
-                    placeholder: "/Users/vita/ThirdParty/whisper.cpp",
-                    authorizationLabel: "whisper.cpp 根目录",
-                    authorizationState: currentDraft.whisperCppRootDirectoryAuthorizationState,
-                    buttonTitle: "选择目录",
-                    action: chooseWhisperCppRootDirectory,
-                    directoryButtonTitle: nil,
-                    directoryAction: nil
+                    valueText: currentDraft.whisperCppRootDirectoryAuthorizationState.displayText,
+                    systemImage: "folder",
+                    tint: authorizationTint(for: currentDraft.whisperCppRootDirectoryAuthorizationState),
+                    action: chooseWhisperCppRootDirectory
                 )
-
-                pathRow(
-                    title: "ffmpeg 路径",
-                    value: ffmpegPathBinding,
-                    placeholder: ffmpegPlaceholder,
-                    authorizationLabel: "ffmpeg",
-                    authorizationState: currentDraft.ffmpegAuthorizationState,
-                    buttonTitle: "选择文件",
-                    action: chooseFFmpeg,
-                    directoryButtonTitle: "选择所在文件夹",
-                    directoryAction: chooseFFmpegParentDirectory
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "ffmpeg fallback",
+                    valueText: ffmpegFallbackValue,
+                    systemImage: "film",
+                    tint: authorizationTint(for: currentDraft.ffmpegAuthorizationState),
+                    action: chooseFFmpeg
                 )
-
-                Text("音频转换：Apple 原生；ffmpeg：可选 fallback / debug")
-                    .font(MacTypography.chineseCaption(size: 11, weight: .medium))
-                    .foregroundStyle(MacTheme.softText(for: colorScheme).opacity(0.72))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text(runtimeStatusText)
-                    .font(MacTypography.chineseCaption(size: 11, weight: .medium))
-                    .foregroundStyle(MacTheme.softText(for: colorScheme).opacity(0.72))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("默认语言")
-                            .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
-                            .foregroundStyle(MacTheme.softText(for: colorScheme))
-
-                        TextField("auto / zh / en", text: languageBinding)
-                            .font(MacTypography.technical(size: 13, weight: .semibold))
-                            .textFieldStyle(.plain)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(fieldBackground)
-                    }
-                    .frame(width: 180, alignment: .leading)
-
-                    Toggle(isOn: preferSegmentOutputBinding) {
-                        Text("尝试读取 JSON segments")
-                            .font(MacTypography.chineseBody(size: 13, weight: .semibold))
-                            .foregroundStyle(MacTheme.deepText(for: colorScheme))
-                    }
-                    .toggleStyle(.switch)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    checkConfiguration()
-                } label: {
-                    Label(isCheckingConfiguration ? "检查中" : "检查配置", systemImage: "checkmark.shield")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .macGlassCapsule(fillOpacity: 0.40, strokeOpacity: 0.34)
-                }
-                .buttonStyle(.plain)
-                .disabled(isCheckingConfiguration)
-
-                Button {
-                    testWhisperCliLaunch()
-                } label: {
-                    Label(isTestingWhisperLaunch ? "测试中" : "测试启动 whisper-cli", systemImage: "terminal")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .macGlassCapsule(fillOpacity: 0.30, strokeOpacity: 0.28)
-                }
-                .buttonStyle(.plain)
-                .disabled(isTestingWhisperLaunch)
-
-                Button {
+            RokuricsSettingsGroup(title: "操作") {
+                RokuricsSettingsActionRow(
+                    title: isCheckingConfiguration ? "检查中" : "检查配置",
+                    valueText: settingsStore.lastValidationStatus.displayText,
+                    systemImage: "checkmark.shield",
+                    tint: validationTint,
+                    isDisabled: isCheckingConfiguration,
+                    action: checkConfiguration
+                )
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: isTestingWhisperLaunch ? "测试中" : "测试启动",
+                    valueText: "",
+                    systemImage: "terminal",
+                    isDisabled: isTestingWhisperLaunch,
+                    action: testWhisperCliLaunch
+                )
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "保存设置",
+                    valueText: saveMessage ?? "",
+                    systemImage: "square.and.arrow.down",
+                    tint: MacTheme.leaf
+                ) {
                     debugLogCurrentBookmarkState(context: "save.beforePersist")
                     settingsStore.persist()
                     saveMessage = "已保存"
-                } label: {
-                    Label("保存", systemImage: "square.and.arrow.down")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .macGlassCapsule(fillOpacity: 0.34, strokeOpacity: 0.30)
                 }
-                .buttonStyle(.plain)
-
-                Button {
-                    resetAuthorizations()
-                } label: {
-                    Label("重置授权", systemImage: "arrow.counterclockwise")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .macGlassCapsule(fillOpacity: 0.28, strokeOpacity: 0.26)
-                }
-                .buttonStyle(.plain)
-
-                if let saveMessage {
-                    Text(saveMessage)
-                        .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
-                        .foregroundStyle(MacTheme.leaf)
-                }
-
-                Spacer()
+                RokuricsSettingsDivider()
+                RokuricsSettingsDangerRow(
+                    title: "重置授权",
+                    valueText: "",
+                    systemImage: "arrow.counterclockwise",
+                    action: resetAuthorizations
+                )
             }
 
-            Text(settingsStore.lastValidationMessage)
-                .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                .foregroundStyle(MacTheme.softText(for: colorScheme))
-                .lineLimit(3)
-                .textSelection(.enabled)
-
-            if let launchProbeMessage {
-                Text(launchProbeMessage)
-                    .font(MacTypography.chineseCaption(size: 11, weight: .medium))
-                    .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    .lineLimit(4)
-                    .textSelection(.enabled)
+            RokuricsSettingsGroup(title: "高级") {
+                RokuricsSettingsDisclosureRow(
+                    title: "诊断",
+                    valueText: settingsStore.lastValidationStatus.displayText,
+                    isExpanded: $isAdvancedDiagnosticsExpanded
+                ) {
+                    RokuricsSettingsRow(title: "Runtime", valueText: runtimeStatusText)
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsRow(title: "检查结果", valueText: settingsStore.lastValidationMessage)
+                    if let launchProbeMessage {
+                        RokuricsSettingsDivider()
+                        RokuricsSettingsRow(title: "启动结果", valueText: launchProbeMessage)
+                    }
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsActionRow(
+                        title: isRefreshingFileDiagnostics ? "刷新中" : "文件可见性诊断",
+                        valueText: fileVisibilityConclusion ?? "",
+                        systemImage: "list.bullet.rectangle",
+                        isDisabled: isRefreshingFileDiagnostics,
+                        action: refreshFileVisibilityDiagnostics
+                    )
+                    if let fileVisibilityMessage {
+                        RokuricsSettingsDivider()
+                        Text(fileVisibilityMessage)
+                            .font(MacTypography.technical(size: 10, weight: .medium))
+                            .foregroundStyle(MacTheme.softText(for: colorScheme))
+                            .lineLimit(12)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, RokuricsSettingsMetrics.rowHorizontalPadding)
+                            .padding(.vertical, 10)
+                    }
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsActionRow(
+                        title: "whisper-cli 文件夹授权",
+                        valueText: "可选",
+                        systemImage: "folder.badge.gearshape",
+                        action: chooseExecutableParentDirectory
+                    )
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsActionRow(
+                        title: "ffmpeg 文件夹授权",
+                        valueText: "可选",
+                        systemImage: "folder.badge.gearshape",
+                        action: chooseFFmpegParentDirectory
+                    )
+                }
             }
-
-            fileVisibilityDiagnosticsCard
         }
     }
 
@@ -288,6 +282,14 @@ struct MacWhisperCppSettingsView: View {
         AudioPreprocessorConfiguration.discoveredFFmpegExecutablePath() ?? "/opt/homebrew/bin/ffmpeg"
     }
 
+    private var ffmpegFallbackValue: String {
+        let path = settingsStore.whisperConfiguration.normalizedFFmpegExecutablePath
+        if path.isEmpty {
+            return "可选"
+        }
+        return currentDraft.ffmpegAuthorizationState.displayText
+    }
+
     private var currentDraft: WhisperCppSettingsDraft {
         WhisperCppSettingsDraft(configuration: settingsStore.whisperConfiguration)
     }
@@ -298,15 +300,6 @@ struct MacWhisperCppSettingsView: View {
         )
         let helperText = runtime.bundledHelperIsExecutable ? "helper：内置可用" : "helper：内置不可用"
         return "\(runtime.statusText)；\(helperText)"
-    }
-
-    private var fieldBackground: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(MacTheme.glassSurface(for: colorScheme).opacity(0.32))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(MacTheme.glassStroke(for: colorScheme).opacity(0.32), lineWidth: 1)
-            }
     }
 
     private var fileVisibilityDiagnosticsCard: some View {
@@ -383,34 +376,21 @@ struct MacWhisperCppSettingsView: View {
             HStack(spacing: 10) {
                 TextField(placeholder, text: value)
                     .font(MacTypography.technical(size: 12, weight: .medium))
-                    .textFieldStyle(.plain)
                     .lineLimit(1)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(fieldBackground)
+                    .macSettingsFieldChrome()
 
                 Button(action: action) {
                     Label(buttonTitle, systemImage: "folder")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .lineLimit(1)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .macGlassCapsule(fillOpacity: 0.34, strokeOpacity: 0.30)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MacSettingsCapsuleButtonStyle(tint: MacTheme.aqua))
                 .frame(width: 108)
 
                 if let directoryButtonTitle,
                    let directoryAction {
                     Button(action: directoryAction) {
                         Label(directoryButtonTitle, systemImage: "folder.badge.gearshape")
-                            .font(MacTypography.chineseCaption(size: 11, weight: .bold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 9)
-                            .macGlassCapsule(fillOpacity: 0.24, strokeOpacity: 0.24)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(MacSettingsCapsuleButtonStyle(tint: MacTheme.aqua))
                     .frame(width: 132)
                 }
             }

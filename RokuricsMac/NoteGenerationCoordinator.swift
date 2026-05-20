@@ -87,6 +87,8 @@ final class NoteGenerationCoordinator: ObservableObject {
         var failureProviderID = providerID
         var failureModelName: String?
         var failureEndpointDescription: String?
+        var failureMode: ProcessingMode?
+        var failureSections: [RecordingNoteSectionRecord]?
 
         defer {
             activeTaskRecordingIDs.remove(recordingID)
@@ -141,7 +143,45 @@ final class NoteGenerationCoordinator: ObservableObject {
                 requestedAt: Date()
             )
 
-            let result = try await provider.generateNote(request: request)
+            let transcriptText = loadedTranscript.transcriptMarkdown ?? loadedTranscript.transcriptResult?.text ?? ""
+            let notePlan = LongNoteGenerationPlanner.plan(transcript: transcriptText)
+            var sectionRecords = notePlan.chunks.map { RecordingNoteSectionRecord(chunk: $0) }
+            failureMode = notePlan.mode
+            failureSections = notePlan.shouldUseChunking ? sectionRecords : nil
+
+            try updateNoteStatus(
+                recordingID: recordingID,
+                status: "generating",
+                noteRelativePath: nil,
+                generatedAt: nil,
+                providerID: provider.id,
+                modelName: failureModelName,
+                endpointDescription: failureEndpointDescription,
+                errorMessage: nil,
+                mode: notePlan.mode,
+                sections: notePlan.shouldUseChunking ? sectionRecords : nil,
+                stage: "mark note plan"
+            )
+
+            let result: NoteGenerationResult
+            if notePlan.shouldUseChunking {
+                let output: ChunkedNoteGenerationOutput
+                do {
+                    output = try await ChunkedNoteGenerationRunner(
+                        provider: provider,
+                        noteStore: noteStore
+                    ).generate(request: request, plan: notePlan)
+                } catch let error as ChunkedNoteGenerationFailure {
+                    failureSections = error.sectionRecords
+                    throw error
+                }
+                result = output.result
+                sectionRecords = output.sectionRecords
+                failureSections = sectionRecords
+            } else {
+                result = try await provider.generateNote(request: request)
+            }
+
             let saveResult = try saveNote(result: result, request: request)
 
             try updateNoteStatus(
@@ -153,6 +193,8 @@ final class NoteGenerationCoordinator: ObservableObject {
                 modelName: result.modelName,
                 endpointDescription: failureEndpointDescription,
                 errorMessage: nil,
+                mode: notePlan.mode,
+                sections: notePlan.shouldUseChunking ? sectionRecords : nil,
                 stage: "mark generated"
             )
         } catch {
@@ -168,6 +210,8 @@ final class NoteGenerationCoordinator: ObservableObject {
                     modelName: failureModelName,
                     endpointDescription: failureEndpointDescription,
                     errorMessage: failureMessage,
+                    mode: failureMode,
+                    sections: failureSections,
                     stage: "mark failed"
                 )
             } catch {
@@ -224,6 +268,8 @@ final class NoteGenerationCoordinator: ObservableObject {
         modelName: String?,
         endpointDescription: String?,
         errorMessage: String?,
+        mode: ProcessingMode? = nil,
+        sections: [RecordingNoteSectionRecord]? = nil,
         stage: String
     ) throws {
         debugLogReceiveStatusUpdate(
@@ -242,7 +288,9 @@ final class NoteGenerationCoordinator: ObservableObject {
                 providerID: providerID,
                 modelName: modelName,
                 endpointDescription: endpointDescription,
-                errorMessage: errorMessage
+                errorMessage: errorMessage,
+                mode: mode,
+                sections: sections
             )
             debugLogReceiveStatusUpdateSucceeded(recordingID: recordingID, status: status, stage: stage)
         } catch {

@@ -110,4 +110,20 @@ struct WhisperCppTranscriptionConfiguration: Codable, Equatable {
 
         return URL(fileURLWithPath: path).lastPathComponent
     }
+
+    var modelKind: WhisperModelKind {
+        WhisperModelKind.infer(fromModelFileName: modelFileName)
+    }
+
+    var currentModelDisplayName: String {
+        guard let modelFileName else {
+            return "未选择模型"
+        }
+
+        return "\(modelFileName) (\(modelKind.displayName))"
+    }
+
+    var preferredLargeModel: Bool {
+        modelKind.isLargePreferred
+    }
 }

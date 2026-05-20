@@ -5,6 +5,7 @@
 //  Created by Codex on 2026/5/10.
 //
 
+import CryptoKit
 import Foundation
 import Network
 import SystemConfiguration
@@ -34,8 +35,22 @@ final class SecureLocalHTTPSServer {
         let body: Data
     }
 
+    private struct HTTPHeaderRequest {
+        let method: String
+        let path: String
+        let headers: [String: String]
+        let bodyStart: Int
+        let contentLength: Int
+    }
+
     private enum ParseResult {
         case complete(HTTPRequest)
+        case incomplete
+        case invalid(String)
+    }
+
+    private enum HeaderParseResult {
+        case complete(HTTPHeaderRequest)
         case incomplete
         case invalid(String)
     }
@@ -239,6 +254,21 @@ final class SecureLocalHTTPSServer {
                 return
             }
 
+            switch self.parseHeaderRequest(from: nextBuffer) {
+            case .complete(let headerRequest) where self.shouldStreamBody(for: headerRequest):
+                self.startStreamingRecordingAudioBody(headerRequest, initialBuffer: nextBuffer, on: connection)
+                return
+            case .invalid(let reason):
+                if reason == "body_too_large" {
+                    self.sendError(statusCode: 413, reason: "Payload Too Large", error: reason, on: connection)
+                    return
+                }
+                self.sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+                return
+            case .complete, .incomplete:
+                break
+            }
+
             switch self.parseRequest(from: nextBuffer) {
             case .complete(let request):
                 self.handleRequest(request, on: connection)
@@ -259,6 +289,27 @@ final class SecureLocalHTTPSServer {
     }
 
     private func parseRequest(from buffer: Data) -> ParseResult {
+        switch parseHeaderRequest(from: buffer) {
+        case .complete(let headerRequest):
+            let bodyEnd = headerRequest.bodyStart + headerRequest.contentLength
+            guard buffer.count >= bodyEnd else {
+                return .incomplete
+            }
+
+            return .complete(HTTPRequest(
+                method: headerRequest.method,
+                path: headerRequest.path,
+                headers: headerRequest.headers,
+                body: Data(buffer[headerRequest.bodyStart..<bodyEnd])
+            ))
+        case .incomplete:
+            return .incomplete
+        case .invalid(let reason):
+            return .invalid(reason)
+        }
+    }
+
+    private func parseHeaderRequest(from buffer: Data) -> HeaderParseResult {
         let headerSeparator = Data([13, 10, 13, 10])
         guard let headerRange = buffer.range(of: headerSeparator) else {
             if buffer.count > maxHeaderBytes {
@@ -307,17 +358,176 @@ final class SecureLocalHTTPSServer {
             return .invalid("body_too_large")
         }
 
-        let bodyEnd = bodyStart + contentLength
-        guard buffer.count >= bodyEnd else {
-            return .incomplete
-        }
-
-        return .complete(HTTPRequest(
+        return .complete(HTTPHeaderRequest(
             method: requestParts[0],
             path: path,
             headers: headers,
-            body: Data(buffer[bodyStart..<bodyEnd])
+            bodyStart: bodyStart,
+            contentLength: contentLength
         ))
+    }
+
+    private func shouldStreamBody(for request: HTTPHeaderRequest) -> Bool {
+        request.method == "POST" && request.path == "/upload-recording-audio"
+    }
+
+    private func startStreamingRecordingAudioBody(_ request: HTTPHeaderRequest, initialBuffer: Data, on connection: NWConnection) {
+        let headers = Self.normalizedHeaders(request.headers)
+        guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            sendError(statusCode: 400, reason: "Bad Request", error: "missing_recording_id", on: connection)
+            return
+        }
+
+        guard request.contentLength > 0 else {
+            sendError(statusCode: 400, reason: "Bad Request", error: "empty_body", on: connection)
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
+            do {
+                let temporaryURL = try recordingFileStore.temporaryAudioUploadURL(recordingID: recordingID)
+                let writer = try StreamingBodyWriter(fileURL: temporaryURL)
+                let initialEnd = min(initialBuffer.count, request.bodyStart + request.contentLength)
+                let initialBody = initialEnd > request.bodyStart ? Data(initialBuffer[request.bodyStart..<initialEnd]) : Data()
+                try writer.append(initialBody)
+                let remainingBytes = request.contentLength - initialBody.count
+                streamRemainingRecordingAudioBody(
+                    request,
+                    writer: writer,
+                    remainingBytes: remainingBytes,
+                    on: connection
+                )
+            } catch let error as MacRecordingFileStoreError {
+                sendError(statusCode: error.responseStatusCode, reason: error.responseReason, error: error.localizedDescription, on: connection)
+            } catch {
+                sendError(statusCode: 500, reason: "Internal Server Error", error: "audio_storage_failed", on: connection)
+            }
+        }
+    }
+
+    private func streamRemainingRecordingAudioBody(
+        _ request: HTTPHeaderRequest,
+        writer: StreamingBodyWriter,
+        remainingBytes: Int,
+        on connection: NWConnection
+    ) {
+        guard remainingBytes > 0 else {
+            finishStreamingRecordingAudioBody(request, writer: writer, on: connection)
+            return
+        }
+
+        connection.receive(minimumIncompleteLength: 1, maximumLength: min(64 * 1024, remainingBytes)) { [weak self] chunk, _, isComplete, error in
+            guard let self else {
+                writer.close()
+                connection.cancel()
+                return
+            }
+
+            if let error {
+                print("[RokuricsHTTPS] streaming audio receive failed: \(error)")
+                writer.close()
+                Task { @MainActor [weak self] in
+                    self?.recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                }
+                connection.cancel()
+                return
+            }
+
+            let data = chunk ?? Data()
+            do {
+                try writer.append(data)
+            } catch {
+                writer.close()
+                Task { @MainActor [weak self] in
+                    self?.recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                    self?.sendError(statusCode: 500, reason: "Internal Server Error", error: "audio_storage_failed", on: connection)
+                }
+                return
+            }
+
+            let nextRemainingBytes = remainingBytes - data.count
+            if nextRemainingBytes <= 0 {
+                self.finishStreamingRecordingAudioBody(request, writer: writer, on: connection)
+            } else if isComplete {
+                writer.close()
+                Task { @MainActor [weak self] in
+                    self?.recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                    self?.sendError(statusCode: 400, reason: "Bad Request", error: "body_incomplete", on: connection)
+                }
+            } else {
+                self.streamRemainingRecordingAudioBody(request, writer: writer, remainingBytes: nextRemainingBytes, on: connection)
+            }
+        }
+    }
+
+    private func finishStreamingRecordingAudioBody(
+        _ request: HTTPHeaderRequest,
+        writer: StreamingBodyWriter,
+        on connection: NWConnection
+    ) {
+        let bodySHA256 = writer.finalizeHashHex()
+        Task { @MainActor [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
+            switch requestVerifier.verify(
+                method: request.method,
+                path: request.path,
+                headers: request.headers,
+                bodySHA256: bodySHA256,
+                bodyByteCount: writer.bytesWritten
+            ) {
+            case .accepted(let device):
+                do {
+                    let headers = Self.normalizedHeaders(request.headers)
+                    guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                        sendError(statusCode: 400, reason: "Bad Request", error: "missing_recording_id", on: connection)
+                        return
+                    }
+
+                    let result = try recordingFileStore.saveAudio(
+                        temporaryFileURL: writer.fileURL,
+                        recordingID: recordingID,
+                        requestedFileName: headers["x-rokurics-filename"],
+                        sourceDevice: device,
+                        checksum: bodySHA256,
+                        fileSize: Int64(writer.bytesWritten)
+                    )
+                    onRecordingAccepted(result.recordingID)
+                    print("[RokuricsRecordingUpload] streaming audio accepted: \(result.recordingID)")
+                    sendJSON(
+                        statusCode: 200,
+                        reason: "OK",
+                        body: RecordingUploadSuccessResponse(
+                            ok: true,
+                            message: "recording audio received",
+                            recordingID: result.recordingID,
+                            metadataFileName: result.metadataFileName,
+                            audioFileName: result.audioFileName,
+                            receiveFileName: result.receiveFileName
+                        ),
+                        on: connection
+                    )
+                } catch let error as MacRecordingFileStoreError {
+                    recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                    sendError(statusCode: error.responseStatusCode, reason: error.responseReason, error: error.localizedDescription, on: connection)
+                } catch {
+                    recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                    sendError(statusCode: 500, reason: "Internal Server Error", error: "audio_storage_failed", on: connection)
+                }
+            case .rejected(let reason):
+                recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
+                sendError(statusCode: reason == "body_too_large" ? 413 : 400, reason: reason == "body_too_large" ? "Payload Too Large" : "Bad Request", error: reason, on: connection)
+            }
+        }
     }
 
     private func handleRequest(_ request: HTTPRequest, on connection: NWConnection) {
@@ -574,6 +784,48 @@ final class SecureLocalHTTPSServer {
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
+}
+
+private final class StreamingBodyWriter {
+    let fileURL: URL
+    private let fileHandle: FileHandle
+    private var hasher = SHA256()
+    private(set) var bytesWritten = 0
+    private var isClosed = false
+
+    init(fileURL: URL) throws {
+        self.fileURL = fileURL.standardizedFileURL
+        FileManager.default.createFile(atPath: self.fileURL.path, contents: nil)
+        fileHandle = try FileHandle(forWritingTo: self.fileURL)
+    }
+
+    func append(_ data: Data) throws {
+        guard !data.isEmpty else {
+            return
+        }
+
+        try fileHandle.write(contentsOf: data)
+        hasher.update(data: data)
+        bytesWritten += data.count
+    }
+
+    func finalizeHashHex() -> String {
+        close()
+        return Data(hasher.finalize()).hexString
+    }
+
+    func close() {
+        guard !isClosed else {
+            return
+        }
+
+        try? fileHandle.close()
+        isClosed = true
+    }
+
+    deinit {
+        close()
+    }
 }
 
 private enum MacSystemInfoProvider {

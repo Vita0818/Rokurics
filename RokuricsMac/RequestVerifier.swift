@@ -20,7 +20,8 @@ final class RequestVerifier {
         let requiredUploadType: String?
     }
 
-    private let pairedDeviceStore: PairedDeviceStore
+    private let pairedDeviceProvider: @MainActor (String) -> PairedDevice?
+    private let markDeviceSeen: @MainActor (String, Date) -> Void
     private var recentNoncesByDeviceID: [String: [String: Date]] = [:]
     private let timestampWindow: TimeInterval = 5 * 60
     private let pathRules: [String: PathRule] = [
@@ -42,10 +43,40 @@ final class RequestVerifier {
     ]
 
     init(pairedDeviceStore: PairedDeviceStore) {
-        self.pairedDeviceStore = pairedDeviceStore
+        self.pairedDeviceProvider = { pairedDeviceStore.device(for: $0) }
+        self.markDeviceSeen = { deviceID, date in
+            pairedDeviceStore.markSeen(deviceID: deviceID, at: date)
+        }
+    }
+
+    init(
+        pairedDeviceProvider: @escaping @MainActor (String) -> PairedDevice?,
+        markDeviceSeen: @escaping @MainActor (String, Date) -> Void = { _, _ in }
+    ) {
+        self.pairedDeviceProvider = pairedDeviceProvider
+        self.markDeviceSeen = markDeviceSeen
     }
 
     func verify(method: String, path: String, headers: [String: String], body: Data, now: Date = Date()) -> RequestVerificationResult {
+        let actualBodyHash = MacSecurityUtilities.sha256Hex(body)
+        return verify(
+            method: method,
+            path: path,
+            headers: headers,
+            bodySHA256: actualBodyHash,
+            bodyByteCount: body.count,
+            now: now
+        )
+    }
+
+    func verify(
+        method: String,
+        path: String,
+        headers: [String: String],
+        bodySHA256 actualBodyHash: String,
+        bodyByteCount: Int,
+        now: Date = Date()
+    ) -> RequestVerificationResult {
         guard method == "POST" else {
             return reject("method_not_allowed")
         }
@@ -54,7 +85,7 @@ final class RequestVerifier {
             return reject("path_not_allowed")
         }
 
-        guard body.count <= pathRule.maxBodyBytes else {
+        guard bodyByteCount <= pathRule.maxBodyBytes else {
             return reject("body_too_large")
         }
 
@@ -83,7 +114,7 @@ final class RequestVerifier {
             return reject("missing_security_headers")
         }
 
-        guard let device = pairedDeviceStore.device(for: deviceID) else {
+        guard let device = pairedDeviceProvider(deviceID) else {
             return reject("unknown_device")
         }
 
@@ -100,7 +131,6 @@ final class RequestVerifier {
         }
         print("[RokuricsVerifier] nonce accepted")
 
-        let actualBodyHash = MacSecurityUtilities.sha256Hex(body)
         guard MacSecurityUtilities.constantTimeEquals(actualBodyHash, bodySHA256.lowercased()) else {
             return reject("body_hash_mismatch")
         }
@@ -124,7 +154,7 @@ final class RequestVerifier {
         }
 
         rememberNonce(nonce, for: deviceID, now: now)
-        pairedDeviceStore.markSeen(deviceID: deviceID, at: now)
+        markDeviceSeen(deviceID, now)
         print("[RokuricsVerifier] request signature verification success: deviceIDPrefix=\(String(deviceID.prefix(12)))")
         return .accepted(device: device)
     }

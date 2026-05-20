@@ -10,18 +10,18 @@ import SwiftUI
 
 struct MacIPhoneConnectionView: View {
     @ObservedObject var secureReceiverService: SecureReceiverService
+    var isSidebarCollapsed = false
     @Environment(\.colorScheme) private var colorScheme
     @State private var isFingerprintVisible = false
     @State private var didCopyPairingInfo = false
     @State private var activeSheet: MacIPhoneConnectionSheet?
-    private let pairingCardWidth: CGFloat = 620
 
     var body: some View {
         ZStack {
             MacTheme.pageGradient(for: colorScheme)
                 .ignoresSafeArea()
 
-            MacDetailContentContainer(maxWidth: 980, topPadding: 34, bottomPadding: 38) {
+            MacDetailContentContainer(maxWidth: 1120) {
                 VStack(alignment: .leading, spacing: 26) {
                     if let device = secureReceiverService.latestPairedDevice {
                         connectedHeader
@@ -60,13 +60,23 @@ struct MacIPhoneConnectionView: View {
             unpairedHeader
             unpairedContent
         }
-        .frame(maxWidth: pairingCardWidth, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: isSidebarCollapsed), alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: MacIPhoneConnectionCardLayout.isCentered(isSidebarCollapsed: isSidebarCollapsed) ? .center : .leading)
+        .transaction { transaction in
+            if MacIPhoneConnectionCardLayout.disablesWidthAnimation {
+                transaction.animation = nil
+            }
+        }
     }
 
     private func connectionTitle(isPaired: Bool) -> some View {
         HStack(alignment: .center, spacing: 14) {
-            MacMixedLanguageTitle(english: "iPhone", chinese: "连接", englishSize: 40, chineseSize: 38)
+            MacMixedFontText(
+                text: "iPhone 连接",
+                chineseFont: MacTypography.font(for: .pageTitle),
+                englishFont: MacTypography.englishTitle(size: 32, weight: .semibold),
+                numberFont: MacTypography.numberTitle(size: 32, weight: .bold)
+            )
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
 
             Spacer(minLength: 12)
@@ -118,7 +128,7 @@ struct MacIPhoneConnectionView: View {
             .opacity(canCopyPairingInfo ? 1 : 0.52)
         }
         .padding(22)
-        .frame(maxWidth: pairingCardWidth, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .macLiquidGlassCard(cornerRadius: 24, material: .thinMaterial, fillOpacity: 0.44, strokeOpacity: 0.40, shadowOpacity: 0.08, shadowRadius: 16, shadowY: 8)
     }
 
@@ -233,6 +243,19 @@ private enum MacIPhoneConnectionSheet: String, Identifiable {
     case secureUploads
 
     var id: String { rawValue }
+}
+
+struct MacIPhoneConnectionCardLayout {
+    static let stableMaxWidth: CGFloat = 760
+    static let disablesWidthAnimation = true
+
+    static func cardMaxWidth(isSidebarCollapsed: Bool) -> CGFloat {
+        stableMaxWidth
+    }
+
+    static func isCentered(isSidebarCollapsed: Bool) -> Bool {
+        true
+    }
 }
 
 private struct MacConnectionStateCapsule: View {
@@ -814,14 +837,12 @@ private struct MacSheetHeader: View {
 
             Spacer(minLength: 16)
 
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    .frame(width: 28, height: 28)
-                    .macGlassCapsule(fillOpacity: 0.26, strokeOpacity: 0.22)
-            }
-            .buttonStyle(.plain)
+            RokuricsCircleIconButton(
+                systemImage: "xmark",
+                accessibilityTitle: "关闭",
+                tint: MacTheme.softText(for: colorScheme),
+                action: onClose
+            )
         }
     }
 }

@@ -20,9 +20,12 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     let noteError: String?
     let receiveStatus: String
     let hasAudio: Bool
+    let audioRelativePath: String?
+    let receiveRelativePath: String?
     let transcriptRelativePath: String?
     let transcriptMarkdownRelativePath: String?
     let transcriptionError: String?
+    let studyFiling: StudyFilingPath?
     let isDeleted: Bool
     let deletedAt: Date?
 
@@ -37,9 +40,12 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         noteStatus: String,
         receiveStatus: String,
         hasAudio: Bool,
+        audioRelativePath: String? = nil,
+        receiveRelativePath: String? = nil,
         transcriptRelativePath: String?,
         transcriptMarkdownRelativePath: String?,
         transcriptionError: String?,
+        studyFiling: StudyFilingPath? = nil,
         isDeleted: Bool = false,
         deletedAt: Date? = nil,
         noteRelativePath: String? = nil,
@@ -57,9 +63,12 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         self.noteError = noteError
         self.receiveStatus = receiveStatus
         self.hasAudio = hasAudio
+        self.audioRelativePath = audioRelativePath
+        self.receiveRelativePath = receiveRelativePath
         self.transcriptRelativePath = transcriptRelativePath
         self.transcriptMarkdownRelativePath = transcriptMarkdownRelativePath
         self.transcriptionError = transcriptionError
+        self.studyFiling = studyFiling?.isEmpty == true ? nil : studyFiling
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
     }

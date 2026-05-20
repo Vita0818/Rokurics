@@ -7,7 +7,70 @@
 
 import SwiftUI
 
+enum RokuricsTypographyToken: Equatable, CaseIterable {
+    case pageTitle
+    case sectionTitle
+    case cardTitle
+    case body
+    case secondary
+    case chatGreeting
+    case chatMessage
+    case chatInput
+    case technical
+}
+
 enum RokuricsTypography {
+    static func font(for token: RokuricsTypographyToken) -> Font {
+        switch token {
+        case .pageTitle:
+            return pageTitle()
+        case .sectionTitle:
+            return sectionTitle()
+        case .cardTitle:
+            return cardTitle()
+        case .body:
+            return body()
+        case .secondary:
+            return secondary()
+        case .chatGreeting:
+            return chatGreeting()
+        case .chatMessage:
+            return chatMessage()
+        case .chatInput:
+            return chatInput()
+        case .technical:
+            return technical()
+        }
+    }
+
+    static func pageTitle(size: CGFloat = 34, weight: Font.Weight = .bold) -> Font {
+        chineseTitle(size: size, weight: weight)
+    }
+
+    static func sectionTitle(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
+        headline(size: size, weight: weight)
+    }
+
+    static func cardTitle(size: CGFloat = 16, weight: Font.Weight = .semibold) -> Font {
+        headline(size: size, weight: weight)
+    }
+
+    static func secondary(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
+        caption(size: size, weight: weight)
+    }
+
+    static func chatGreeting(size: CGFloat = 24, weight: Font.Weight = .semibold) -> Font {
+        .system(size: size, weight: weight)
+    }
+
+    static func chatMessage(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
+        body(size: size, weight: weight)
+    }
+
+    static func chatInput(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
+        body(size: size, weight: weight)
+    }
+
     static func englishTitle(size: CGFloat = 30, weight: Font.Weight = .bold) -> Font {
         .system(size: size, weight: weight, design: .serif)
     }
@@ -74,6 +137,92 @@ enum RokuricsTypography {
 
     static func button(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
         .system(size: size, weight: weight)
+    }
+}
+
+struct RokuricsInlineTextFragment: Equatable, Identifiable {
+    enum Kind: Equatable {
+        case normal(RokuricsTypographyToken)
+        case technical
+    }
+
+    let text: String
+    let kind: Kind
+
+    var id: String {
+        "\(kind.identifier):\(text)"
+    }
+
+    static func text(_ value: String, token: RokuricsTypographyToken = .body) -> RokuricsInlineTextFragment {
+        RokuricsInlineTextFragment(text: value, kind: .normal(token))
+    }
+
+    static func technical(_ value: String) -> RokuricsInlineTextFragment {
+        RokuricsInlineTextFragment(text: value, kind: .technical)
+    }
+}
+
+private extension RokuricsInlineTextFragment.Kind {
+    var identifier: String {
+        switch self {
+        case .normal(let token):
+            return "normal-\(token)"
+        case .technical:
+            return "technical"
+        }
+    }
+}
+
+struct RokuricsMixedTypographyText: View {
+    let fragments: [RokuricsInlineTextFragment]
+
+    var body: some View {
+        Text(attributedText)
+    }
+
+    private var attributedText: AttributedString {
+        var result = AttributedString()
+
+        for fragment in fragments {
+            var segment = AttributedString(fragment.text)
+            segment.font = font(for: fragment.kind)
+            result += segment
+        }
+
+        return result
+    }
+
+    private func font(for kind: RokuricsInlineTextFragment.Kind) -> Font {
+        switch kind {
+        case .normal(let token):
+            return RokuricsTypography.font(for: token)
+        case .technical:
+            return RokuricsTypography.font(for: .technical)
+        }
+    }
+}
+
+struct RokuricsTechnicalInlineText: View {
+    let prefix: String
+    let technical: String
+    var suffix = ""
+
+    var body: some View {
+        RokuricsMixedTypographyText(
+            fragments: [
+                .text(prefix),
+                .technical(technical),
+                .text(suffix)
+            ].filter { !$0.text.isEmpty }
+        )
+    }
+}
+
+struct RokuricsPathTextView: View {
+    let path: String
+
+    var body: some View {
+        RokuricsMixedTypographyText(fragments: [.technical(path)])
     }
 }
 

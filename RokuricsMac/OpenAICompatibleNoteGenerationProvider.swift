@@ -163,6 +163,7 @@ struct OpenAICompatibleNoteGenerationProvider: NoteGenerationProvider {
 
                 规则：
                 - 不要编造转写中没有的信息
+                - “## 摘要”必须包含 1～3 句简短摘要，适合显示在录音详情页摘要卡片中
                 - 如果转写内容很短，就如实生成简短笔记
                 - 如果听不清或内容不足，要标注“需要回听确认”
                 - 不要输出 AI 自己的思考过程

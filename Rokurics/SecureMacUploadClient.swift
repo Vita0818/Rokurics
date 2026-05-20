@@ -384,6 +384,89 @@ final class SecureMacUploadClient: ObservableObject {
         }
     }
 
+    func uploadSignedFile(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        fileURL: URL,
+        contentType: String,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> SecureUploadServerResponse {
+        guard settings.isPaired else {
+            throw SecureMacUploadError.notPaired
+        }
+
+        let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
+        let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
+        let now = Date()
+        let bodySHA256 = try SecureUploadUtilities.sha256Hex(fileURL: fileURL)
+        let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
+        let nonce = SecureUploadUtilities.randomBase64URLToken()
+        let signaturePayload = [
+            "POST",
+            path,
+            timestamp,
+            nonce,
+            bodySHA256
+        ].joined(separator: "\n")
+
+        guard let signature = SecureUploadUtilities.hmacSHA256Base64URL(
+            message: signaturePayload,
+            secretBase64URL: settings.sharedSecretBase64URL
+        ) else {
+            throw SecureMacUploadError.invalidSecret
+        }
+
+        let pinnedSession = makePinnedSession(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: nil,
+            requestTimeout: requestTimeout,
+            resourceTimeout: resourceTimeout
+        )
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.deviceID, forHTTPHeaderField: "X-Rokurics-Device-ID")
+        request.setValue(timestamp, forHTTPHeaderField: "X-Rokurics-Timestamp")
+        request.setValue(nonce, forHTTPHeaderField: "X-Rokurics-Nonce")
+        request.setValue(bodySHA256, forHTTPHeaderField: "X-Rokurics-Body-SHA256")
+        request.setValue(signature, forHTTPHeaderField: "X-Rokurics-Signature")
+        request.setValue(recordingID, forHTTPHeaderField: "X-Rokurics-Recording-ID")
+        request.setValue(fileName, forHTTPHeaderField: "X-Rokurics-Filename")
+        request.setValue(uploadType, forHTTPHeaderField: "X-Rokurics-Upload-Type")
+
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? -1
+        print("[RokuricsRecordingUpload] target URL: \(url.absoluteString)")
+        print("[RokuricsRecordingUpload] uploadType=\(uploadType), fileSize=\(fileSize), recordingIDPrefix=\(String(recordingID.prefix(12)))")
+
+        do {
+            let (data, response) = try await pinnedSession.session.upload(for: request, fromFile: fileURL)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("[RokuricsRecordingUpload] response status code: \(statusCode)")
+            print("[RokuricsRecordingUpload] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
+
+            let uploadResponse = try JSONDecoder().decode(SecureUploadServerResponse.self, from: data)
+            guard uploadResponse.ok else {
+                throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "recording_upload_failed")
+            }
+
+            return uploadResponse
+        } catch {
+            if let pinningError = pinnedSession.context.currentPinningError {
+                throw pinningError
+            }
+            print("[RokuricsRecordingUpload] errors: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
     private struct PinnedSession {
         let session: URLSession
         let context: PinnedRequestContext

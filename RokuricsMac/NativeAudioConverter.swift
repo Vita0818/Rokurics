@@ -20,10 +20,14 @@ struct NativeAudioConverter: AudioConverting {
     }
 
     func convertToWhisperWAV(inputURL: URL, outputURL: URL) async throws {
-        try convertSynchronously(inputURL: inputURL, outputURL: outputURL)
+        try convertSynchronously(inputURL: inputURL, outputURL: outputURL, timeRange: nil)
     }
 
-    private func convertSynchronously(inputURL: URL, outputURL: URL) throws {
+    func convertToWhisperWAV(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>?) async throws {
+        try convertSynchronously(inputURL: inputURL, outputURL: outputURL, timeRange: timeRange)
+    }
+
+    private func convertSynchronously(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>?) throws {
         try Task.checkCancellation()
         debugLogStart(inputURL: inputURL, outputURL: outputURL)
 
@@ -36,7 +40,12 @@ struct NativeAudioConverter: AudioConverting {
 
         try prepareOutputURL(outputURL)
         let outputFile = try makeOutputFile(outputURL: outputURL, targetFormat: targetFormat)
-        try convertWithAssetReader(inputURL: inputURL, outputFile: outputFile, targetFormat: targetFormat)
+        try convertWithAssetReader(
+            inputURL: inputURL,
+            outputFile: outputFile,
+            targetFormat: targetFormat,
+            timeRange: timeRange
+        )
         try validateOutputWAV(outputURL)
         debugLogCompleted(outputURL: outputURL)
     }
@@ -44,7 +53,8 @@ struct NativeAudioConverter: AudioConverting {
     private func convertWithAssetReader(
         inputURL: URL,
         outputFile: AVAudioFile,
-        targetFormat: AVAudioFormat
+        targetFormat: AVAudioFormat,
+        timeRange: ClosedRange<TimeInterval>?
     ) throws {
         let asset = AVURLAsset(url: inputURL)
         let tracks = asset.tracks(withMediaType: .audio)
@@ -63,6 +73,15 @@ struct NativeAudioConverter: AudioConverting {
                 stage: "asset reader setup",
                 message: error.localizedDescription
             )
+        }
+
+        if let timeRange {
+            let start = CMTime(seconds: max(0, timeRange.lowerBound), preferredTimescale: 600)
+            let duration = CMTime(
+                seconds: max(0, timeRange.upperBound - timeRange.lowerBound),
+                preferredTimescale: 600
+            )
+            reader.timeRange = CMTimeRange(start: start, duration: duration)
         }
 
         let trackOutput = AVAssetReaderTrackOutput(track: track, outputSettings: Self.targetWAVSettings)

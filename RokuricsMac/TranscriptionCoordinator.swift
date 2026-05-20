@@ -78,6 +78,8 @@ final class TranscriptionCoordinator: ObservableObject {
         var failureProviderID = providerID
         var failureStartedAt: Date?
         var failureModelName: String?
+        var failureMode: ProcessingMode?
+        var failureChunks: [RecordingTranscriptionChunkRecord]?
 
         defer {
             activeTaskRecordingIDs.remove(recordingID)
@@ -104,6 +106,10 @@ final class TranscriptionCoordinator: ObservableObject {
             let source = try recordingFileStore.transcriptionSource(for: recordingID)
             let outputDirectory = try transcriptStore.outputDirectory(recordingID: recordingID, createdAt: source.createdAt)
             let taskID = UUID().uuidString.lowercased()
+            let chunkPlan = LongAudioTranscriptionPlanner.plan(duration: source.duration)
+            var chunkRecords = chunkPlan.chunks.map { RecordingTranscriptionChunkRecord(descriptor: $0) }
+            failureMode = chunkPlan.mode
+            failureChunks = chunkPlan.shouldUseChunking ? chunkRecords : nil
             debugLogPreparedSource(
                 taskID: taskID,
                 recordingID: recordingID,
@@ -118,7 +124,8 @@ final class TranscriptionCoordinator: ObservableObject {
                 language: settingsStore.currentLanguage,
                 prompt: nil,
                 outputDirectory: outputDirectory,
-                createdAt: Date()
+                createdAt: Date(),
+                sourceDuration: source.duration
             )
             let startedAt = Date()
             failureStartedAt = startedAt
@@ -133,10 +140,85 @@ final class TranscriptionCoordinator: ObservableObject {
                 startedAt: startedAt,
                 completedAt: nil,
                 errorMessage: nil,
+                mode: chunkPlan.mode,
+                chunks: chunkPlan.shouldUseChunking ? chunkRecords : nil,
                 stage: "mark transcribing"
             )
 
-            let result = try await provider.transcribe(request: request)
+            let result: TranscriptionResult
+            if chunkPlan.shouldUseChunking {
+                var chunkResults: [(descriptor: AudioChunkDescriptor, result: TranscriptionResult)] = []
+                for chunk in chunkPlan.chunks {
+                    try Task.checkCancellation()
+                    chunkRecords[chunk.index].status = .processing
+                    failureChunks = chunkRecords
+                    try updateTranscriptionStatus(
+                        recordingID: recordingID,
+                        status: "transcribing",
+                        transcriptRelativePath: nil,
+                        transcriptMarkdownRelativePath: nil,
+                        providerID: provider.id,
+                        modelName: nil,
+                        startedAt: startedAt,
+                        completedAt: nil,
+                        errorMessage: nil,
+                        mode: .chunked,
+                        chunks: chunkRecords,
+                        stage: "mark chunk \(chunk.index) processing"
+                    )
+
+                    let chunkRequest = request.chunkRequest(
+                        taskID: "\(taskID)-\(chunk.id)",
+                        descriptor: chunk
+                    )
+                    do {
+                        let chunkResult = try await provider.transcribe(request: chunkRequest)
+                        let chunkSaveResult = try saveChunkTranscript(
+                            result: chunkResult,
+                            request: chunkRequest,
+                            recordingTitle: source.title,
+                            chunk: chunk
+                        )
+                        chunkRecords[chunk.index].status = .generated
+                        chunkRecords[chunk.index].transcriptRelativePath = chunkSaveResult.transcriptRelativePath
+                        chunkRecords[chunk.index].transcriptMarkdownRelativePath = chunkSaveResult.transcriptMarkdownRelativePath
+                        chunkRecords[chunk.index].error = nil
+                        failureChunks = chunkRecords
+                        chunkResults.append((descriptor: chunk, result: chunkResult))
+
+                        try updateTranscriptionStatus(
+                            recordingID: recordingID,
+                            status: "transcribing",
+                            transcriptRelativePath: nil,
+                            transcriptMarkdownRelativePath: nil,
+                            providerID: chunkResult.providerID,
+                            modelName: chunkResult.modelName,
+                            startedAt: startedAt,
+                            completedAt: nil,
+                            errorMessage: nil,
+                            mode: .chunked,
+                            chunks: chunkRecords,
+                            stage: "mark chunk \(chunk.index) transcribed"
+                        )
+                    } catch {
+                        chunkRecords[chunk.index].status = .failed
+                        chunkRecords[chunk.index].error = "chunk \(chunk.index) failed: \(error.localizedDescription)"
+                        failureChunks = chunkRecords
+                        throw TranscriptionError.processFailed(
+                            exitCode: -1,
+                            message: "分块转写失败：chunkIndex=\(chunk.index); start=\(chunk.startTime); end=\(chunk.endTime); error=\(error.localizedDescription)"
+                        )
+                    }
+                }
+
+                result = TranscriptionChunkMerger.merge(
+                    recordingID: recordingID,
+                    taskID: taskID,
+                    chunks: chunkResults
+                )
+            } else {
+                result = try await provider.transcribe(request: request)
+            }
             failureModelName = result.modelName
             let saveResult = try saveTranscript(result: result, request: request, recordingTitle: source.title)
 
@@ -150,6 +232,8 @@ final class TranscriptionCoordinator: ObservableObject {
                 startedAt: result.startedAt,
                 completedAt: result.completedAt,
                 errorMessage: nil,
+                mode: chunkPlan.mode,
+                chunks: chunkPlan.shouldUseChunking ? chunkRecords : nil,
                 stage: "mark transcribed"
             )
         } catch {
@@ -166,6 +250,8 @@ final class TranscriptionCoordinator: ObservableObject {
                     startedAt: failureStartedAt,
                     completedAt: Date(),
                     errorMessage: failureMessage,
+                    mode: failureMode,
+                    chunks: failureChunks,
                     stage: "mark failed"
                 )
             } catch {
@@ -213,6 +299,32 @@ final class TranscriptionCoordinator: ObservableObject {
         }
     }
 
+    private func saveChunkTranscript(
+        result: TranscriptionResult,
+        request: TranscriptionRequest,
+        recordingTitle: String,
+        chunk: AudioChunkDescriptor
+    ) throws -> TranscriptStoreSaveResult {
+        do {
+            debugLogChunkTranscriptStoreWrite(request: request, chunk: chunk)
+            return try transcriptStore.saveChunk(
+                result: result,
+                request: request,
+                recordingTitle: recordingTitle,
+                chunk: chunk
+            )
+        } catch {
+            throw TranscriptionError.transcriptStoreWriteFailed(
+                "chunk transcript store writing 失败：\n" +
+                "stage=chunk transcript store writing\n" +
+                "chunkIndex=\(chunk.index)\n" +
+                "recordingID=\(request.recordingID)\n" +
+                "outputDirectory=\(request.outputDirectory.path)\n" +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
     private func updateTranscriptionStatus(
         recordingID: String,
         status: String,
@@ -223,6 +335,8 @@ final class TranscriptionCoordinator: ObservableObject {
         startedAt: Date?,
         completedAt: Date?,
         errorMessage: String?,
+        mode: ProcessingMode? = nil,
+        chunks: [RecordingTranscriptionChunkRecord]? = nil,
         stage: String
     ) throws {
         debugLogReceiveStatusUpdate(
@@ -242,7 +356,9 @@ final class TranscriptionCoordinator: ObservableObject {
                 modelName: modelName,
                 startedAt: startedAt,
                 completedAt: completedAt,
-                errorMessage: errorMessage
+                errorMessage: errorMessage,
+                mode: mode,
+                chunks: chunks
             )
             debugLogReceiveStatusUpdateSucceeded(recordingID: recordingID, status: status, stage: stage)
         } catch {
@@ -269,6 +385,7 @@ final class TranscriptionCoordinator: ObservableObject {
             "recordingID=\(recordingID), " +
             "audioFile=\(source.audioFileURL.path), " +
             "metadataFile=\(source.metadataFileURL?.path ?? "nil"), " +
+            "duration=\(source.duration), " +
             "outputDirectory=\(outputDirectory.path)"
         )
         #endif
@@ -280,6 +397,18 @@ final class TranscriptionCoordinator: ObservableObject {
             "[Rokurics][TranscriptionCoordinator] transcriptStore.write: " +
             "taskID=\(request.taskID), " +
             "recordingID=\(request.recordingID), " +
+            "outputDirectory=\(request.outputDirectory.path)"
+        )
+        #endif
+    }
+
+    private func debugLogChunkTranscriptStoreWrite(request: TranscriptionRequest, chunk: AudioChunkDescriptor) {
+        #if DEBUG
+        print(
+            "[Rokurics][TranscriptionCoordinator] chunkTranscriptStore.write: " +
+            "taskID=\(request.taskID), " +
+            "recordingID=\(request.recordingID), " +
+            "chunkIndex=\(chunk.index), " +
             "outputDirectory=\(request.outputDirectory.path)"
         )
         #endif
@@ -335,7 +464,9 @@ final class TranscriptionCoordinator: ObservableObject {
             "whisperBookmarkBytes=\(configuration.executableBookmarkData?.count ?? 0), " +
             "whisperParentDirectoryBookmarkBytes=\(configuration.executableParentDirectoryBookmarkData?.count ?? 0), " +
             "whisperCppRootDirectoryBookmarkBytes=\(configuration.whisperCppRootDirectoryBookmarkData?.count ?? 0), " +
-            "modelBookmarkBytes=\(configuration.modelBookmarkData?.count ?? 0)"
+            "modelBookmarkBytes=\(configuration.modelBookmarkData?.count ?? 0), " +
+            "modelKind=\(configuration.modelKind.displayName), " +
+            "preferredLargeModel=\(configuration.preferredLargeModel)"
         )
         #endif
     }

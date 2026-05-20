@@ -7,8 +7,16 @@
 
 import SwiftUI
 
+enum MacNoteGenerationSettingsMode {
+    case provider
+    case model
+    case api
+    case test
+}
+
 struct MacNoteGenerationSettingsView: View {
     @ObservedObject var settingsStore: NoteGenerationSettingsStore
+    let mode: MacNoteGenerationSettingsMode
     @State private var providerKindDraft: NoteGenerationProviderKind = .mock
     @State private var providerPresetDraft: AIProviderPreset = .customOpenAICompatible
     @State private var baseURLDraft = ""
@@ -23,181 +31,342 @@ struct MacNoteGenerationSettingsView: View {
     @State private var diagnosticMessage: String?
     @State private var diagnosticIsSuccess = false
     @State private var activeDiagnostic: DiagnosticAction?
-    @Environment(\.colorScheme) private var colorScheme
+
+    init(settingsStore: NoteGenerationSettingsStore, mode: MacNoteGenerationSettingsMode = .provider) {
+        self.settingsStore = settingsStore
+        self.mode = mode
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("AI 总结")
-                .font(MacTypography.chineseHeadline(size: 18))
-                .foregroundStyle(MacTheme.deepText(for: colorScheme))
-
-            Text("1516")
-                .font(MacTypography.numberBody(size: 10, weight: .medium))
-                .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
-                .opacity(0.72)
-
-            VStack(alignment: .leading, spacing: 14) {
-                Picker("Provider", selection: $providerKindDraft) {
-                    ForEach(NoteGenerationProviderKind.allCases) { providerKind in
-                        Text(providerKind.displayName).tag(providerKind)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                if providerKindDraft == .openAICompatible {
-                    openAICompatibleSettings
-                } else if providerKindDraft == .anthropicMessages {
-                    anthropicSettings
-                } else {
-                    Text("Mock provider 无需配置")
-                        .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                        .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
-                }
-
-                HStack(spacing: 10) {
-                    Button("保存配置", action: saveConfiguration)
-                        .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 8)
-                        .macGlassCapsule(fillOpacity: 0.32, strokeOpacity: 0.30)
-
-                    if providerKindDraft != .mock {
-                        if supportsModelRefresh {
-                            diagnosticButton(title: "刷新模型", action: .models)
-                        }
-                        diagnosticButton(title: "测试连接", action: .connection)
-                        diagnosticButton(title: "测试模型", action: .model)
-                        diagnosticButton(title: "测试生成", action: .generation)
-                    }
-                }
-
-                if let diagnosticMessage {
-                    Text(diagnosticMessage)
-                        .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                        .foregroundStyle(diagnosticIsSuccess ? MacTheme.leaf : MacTheme.coral)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                }
+        VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
+            switch mode {
+            case .provider:
+                aiProviderGroup
+            case .model:
+                aiModelGroup
+            case .api:
+                aiAPIGroup
+            case .test:
+                aiTestGroup
             }
         }
-        .padding(20)
-        .frame(maxWidth: 680, alignment: .leading)
-        .macLiquidGlassCard(cornerRadius: 22, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.05, shadowRadius: 10, shadowY: 5)
         .onAppear(perform: syncDrafts)
     }
 
-    @ViewBuilder
-    private var openAICompatibleSettings: some View {
-        settingsField(title: "Preset") {
-            Picker("Preset", selection: providerPresetBinding) {
-                ForEach(AIProviderPreset.allCases) { preset in
-                    Text(preset.displayName).tag(preset)
+    private var aiProviderGroup: some View {
+        RokuricsSettingsGroup(title: "Provider") {
+            RokuricsSettingsPickerRow(title: "AI Provider", selection: providerKindBinding) {
+                ForEach(NoteGenerationProviderKind.allCases) { providerKind in
+                    Text(providerKind.displayName).tag(providerKind)
                 }
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(maxWidth: 260, alignment: .leading)
-        }
 
-        settingsField(title: "Base URL") {
-            TextField("http://127.0.0.1:1234/v1", text: $baseURLDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(MacTypography.englishBody(size: 13, weight: .medium))
-        }
+            RokuricsSettingsDivider()
+            RokuricsSettingsRow(
+                title: "状态",
+                valueText: providerKindDraft == .mock ? "本地" : "需配置"
+            )
 
-        settingsField(title: "Model") {
-            VStack(alignment: .leading, spacing: 8) {
-                if !modelPickerCandidates.isEmpty {
-                    Picker("Model", selection: $modelNameDraft) {
-                        ForEach(modelPickerCandidates, id: \.self) { modelName in
+            RokuricsSettingsDivider()
+            RokuricsSettingsActionRow(
+                title: "保存设置",
+                valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                systemImage: "square.and.arrow.down",
+                tint: MacTheme.leaf,
+                action: saveConfiguration
+            )
+        }
+    }
+
+    private var aiModelGroup: some View {
+        RokuricsSettingsGroup(title: "模型") {
+            RokuricsSettingsRow(title: "当前模型", valueText: currentModelSummary)
+
+            if providerKindDraft != .mock {
+                if !currentModelCandidates.isEmpty {
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsPickerRow(title: "模型候选", selection: modelNameBinding) {
+                        ForEach(currentModelCandidates, id: \.self) { modelName in
                             Text(modelName).tag(modelName)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: 340, alignment: .leading)
                 }
 
-                TextField("google/gemma-4-e4b", text: $modelNameDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(MacTypography.englishBody(size: 13, weight: .medium))
-            }
-        }
+                RokuricsSettingsDivider()
+                RokuricsSettingsTextFieldRow(
+                    title: "手动模型名",
+                    placeholder: modelPlaceholder,
+                    text: modelNameBinding
+                )
 
-        settingsField(title: "API Key") {
-            SecureField("可选", text: $apiKeyDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(MacTypography.englishBody(size: 13, weight: .medium))
-        }
-    }
-
-    @ViewBuilder
-    private var anthropicSettings: some View {
-        settingsField(title: "Base URL") {
-            TextField("https://api.anthropic.com", text: $anthropicBaseURLDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(MacTypography.englishBody(size: 13, weight: .medium))
-        }
-
-        settingsField(title: "Model") {
-            VStack(alignment: .leading, spacing: 8) {
-                if !anthropicModelPickerCandidates.isEmpty {
-                    Picker("Model", selection: $anthropicModelNameDraft) {
-                        ForEach(anthropicModelPickerCandidates, id: \.self) { modelName in
-                            Text(modelName).tag(modelName)
-                        }
+                if supportsModelRefresh {
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsActionRow(
+                        title: activeDiagnostic == .models ? "刷新中" : "刷新模型",
+                        valueText: modelCandidateSummary,
+                        systemImage: "arrow.clockwise",
+                        isDisabled: activeDiagnostic != nil
+                    ) {
+                        runDiagnostic(.models)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: 340, alignment: .leading)
                 }
 
-                TextField("claude-sonnet-4-6", text: $anthropicModelNameDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(MacTypography.englishBody(size: 13, weight: .medium))
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "保存设置",
+                    valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                    systemImage: "square.and.arrow.down",
+                    tint: MacTheme.leaf,
+                    action: saveConfiguration
+                )
             }
         }
+    }
 
-        settingsField(title: "API Key") {
-            SecureField("必填", text: $anthropicAPIKeyDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(MacTypography.englishBody(size: 13, weight: .medium))
-        }
+    private var aiAPIGroup: some View {
+        RokuricsSettingsGroup(title: "API 设置") {
+            if providerKindDraft == .openAICompatible {
+                RokuricsSettingsPickerRow(title: "Preset", selection: providerPresetBinding) {
+                    ForEach(AIProviderPreset.allCases) { preset in
+                        Text(preset.displayName).tag(preset)
+                    }
+                }
+                RokuricsSettingsDivider()
+            }
 
-        settingsField(title: "Anthropic Version") {
-            TextField("2023-06-01", text: $anthropicVersionDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(MacTypography.englishBody(size: 13, weight: .medium))
+            RokuricsSettingsRow(
+                title: "Provider",
+                valueText: providerKindDraft.displayName
+            )
+
+            if providerKindDraft != .mock {
+                RokuricsSettingsDivider()
+                RokuricsSettingsTextFieldRow(
+                    title: "Base URL",
+                    placeholder: baseURLPlaceholder,
+                    text: baseURLBinding,
+                    isTechnical: true
+                )
+
+                RokuricsSettingsDivider()
+                RokuricsSettingsSecureFieldRow(
+                    title: "API Key",
+                    placeholder: apiKeyPlaceholder,
+                    text: apiKeyBinding
+                )
+
+                if providerKindDraft == .anthropicMessages {
+                    RokuricsSettingsDivider()
+                    RokuricsSettingsTextFieldRow(
+                        title: "Version",
+                        placeholder: "2023-06-01",
+                        text: $anthropicVersionDraft,
+                        isTechnical: true
+                    )
+                }
+            }
+
+            RokuricsSettingsDivider()
+            RokuricsSettingsActionRow(
+                title: "保存设置",
+                valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                systemImage: "square.and.arrow.down",
+                tint: MacTheme.leaf,
+                action: saveConfiguration
+            )
         }
     }
 
-    private func settingsField<Content: View>(
-        title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(MacTypography.englishCaption(size: 12, weight: .semibold))
-                .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
+    private var aiTestGroup: some View {
+        RokuricsSettingsGroup(title: "测试") {
+            if providerKindDraft == .mock {
+                RokuricsSettingsRow(title: "状态", valueText: "Mock provider 本地可用")
+            } else {
+                RokuricsSettingsActionRow(
+                    title: activeDiagnostic == .connection ? "测试中" : "测试连接",
+                    valueText: "",
+                    systemImage: DiagnosticAction.connection.systemImage,
+                    isDisabled: activeDiagnostic != nil
+                ) {
+                    runDiagnostic(.connection)
+                }
 
-            content()
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: activeDiagnostic == .model ? "测试中" : "测试模型",
+                    valueText: "",
+                    systemImage: DiagnosticAction.model.systemImage,
+                    isDisabled: activeDiagnostic != nil
+                ) {
+                    runDiagnostic(.model)
+                }
+
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: activeDiagnostic == .generation ? "测试中" : "测试生成",
+                    valueText: "",
+                    systemImage: DiagnosticAction.generation.systemImage,
+                    isDisabled: activeDiagnostic != nil
+                ) {
+                    runDiagnostic(.generation)
+                }
+
+                RokuricsSettingsDivider()
+                RokuricsSettingsActionRow(
+                    title: "保存设置",
+                    valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                    systemImage: "square.and.arrow.down",
+                    tint: MacTheme.leaf,
+                    action: saveConfiguration
+                )
+            }
+
+            if let diagnosticMessage {
+                RokuricsSettingsDivider()
+                RokuricsSettingsRow(
+                    title: "结果",
+                    valueText: diagnosticMessage,
+                    systemImage: diagnosticIsSuccess ? "checkmark.circle" : "exclamationmark.triangle",
+                    tint: diagnosticIsSuccess ? MacTheme.leaf : MacTheme.coral
+                )
+            }
         }
     }
 
-    private func diagnosticButton(title: String, action: DiagnosticAction) -> some View {
-        Button {
-            runDiagnostic(action)
-        } label: {
-            Text(activeDiagnostic == action ? "测试中" : title)
-                .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                .lineLimit(1)
-                .frame(width: action == .models ? 68 : 58)
-                .padding(.vertical, 8)
-                .macGlassCapsule(fillOpacity: 0.28, strokeOpacity: 0.28)
+    private var providerKindBinding: Binding<NoteGenerationProviderKind> {
+        Binding {
+            providerKindDraft
+        } set: { newValue in
+            providerKindDraft = newValue
+            diagnosticMessage = nil
         }
-        .buttonStyle(.plain)
-        .disabled(activeDiagnostic != nil)
+    }
+
+    private var currentModelSummary: String {
+        switch providerKindDraft {
+        case .mock:
+            return "mock-note-local"
+        case .openAICompatible:
+            return compactValue(modelNameDraft, fallback: "未选择模型")
+        case .anthropicMessages:
+            return compactValue(anthropicModelNameDraft, fallback: "未选择模型")
+        }
+    }
+
+    private var modelCandidateSummary: String {
+        let count = currentModelCandidates.count
+        return count > 0 ? "\(count) 个" : ""
+    }
+
+    private var currentModelCandidates: [String] {
+        switch providerKindDraft {
+        case .mock:
+            return []
+        case .openAICompatible:
+            return modelPickerCandidates
+        case .anthropicMessages:
+            return anthropicModelPickerCandidates
+        }
+    }
+
+    private var baseURLPlaceholder: String {
+        switch providerKindDraft {
+        case .mock:
+            return ""
+        case .openAICompatible:
+            return "http://127.0.0.1:1234/v1"
+        case .anthropicMessages:
+            return "https://api.anthropic.com"
+        }
+    }
+
+    private var modelPlaceholder: String {
+        switch providerKindDraft {
+        case .mock:
+            return "mock-note-local"
+        case .openAICompatible:
+            return "google/gemma-4-e4b"
+        case .anthropicMessages:
+            return "claude-sonnet-4-6"
+        }
+    }
+
+    private var apiKeyPlaceholder: String {
+        providerKindDraft == .anthropicMessages ? "必填" : "可选"
+    }
+
+    private var baseURLBinding: Binding<String> {
+        Binding {
+            switch providerKindDraft {
+            case .mock:
+                return ""
+            case .openAICompatible:
+                return baseURLDraft
+            case .anthropicMessages:
+                return anthropicBaseURLDraft
+            }
+        } set: { value in
+            switch providerKindDraft {
+            case .mock:
+                break
+            case .openAICompatible:
+                baseURLDraft = value
+            case .anthropicMessages:
+                anthropicBaseURLDraft = value
+            }
+            diagnosticMessage = nil
+        }
+    }
+
+    private var modelNameBinding: Binding<String> {
+        Binding {
+            switch providerKindDraft {
+            case .mock:
+                return "mock-note-local"
+            case .openAICompatible:
+                return modelNameDraft
+            case .anthropicMessages:
+                return anthropicModelNameDraft
+            }
+        } set: { value in
+            switch providerKindDraft {
+            case .mock:
+                break
+            case .openAICompatible:
+                modelNameDraft = value
+            case .anthropicMessages:
+                anthropicModelNameDraft = value
+            }
+            diagnosticMessage = nil
+        }
+    }
+
+    private var apiKeyBinding: Binding<String> {
+        Binding {
+            switch providerKindDraft {
+            case .mock:
+                return ""
+            case .openAICompatible:
+                return apiKeyDraft
+            case .anthropicMessages:
+                return anthropicAPIKeyDraft
+            }
+        } set: { value in
+            switch providerKindDraft {
+            case .mock:
+                break
+            case .openAICompatible:
+                apiKeyDraft = value
+            case .anthropicMessages:
+                anthropicAPIKeyDraft = value
+            }
+            diagnosticMessage = nil
+        }
+    }
+
+    private func compactValue(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     private func syncDrafts() {
@@ -418,10 +587,24 @@ struct MacNoteGenerationSettingsView: View {
         )
     }
 
-    private enum DiagnosticAction {
+    private enum DiagnosticAction: Equatable {
         case models
         case connection
         case model
         case generation
+
+        var systemImage: String {
+            switch self {
+            case .models:
+                return "arrow.clockwise"
+            case .connection:
+                return "network"
+            case .model:
+                return "cpu"
+            case .generation:
+                return "sparkles"
+            }
+        }
     }
+
 }

@@ -401,8 +401,11 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
             audioFileURL: preparedAudio.preparedAudioFileURL,
             modelURL: modelAccess.url,
             outputPrefix: outputPrefix,
-            language: request.language ?? configuration.normalizedLanguage
+            language: request.language ?? configuration.normalizedLanguage,
+            chunk: request.chunkDescriptor,
+            appliesChunkTimingInWhisper: !preparedAudio.didConvert
         )
+        let processTimeout = transcriptionTimeout(for: request)
         let expectedTextURL = WhisperCppOutputPaths.expectedTextOutputURL(outputPrefix: outputPrefix)
         let launchContext: WhisperCppProcessLaunchContext
         if let executableAccess, let rootAccess {
@@ -431,9 +434,12 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
 
         let output: WhisperCppProcessOutput
         if runtime.mode == .externalDebugFallback {
-            output = try await runWhisperProcessWithParentDirectoryFallback(initialContext: launchContext)
+            output = try await runWhisperProcessWithParentDirectoryFallback(
+                initialContext: launchContext,
+                timeout: processTimeout
+            )
         } else {
-            output = try await runWhisperProcess(context: launchContext)
+            output = try await runWhisperProcess(context: launchContext, timeout: processTimeout)
         }
         debugLogWhisperProcessExit(exitCode: output.exitCode, stdout: output.stdout, stderr: output.stderr)
         try Task.checkCancellation()
@@ -816,7 +822,14 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
         return outputPrefix
     }
 
-    private func whisperArguments(audioFileURL: URL, modelURL: URL, outputPrefix: URL, language: String) -> [String] {
+    private func whisperArguments(
+        audioFileURL: URL,
+        modelURL: URL,
+        outputPrefix: URL,
+        language: String,
+        chunk: AudioChunkDescriptor?,
+        appliesChunkTimingInWhisper: Bool
+    ) -> [String] {
         var arguments = [
             "-m", modelURL.path,
             "-f", audioFileURL.path,
@@ -828,8 +841,26 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
             arguments.append("-oj")
         }
 
+        if let chunk, appliesChunkTimingInWhisper {
+            arguments.append(contentsOf: [
+                "--offset-t", Self.timeArgument(chunk.startTime),
+                "--duration", Self.timeArgument(chunk.duration)
+            ])
+        }
+
         arguments.append(contentsOf: ["-of", outputPrefix.path])
         return arguments
+    }
+
+    private func transcriptionTimeout(for request: TranscriptionRequest) -> TimeInterval {
+        let audioDuration = request.chunkDescriptor?.duration ?? request.sourceDuration
+        return max(
+            timeout,
+            WhisperTranscriptionTimeoutPolicy.timeout(
+                audioDuration: audioDuration,
+                modelKind: configuration.modelKind
+            )
+        )
     }
 
     private func makeProcessLaunchContext(
@@ -974,10 +1005,11 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
     }
 
     private func runWhisperProcessWithParentDirectoryFallback(
-        initialContext: WhisperCppProcessLaunchContext
+        initialContext: WhisperCppProcessLaunchContext,
+        timeout: TimeInterval
     ) async throws -> WhisperCppProcessOutput {
         do {
-            return try await runWhisperProcess(context: initialContext)
+            return try await runWhisperProcess(context: initialContext, timeout: timeout)
         } catch TranscriptionError.processLaunchFailed(let initialMessage) {
             guard initialContext.authorizationSource == .fileBookmark,
                   configuration.executableReference.hasParentDirectoryBookmark else {
@@ -1013,11 +1045,14 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
                 fallbackNote: "file bookmark launch failed; retrying with parent directory bookmark; previous=\(Self.limited(initialMessage, maxCharacters: 500))"
             )
             debugLogWhisperProcessStart(context: fallbackContext)
-            return try await runWhisperProcess(context: fallbackContext)
+            return try await runWhisperProcess(context: fallbackContext, timeout: timeout)
         }
     }
 
-    private func runWhisperProcess(context: WhisperCppProcessLaunchContext) async throws -> WhisperCppProcessOutput {
+    private func runWhisperProcess(
+        context: WhisperCppProcessLaunchContext,
+        timeout: TimeInterval
+    ) async throws -> WhisperCppProcessOutput {
         let request = WhisperCppProcessExecutionRequest(
             arguments: context.arguments,
             executableURL: context.processExecutableURL,
@@ -1931,6 +1966,10 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
         return String(string.prefix(maxCharacters)) + "..."
     }
 
+    private static func timeArgument(_ value: TimeInterval) -> String {
+        String(format: "%.3f", max(0, value))
+    }
+
     private func debugLogRequest(_ request: TranscriptionRequest) {
         #if DEBUG
         print(
@@ -1939,6 +1978,8 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
             "recordingID=\(request.recordingID), " +
             "audioFile=\(request.audioFileURL.path), " +
             "metadataFile=\(request.metadataFileURL?.path ?? "nil"), " +
+            "sourceDuration=\(request.sourceDuration.map(String.init(describing:)) ?? "nil"), " +
+            "chunkIndex=\(request.chunkDescriptor?.index.description ?? "nil"), " +
             "outputDirectory=\(request.outputDirectory.path)"
         )
         #endif

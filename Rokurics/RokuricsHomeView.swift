@@ -325,8 +325,8 @@ private struct RokuricsRecordingOrb: View {
             return "打开录音页，正在配置录音"
         case .stopping:
             return "打开录音页，正在保存录音"
-        case .naming:
-            return "命名录音"
+        case .filing:
+            return "归档录音"
         case .saving:
             return "正在保存录音"
         default:
@@ -338,7 +338,7 @@ private struct RokuricsRecordingOrb: View {
         switch state {
         case .requestingPermission, .configuringSession, .recording, .paused, .stopping, .saving:
             return true
-        case .idle, .naming, .saved, .permissionDenied, .failed:
+        case .idle, .filing, .saved, .permissionDenied, .failed:
             return false
         }
     }
@@ -349,7 +349,7 @@ private struct RokuricsRecordingOrb: View {
             return "..."
         case .recording, .paused:
             return RokuricsRecordingFormat.clock(elapsedSeconds)
-        case .idle, .naming, .saved, .permissionDenied, .failed:
+        case .idle, .filing, .saved, .permissionDenied, .failed:
             return "+"
         }
     }
@@ -366,7 +366,7 @@ private struct RokuricsRecordingOrb: View {
             return RokuricsColors.softTeal
         case .requestingPermission, .configuringSession, .stopping, .saving:
             return RokuricsColors.aqua
-        case .idle, .naming, .saved, .permissionDenied, .failed:
+        case .idle, .filing, .saved, .permissionDenied, .failed:
             return RokuricsColors.mint
         }
     }
@@ -520,11 +520,14 @@ private struct RokuricsHomeDashboardCard: View {
             RokuricsHomeDashboardDivider(scale: scale)
 
             RokuricsHomeDashboardColumn(
-                title: "队列",
-                value: "\(pendingUploadCount)",
+                title: "学习库",
+                value: "\(recordingCount)",
                 tint: RokuricsColors.mint,
                 scale: scale
             )
+            .onTapGesture(perform: onOpenRecordingLibrary)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("打开学习库，\(recordingCount) 条")
 
             RokuricsHomeDashboardDivider(scale: scale)
 

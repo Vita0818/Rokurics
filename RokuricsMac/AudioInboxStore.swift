@@ -66,6 +66,10 @@ final class AudioInboxStore: ObservableObject {
         refreshRecordingInbox()
     }
 
+    func audioFileURL(recordingID: String) throws -> URL {
+        try recordingFileStore.transcriptionSource(for: recordingID).audioFileURL
+    }
+
     func restoreRecording(recordingID: String) throws {
         try recordingFileStore.restoreRecording(recordingID: recordingID)
         refreshRecordingInbox()

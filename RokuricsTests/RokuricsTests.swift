@@ -9,7 +9,45 @@ import Testing
 import Foundation
 @testable import Rokurics
 
+@MainActor
 struct RokuricsTests {
+
+    @Test func iphoneTypographyTokensExistAndChatStylesStaySeparate() {
+        #expect(RokuricsTypographyToken.allCases == [
+            .pageTitle,
+            .sectionTitle,
+            .cardTitle,
+            .body,
+            .secondary,
+            .chatGreeting,
+            .chatMessage,
+            .chatInput,
+            .technical
+        ])
+        #expect(RokuricsTypographyToken.chatGreeting != .pageTitle)
+        #expect(RokuricsTypographyToken.chatMessage != .pageTitle)
+        #expect(RokuricsTypographyToken.chatInput != .pageTitle)
+    }
+
+    @Test func iphoneCircleIconButtonConfigurationUsesSystemGlassButton() {
+        #expect(RokuricsIconCircleButtonConfiguration.size >= 44)
+        #expect(RokuricsIconCircleButtonConfiguration.iconSize > 0)
+        #expect(RokuricsIconCircleButtonConfiguration.borderWidth == 1)
+        #expect(RokuricsIconCircleButtonConfiguration.usesGlassBackground)
+        #expect(RokuricsIconCircleButtonConfiguration.usesSystemSymbols)
+    }
+
+    @Test func iphoneTechnicalInlineFragmentsDoNotPromoteWholeStringsToMonospace() {
+        let fragments: [RokuricsInlineTextFragment] = [
+            .text("路径 "),
+            .technical("transcripts/2026-05-16/transcript.md"),
+            .text(" 已保存")
+        ]
+
+        #expect(fragments[0].kind == .normal(.body))
+        #expect(fragments[1].kind == .technical)
+        #expect(fragments[2].kind == .normal(.body))
+    }
 
     @Test func renameRecordingUpdatesMetadataTitle() throws {
         let (store, rootURL) = try makeStore()
@@ -64,6 +102,236 @@ struct RokuricsTests {
 
         #expect(decoded.isDeleted == false)
         #expect(decoded.deletedAt == nil)
+    }
+
+    @Test func recordingMetadataMissingStudyFilingDecodesAsUnfiled() throws {
+        let metadata = makeMetadata(
+            id: "recording-legacy-filing",
+            title: "旧录音",
+            relativeAudioPath: "Recordings/recording-legacy-filing.m4a",
+            relativeMetadataPath: "Metadata/recording-legacy-filing.json",
+            uploadStatus: "localOnly"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try #require(JSONSerialization.jsonObject(with: try encoder.encode(metadata)) as? [String: Any])
+        object.removeValue(forKey: "studyFiling")
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let decoded = try decoder.decode(RecordingMetadata.self, from: data)
+
+        #expect(decoded.studyFiling == nil)
+    }
+
+    @Test func directSaveUsesDefaultTitleAndEmptyFiling() {
+        let title = RecordingSaveTitleResolver.title(
+            defaultTitle: "录音 2026-05-18 12:00",
+            pendingTitle: "课堂标题",
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数"),
+            directSave: true
+        )
+
+        #expect(title == "录音 2026-05-18 12:00")
+    }
+
+    @Test func filingSaveCanGenerateFriendlyTitle() {
+        let title = RecordingSaveTitleResolver.title(
+            defaultTitle: "录音 2026-05-18 12:00",
+            pendingTitle: nil,
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法"),
+            directSave: false
+        )
+
+        #expect(title == "线性代数 · 矩阵 · 矩阵乘法")
+    }
+
+    @Test func uploadMetadataPayloadIncludesStudyFiling() {
+        let filing = StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+        let metadata = makeMetadata(
+            id: "recording-upload-filing",
+            title: "矩阵乘法",
+            relativeAudioPath: "Recordings/recording-upload-filing.m4a",
+            relativeMetadataPath: "Metadata/recording-upload-filing.json",
+            uploadStatus: "localOnly",
+            studyFiling: filing
+        )
+
+        let payload = RecordingUploadMetadataPayload(
+            metadata: metadata,
+            sourceDeviceName: "iPhone",
+            sourceDeviceID: "device-01",
+            uploadedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        #expect(payload.studyFiling == filing)
+    }
+
+    @Test func unfiledRecordingAppearsUnderUncategorizedStudyTree() {
+        let metadata = makeMetadata(
+            id: "recording-unfiled",
+            title: "未分类",
+            relativeAudioPath: "Recordings/recording-unfiled.m4a",
+            relativeMetadataPath: "Metadata/recording-unfiled.json",
+            uploadStatus: "localOnly"
+        )
+
+        let tree = RecordingStudyTreeBuilder.build(recordings: [metadata])
+
+        #expect(tree.first?.title == StudyFilingPath.uncategorizedTitle)
+        #expect(tree.first?.children.first?.title == StudyFilingPath.missingTitle)
+        #expect(tree.first?.children.first?.children.first?.title == StudyFilingPath.missingTitle)
+        #expect(tree.first?.children.first?.children.first?.children.first?.recordings.map(\.id) == ["recording-unfiled"])
+    }
+
+    @Test func filingCandidatesCollectExistingValues() {
+        let first = makeMetadata(
+            id: "candidate-iphone-01",
+            title: "A",
+            relativeAudioPath: "Recordings/a.m4a",
+            relativeMetadataPath: "Metadata/a.json",
+            uploadStatus: "localOnly",
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+        )
+        let second = makeMetadata(
+            id: "candidate-iphone-02",
+            title: "B",
+            relativeAudioPath: "Recordings/b.m4a",
+            relativeMetadataPath: "Metadata/b.json",
+            uploadStatus: "localOnly",
+            studyFiling: StudyFilingPath(type: "复习", subject: "高等数学", chapter: "矩阵", topic: "格林公式")
+        )
+
+        let candidates = StudyFilingCandidates.collect(from: [first, second])
+
+        #expect(Set(candidates.types) == Set(["课堂", "复习"]))
+        #expect(Set(candidates.subjects) == Set(["线性代数", "高等数学"]))
+        #expect(candidates.chapters == ["矩阵"])
+        #expect(Set(candidates.topics) == Set(["矩阵乘法", "格林公式"]))
+    }
+
+    @Test func iphoneStudyBrowserRootLevelBuildsTypeFolders() {
+        let recordings = [
+            makeMetadata(
+                id: "iphone-browser-root-01",
+                title: "课堂",
+                relativeAudioPath: "Recordings/a.m4a",
+                relativeMetadataPath: "Metadata/a.json",
+                uploadStatus: "localOnly",
+                studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+            ),
+            makeMetadata(
+                id: "iphone-browser-root-02",
+                title: "复习",
+                relativeAudioPath: "Recordings/b.m4a",
+                relativeMetadataPath: "Metadata/b.json",
+                uploadStatus: "localOnly",
+                studyFiling: StudyFilingPath(type: "复习", subject: "高等数学", chapter: "积分", topic: "格林公式")
+            )
+        ]
+
+        let content = RecordingStudyBrowser.content(recordings: recordings, path: RecordingStudyBrowsePath())
+
+        #expect(Set(content.folders.map(\.title)) == Set(["课堂", "复习"]))
+        #expect(Set(content.folders.map(\.itemCount)) == Set([1]))
+        #expect(content.recordings.isEmpty)
+    }
+
+    @Test func iphoneStudyBrowserBuildsNestedFoldersAndFinalRecordings() {
+        let recording = makeMetadata(
+            id: "iphone-browser-levels-01",
+            title: "矩阵乘法",
+            relativeAudioPath: "Recordings/matrix.m4a",
+            relativeMetadataPath: "Metadata/matrix.json",
+            uploadStatus: "localOnly",
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+        )
+
+        let subjectContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂"]))
+        let chapterContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", "线性代数"]))
+        let topicContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", "线性代数", "矩阵"]))
+        let recordingContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", "线性代数", "矩阵", "矩阵乘法"]))
+
+        #expect(subjectContent.folders.map(\.title) == ["线性代数"])
+        #expect(chapterContent.folders.map(\.title) == ["矩阵"])
+        #expect(topicContent.folders.map(\.title) == ["矩阵乘法"])
+        #expect(recordingContent.recordings.map(\.id) == ["iphone-browser-levels-01"])
+        #expect(recordingContent.folders.isEmpty)
+    }
+
+    @Test func iphoneStudyBrowserUncategorizedRecordingsAreDirectlyVisible() {
+        let recording = makeMetadata(
+            id: "iphone-browser-unfiled",
+            title: "未分类",
+            relativeAudioPath: "Recordings/unfiled.m4a",
+            relativeMetadataPath: "Metadata/unfiled.json",
+            uploadStatus: "localOnly"
+        )
+
+        let rootContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath())
+        let uncategorizedContent = RecordingStudyBrowser.content(
+            recordings: [recording],
+            path: RecordingStudyBrowsePath(components: [StudyFilingPath.uncategorizedTitle])
+        )
+
+        #expect(rootContent.folders.map(\.title) == [StudyFilingPath.uncategorizedTitle])
+        #expect(uncategorizedContent.recordings.map(\.id) == ["iphone-browser-unfiled"])
+        #expect(uncategorizedContent.folders.isEmpty)
+    }
+
+    @Test func iphoneStudyBrowserMissingLowerFieldsDoNotHideRecordings() {
+        let recording = makeMetadata(
+            id: "iphone-browser-missing",
+            title: "缺下层",
+            relativeAudioPath: "Recordings/missing.m4a",
+            relativeMetadataPath: "Metadata/missing.json",
+            uploadStatus: "localOnly",
+            studyFiling: StudyFilingPath(type: "课堂")
+        )
+
+        let subjectContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂"]))
+        let chapterContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", StudyFilingPath.missingTitle]))
+        let topicContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", StudyFilingPath.missingTitle, StudyFilingPath.missingTitle]))
+        let recordingContent = RecordingStudyBrowser.content(recordings: [recording], path: RecordingStudyBrowsePath(components: ["课堂", StudyFilingPath.missingTitle, StudyFilingPath.missingTitle, StudyFilingPath.missingTitle]))
+
+        #expect(subjectContent.folders.map(\.title) == [StudyFilingPath.missingTitle])
+        #expect(chapterContent.folders.map(\.title) == [StudyFilingPath.missingTitle])
+        #expect(topicContent.folders.map(\.title) == [StudyFilingPath.missingTitle])
+        #expect(recordingContent.recordings.map(\.id) == ["iphone-browser-missing"])
+    }
+
+    @Test func iphoneStudyBrowserBreadcrumbsNavigateByDepth() {
+        let path = RecordingStudyBrowsePath(components: ["课堂", "线性代数", "矩阵"])
+        let breadcrumbs = RecordingStudyBrowser.breadcrumbs(for: path)
+
+        #expect(breadcrumbs.map(\.title) == ["学习库", "课堂", "线性代数", "矩阵"])
+        #expect(breadcrumbs[1].path.components == ["课堂"])
+        #expect(breadcrumbs[2].path.components == ["课堂", "线性代数"])
+        #expect(path.parent.components == ["课堂", "线性代数"])
+    }
+
+    @Test func iphoneStudyFilingUpdateMovesRecordingToNewVirtualPath() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        _ = try saveRecording(id: "iphone-browser-update", title: "路径更新", store: store)
+        let manager = RecordingManager(fileStore: store)
+
+        #expect(RecordingStudyBrowser.content(recordings: manager.recordings, path: RecordingStudyBrowsePath()).folders.map(\.title) == [StudyFilingPath.uncategorizedTitle])
+
+        try manager.updateStudyFiling(
+            recordingID: "iphone-browser-update",
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+        )
+
+        let rootContent = RecordingStudyBrowser.content(recordings: manager.recordings, path: RecordingStudyBrowsePath())
+        let finalContent = RecordingStudyBrowser.content(
+            recordings: manager.recordings,
+            path: RecordingStudyBrowsePath(components: ["课堂", "线性代数", "矩阵", "矩阵乘法"])
+        )
+
+        #expect(rootContent.folders.map(\.title) == ["课堂"])
+        #expect(finalContent.recordings.map(\.id) == ["iphone-browser-update"])
     }
 
     @Test func softDeleteRecordingUpdatesMetadataButKeepsFiles() throws {
@@ -245,7 +513,8 @@ struct RokuricsTests {
         title: String,
         relativeAudioPath: String,
         relativeMetadataPath: String,
-        uploadStatus: String
+        uploadStatus: String,
+        studyFiling: StudyFilingPath? = nil
     ) -> RecordingMetadata {
         RecordingMetadata(
             id: id,
@@ -265,7 +534,8 @@ struct RokuricsTests {
             uploadStatus: uploadStatus,
             transcriptionStatus: "notStarted",
             noteStatus: "notStarted",
-            tags: []
+            tags: [],
+            studyFiling: studyFiling
         )
     }
 }

@@ -63,6 +63,10 @@ struct FFmpegAudioConverter: AudioConverting {
     }
 
     func convertToWhisperWAV(inputURL: URL, outputURL: URL) async throws {
+        try await convertToWhisperWAV(inputURL: inputURL, outputURL: outputURL, timeRange: nil)
+    }
+
+    func convertToWhisperWAV(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>?) async throws {
         let executableAccess = try SecurityScopedFileAccess.startAccessingExecutable(
             reference: executableReference,
             errors: Self.ffmpegExecutableErrors,
@@ -71,7 +75,7 @@ struct FFmpegAudioConverter: AudioConverting {
         )
         defer { executableAccess.stop() }
 
-        let arguments = Self.conversionArguments(inputURL: inputURL, outputURL: outputURL)
+        let arguments = Self.conversionArguments(inputURL: inputURL, outputURL: outputURL, timeRange: timeRange)
         let launchContext = FFmpegProcessLaunchContext(
             configuredExecutablePath: executablePath,
             authorizedExecutableURL: executableAccess.executableURL,
@@ -117,15 +121,30 @@ struct FFmpegAudioConverter: AudioConverting {
         }
     }
 
-    static func conversionArguments(inputURL: URL, outputURL: URL) -> [String] {
-        [
+    static func conversionArguments(inputURL: URL, outputURL: URL, timeRange: ClosedRange<TimeInterval>? = nil) -> [String] {
+        var arguments = [
             "-y",
+        ]
+
+        if let timeRange {
+            arguments.append(contentsOf: [
+                "-ss", Self.timeArgument(max(0, timeRange.lowerBound)),
+                "-t", Self.timeArgument(max(0, timeRange.upperBound - timeRange.lowerBound))
+            ])
+        }
+
+        arguments.append(contentsOf: [
             "-i", inputURL.path,
             "-ar", "16000",
             "-ac", "1",
             "-c:a", "pcm_s16le",
             outputURL.path
-        ]
+        ])
+        return arguments
+    }
+
+    private static func timeArgument(_ value: TimeInterval) -> String {
+        String(format: "%.3f", value)
     }
 
     static func validateExecutable(

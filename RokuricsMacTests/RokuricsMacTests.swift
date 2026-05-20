@@ -10,6 +10,14 @@ import Testing
 @testable import RokuricsMac
 
 struct RokuricsMacTests {
+    @Test func iPhoneConnectionCardLayoutKeepsStableWidthAcrossSidebarChanges() {
+        #expect(MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: false) == MacIPhoneConnectionCardLayout.stableMaxWidth)
+        #expect(MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: true) == MacIPhoneConnectionCardLayout.stableMaxWidth)
+        #expect(MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: false) == MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: true))
+        #expect(MacIPhoneConnectionCardLayout.isCentered(isSidebarCollapsed: false))
+        #expect(MacIPhoneConnectionCardLayout.isCentered(isSidebarCollapsed: true))
+        #expect(MacIPhoneConnectionCardLayout.disablesWidthAnimation)
+    }
 
     @Test func failedInboxItemShowsShortTranscriptionErrorSummary() {
         let item = makeInboxItem(
@@ -181,7 +189,7 @@ struct RokuricsMacTests {
             providerID: "mockNoteGenerationProvider",
             providerName: "Mock Note Generation",
             modelName: "mock-note-local",
-            markdown: "# 录音笔记\n\nHello Rokurics",
+            markdown: "# 录音笔记\n\n## 摘要\n\nHello Rokurics\n\n## 重点\n\n- 第一条",
             startedAt: Date(timeIntervalSince1970: 2_000),
             completedAt: Date(timeIntervalSince1970: 2_001),
             status: "generated"
@@ -192,7 +200,14 @@ struct RokuricsMacTests {
         let noteURL = scratchURL.appendingPathComponent(saveResult.noteRelativePath, isDirectory: false)
 
         #expect(saveResult.noteRelativePath == "notes/1970-01-01/note-store-01/note.md")
+        #expect(saveResult.summaryPreviewRelativePath == "notes/1970-01-01/note-store-01/summary.json")
         #expect(try String(contentsOf: noteURL, encoding: .utf8).contains("Hello Rokurics"))
+
+        let preview = try #require(store.loadSummaryPreview(noteRelativePath: saveResult.noteRelativePath))
+        #expect(preview.recordingID == "note-store-01")
+        #expect(preview.shortSummary == "Hello Rokurics")
+        #expect(preview.keyPoints == ["第一条"])
+        #expect(preview.providerDisplayName == "Mock Note Generation")
     }
 
     @Test func mockNoteGenerationProviderGeneratesNonEmptyNote() async throws {
@@ -210,6 +225,7 @@ struct RokuricsMacTests {
         #expect(result.markdown.contains("# 录音笔记"))
         #expect(result.markdown.contains("MockNoteGenerationProvider"))
         #expect(result.markdown.contains("今天讨论了本地 AI 总结。"))
+        #expect(NoteSummaryPreview.make(result: result, noteRelativePath: "notes/mock/note.md").shortSummary.contains("占位笔记"))
     }
 
     @Test func receiveRecordMissingNoteFieldsDefaultsToNotGenerated() throws {
@@ -1298,8 +1314,661 @@ struct RokuricsMacTests {
         #expect(loader.load(item: item) == .failed("未找到转写文档"))
     }
 
+    @Test func transcriptCleanerExtractsBodyWithoutMarkdownMetadata() {
+        let markdown = """
+        # 录音 2026-05-19
+
+        - Provider: whisper.cpp
+        - Transcribed At: 2026-05-19T08:00:00Z
+        - Language: zh
+
+        ## Transcript
+        今天学习矩阵乘法。
+        第二句。
+
+        ## Segments
+        - [00:00.000 --> 00:03.000] 今天学习矩阵乘法。
+        """
+
+        let body = RokuricsTranscriptMarkdownCleaner.cleanedBody(from: markdown)
+        let metadata = RokuricsTranscriptMarkdownCleaner.metadata(from: markdown)
+
+        #expect(body == "今天学习矩阵乘法。\n第二句。")
+        #expect(metadata["provider"] == "whisper.cpp")
+        #expect(metadata["language"] == "zh")
+        #expect(!body.contains("Provider"))
+        #expect(!body.contains("Transcribed At"))
+        #expect(!body.contains("Language"))
+        #expect(!body.contains("## Transcript"))
+        #expect(!body.contains("## Segments"))
+    }
+
+    @Test func noteCleanerRemovesTopMetadataAndKeepsStudyContent() {
+        let markdown = """
+        # 录音笔记
+
+        > 由 Rokurics 生成
+        > Provider: OpenAI-compatible
+        > Model: deepseek-v4-pro
+
+        ## 基本信息
+        - 生成时间：2026-05-19 08:00
+        - 转写来源：transcript.md
+        - 转写模型：small
+
+        ## 摘要
+        这是摘要。
+
+        ## 重点
+        - 第一条
+        """
+
+        let body = RokuricsNoteMarkdownCleaner.cleanedBody(from: markdown)
+        let metadata = RokuricsNoteMarkdownCleaner.metadata(from: markdown)
+
+        #expect(metadata["provider"] == "OpenAI-compatible")
+        #expect(metadata["model"] == "deepseek-v4-pro")
+        #expect(body.contains("## 摘要"))
+        #expect(body.contains("这是摘要。"))
+        #expect(body.contains("- 第一条"))
+        #expect(!body.contains("Provider"))
+        #expect(!body.contains("Model"))
+        #expect(!body.contains("## 基本信息"))
+    }
+
+    @Test func noteSummaryPreviewExtractsSummaryAndFallsBackToBodyPreview() {
+        let markdown = """
+        # 录音笔记
+
+        > Provider: Mock
+
+        ## 摘要
+
+        这是一段适合卡片显示的摘要。
+
+        ## 重点
+
+        - 第一个重点
+        - 第二个重点
+        """
+        let fallbackMarkdown = "# 录音笔记\n\n## 大纲\n\n没有摘要时使用正文预览。"
+
+        #expect(NoteSummaryPreview.shortSummary(from: markdown) == "这是一段适合卡片显示的摘要。")
+        #expect(NoteSummaryPreview.keyPoints(from: markdown) == ["第一个重点", "第二个重点"])
+        #expect(NoteSummaryPreview.shortSummary(from: fallbackMarkdown) == nil)
+        #expect(NoteSummaryPreview.fallbackSummary(from: fallbackMarkdown).contains("没有摘要时使用正文预览"))
+    }
+
+    @Test func noteSummaryPreviewDoesNotKeepSensitiveDebugText() {
+        let markdown = """
+        # 录音笔记
+
+        ## 摘要
+
+        API Key: sk-secret
+        response JSON should not appear
+        安全摘要
+        """
+
+        let summary = NoteSummaryPreview.shortSummary(from: markdown)
+
+        #expect(summary == "安全摘要")
+        #expect(summary?.contains("sk-secret") == false)
+        #expect(summary?.contains("response JSON") == false)
+    }
+
+    @Test func noteStoreRegeneratingNoteUpdatesSummaryPreview() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let request = makeNoteGenerationRequest(recordingID: "summary-update-01", sanitizedRecordingID: "summary-update-01")
+        let store = NoteStore(rootURL: scratchURL)
+        let first = NoteGenerationResult(
+            taskID: request.taskID,
+            recordingID: request.recordingID,
+            providerID: "mockNoteGenerationProvider",
+            providerName: "Mock",
+            modelName: "mock-1",
+            markdown: "# 录音笔记\n\n## 摘要\n\n第一版摘要",
+            startedAt: Date(timeIntervalSince1970: 10),
+            completedAt: Date(timeIntervalSince1970: 11),
+            status: "generated"
+        )
+        let second = NoteGenerationResult(
+            taskID: request.taskID,
+            recordingID: request.recordingID,
+            providerID: "mockNoteGenerationProvider",
+            providerName: "Mock",
+            modelName: "mock-2",
+            markdown: "# 录音笔记\n\n## 摘要\n\n第二版摘要",
+            startedAt: Date(timeIntervalSince1970: 12),
+            completedAt: Date(timeIntervalSince1970: 13),
+            status: "generated"
+        )
+
+        let saveResult = try store.save(result: first, request: request)
+        _ = try store.save(result: second, request: request)
+        let preview = try #require(store.loadSummaryPreview(noteRelativePath: saveResult.noteRelativePath))
+
+        #expect(preview.shortSummary == "第二版摘要")
+        #expect(preview.modelName == "mock-2")
+    }
+
+    @Test func markdownRendererParsesHeadingsBulletsAndParagraphs() {
+        let blocks = RokuricsMarkdownRenderer.blocks(from: "# 摘要\n\n- 第一条\n普通段落")
+
+        #expect(blocks == [
+            .heading(level: 1, text: "摘要"),
+            .bullet("第一条"),
+            .paragraph("普通段落")
+        ])
+    }
+
+    @Test func macContentPagesUseIconOnlyBackButton() throws {
+        #expect(RokuricsBackButton.visibleTitle.isEmpty)
+        #expect(RokuricsBackButton.accessibilityTitle == "返回")
+        #expect(RokuricsInfoButton.visibleTitle.isEmpty)
+        #expect(RokuricsInfoButton.accessibilityTitle == "信息")
+        #expect(RokuricsCircleIconButton.size == RokuricsCircleIconButtonConfiguration.size)
+
+        let repoURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let relativePaths = [
+            "RokuricsMac/MacAudioInboxView.swift",
+            "RokuricsMac/MacNoteDetailView.swift",
+            "RokuricsMac/MacStudyLibraryView.swift"
+        ]
+
+        for relativePath in relativePaths {
+            let text = try String(contentsOf: repoURL.appendingPathComponent(relativePath), encoding: .utf8)
+            #expect(!text.contains("Label(\"返回\""))
+            #expect(!text.contains("Button(\"返回\""))
+            #expect(!text.contains("Text(\"返回\""))
+        }
+
+        let transcriptText = try String(contentsOf: repoURL.appendingPathComponent("RokuricsMac/MacAudioInboxView.swift"), encoding: .utf8)
+        let noteText = try String(contentsOf: repoURL.appendingPathComponent("RokuricsMac/MacNoteDetailView.swift"), encoding: .utf8)
+        #expect(transcriptText.contains("RokuricsDocumentPageHeader"))
+        #expect(noteText.contains("RokuricsDocumentPageHeader"))
+    }
+
+    @Test func fileRevealServiceRevealsFilesAndOpensFolders() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let directoryURL = scratchURL.appendingPathComponent("notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        let fileURL = directoryURL.appendingPathComponent("note.md", isDirectory: false)
+        try "note".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        #expect(FileRevealService.action(for: directoryURL.path) == .open(directoryURL.standardizedFileURL))
+        #expect(FileRevealService.action(for: fileURL.path) == .reveal(fileURL.standardizedFileURL))
+        #expect(FileRevealService.action(for: "notes/note.md", rootURL: scratchURL) == .reveal(fileURL.standardizedFileURL))
+        #expect(FileRevealService.looksOpenablePath("transcripts/2026-05-19/a/transcript.md"))
+    }
+
+    @Test func macStudyLibraryBreadcrumbNavigationTruncatesBrowsePath() {
+        let fullPath = StudyBrowsePath(components: ["数学", "线性代数", "Ch1", "矩阵"])
+        let breadcrumbs = StudyLibraryBrowser.breadcrumbs(for: fullPath)
+        var state = MacStudyLibraryNavigationState(browsePath: fullPath)
+
+        state.navigate(to: breadcrumbs[0].path)
+        #expect(state.browsePath.components == [])
+
+        state.navigate(to: breadcrumbs[1].path)
+        #expect(state.browsePath.components == ["数学"])
+
+        state.navigate(to: breadcrumbs[2].path)
+        #expect(state.browsePath.components == ["数学", "线性代数"])
+
+        state.navigate(to: breadcrumbs[3].path)
+        #expect(state.browsePath.components == ["数学", "线性代数", "Ch1"])
+    }
+
+    @Test func systemFolderIconProviderUsesMacOSFolderFileType() {
+        #expect(MacSystemFolderIconProvider.folderFileType == "public.folder")
+    }
+
+    @Test func folderContextMenuUsesFinderLikeActionAndTwoColorRows() {
+        #expect(MacFolderContextMenuModel.primaryActionTitles == ["重命名", "移入废纸篓"])
+        #expect(MacFolderContextMenuModel.colorTokens == [.default, .red, .orange, .yellow, .green, .mint, .teal, .cyan, .blue, .indigo, .purple, .gray])
+        #expect(MacFolderContextMenuModel.colorTokens.count == 12)
+        #expect(MacFolderContextMenuModel.colorRows.count == 2)
+        #expect(MacFolderContextMenuModel.colorRows.allSatisfy { $0.count == 6 })
+        #expect(MacFolderContextMenuModel.colorRows.flatMap { $0 } == MacFolderContextMenuModel.colorTokens)
+    }
+
+    @Test func legacyFolderColorTokensStillDecode() throws {
+        let data = try #require("\"blue\"".data(using: .utf8))
+        let decoded = try JSONDecoder().decode(StudyFolderColorToken.self, from: data)
+
+        #expect(decoded == .blue)
+    }
+
+    @Test func noteDefaultInfoHidesTranscriptPathAndRawProviderID() {
+        let item = makeInboxItem(
+            transcriptionStatus: "transcribed",
+            transcriptionError: nil,
+            transcriptMarkdownRelativePath: "transcripts/2026-05-16/recording-01/transcript.md",
+            noteStatus: "generated",
+            noteRelativePath: "notes/2026-05-16/recording-01/note.md"
+        )
+        let markdown = """
+        # 录音笔记
+
+        > Provider: mockNoteGenerationProvider
+        > Model: deepseek-v4-pro
+
+        ## 基本信息
+        - 转写来源：transcripts/2026-05-16/recording-01/transcript.md
+
+        ## 摘要
+        内容
+        """
+
+        let defaultText = RokuricsDocumentDisplayRows.noteInfoRows(item: item, markdown: markdown, receiveRecord: nil)
+            .map(\.value)
+            .joined(separator: " ")
+        let advancedText = RokuricsDocumentDisplayRows.noteAdvancedRows(item: item, markdown: markdown, receiveRecord: nil)
+            .map(\.value)
+            .joined(separator: " ")
+
+        #expect(defaultText.contains("deepseek-v4-pro"))
+        #expect(defaultText.contains("Mock"))
+        #expect(!defaultText.contains("transcripts/2026-05-16"))
+        #expect(!defaultText.contains("mockNoteGenerationProvider"))
+        #expect(advancedText.contains("transcripts/2026-05-16/recording-01/transcript.md"))
+        #expect(!advancedText.contains("mockNoteGenerationProvider"))
+    }
+
+    @Test func transcriptDefaultInfoHidesTranscriptPathAndAdvancedKeepsIt() {
+        let item = makeInboxItem(
+            transcriptionStatus: "transcribed",
+            transcriptionError: nil,
+            transcriptRelativePath: "transcripts/2026-05-16/recording-01/transcript.json",
+            transcriptMarkdownRelativePath: "transcripts/2026-05-16/recording-01/transcript.md"
+        )
+        let markdown = """
+        - Provider: whisper.cpp
+        - Language: zh
+
+        ## Transcript
+        内容
+        """
+
+        let defaultText = RokuricsDocumentDisplayRows.transcriptInfoRows(item: item, markdown: markdown, transcriptResult: nil)
+            .map(\.value)
+            .joined(separator: " ")
+        let advancedText = RokuricsDocumentDisplayRows.transcriptAdvancedRows(item: item, markdown: markdown, transcriptResult: nil, receiveRecord: nil)
+            .map(\.value)
+            .joined(separator: " ")
+
+        #expect(defaultText.contains("zh"))
+        #expect(!defaultText.contains("transcripts/2026-05-16"))
+        #expect(advancedText.contains("transcripts/2026-05-16/recording-01/transcript.md"))
+    }
+
+    @Test func transcriptInfoPanelRowsContainReadableTranscriptionMetadata() {
+        let item = makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil)
+        let result = TranscriptionResult(
+            taskID: "task",
+            recordingID: item.id,
+            providerID: "whisperCppTranscriptionProvider",
+            providerName: "WhisperCppTranscriptionProvider",
+            modelName: "/models/ggml-small.bin",
+            language: "zh",
+            text: "正文",
+            segments: [],
+            startedAt: Date(timeIntervalSince1970: 1),
+            completedAt: Date(timeIntervalSince1970: 2),
+            status: "transcribed"
+        )
+        let rows = RokuricsDocumentDisplayRows.transcriptInfoRows(
+            item: item,
+            markdown: "## Transcript\n正文",
+            transcriptResult: result
+        )
+        let text = rows.map { "\($0.label)=\($0.value)" }.joined(separator: " ")
+
+        #expect(text.contains("录音时间"))
+        #expect(text.contains("时长"))
+        #expect(text.contains("语言=zh"))
+        #expect(text.contains("转写 Provider=whisper.cpp"))
+        #expect(text.contains("转写模型=ggml-small.bin"))
+    }
+
+    @Test func noteInfoPanelRowsContainReadableGenerationMetadata() {
+        let item = makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil)
+        let rows = RokuricsDocumentDisplayRows.noteInfoRows(
+            item: item,
+            markdown: "> Provider: mockNoteGenerationProvider\n> Model: mock-note-local\n\n## 基本信息\n- 生成时间：2026-05-19 20:00\n\n## 摘要\n摘要",
+            receiveRecord: nil
+        )
+        let text = rows.map { "\($0.label)=\($0.value)" }.joined(separator: " ")
+
+        #expect(text.contains("生成时间=2026-05-19 20:00"))
+        #expect(text.contains("Note Provider=Mock"))
+        #expect(text.contains("模型=mock-note-local"))
+    }
+
+    @Test func aiNotePromptsRequireShortSummarySection() {
+        let request = makeNoteGenerationRequest(transcriptMarkdown: "今天学习矩阵。")
+        let openAIMessages = OpenAICompatibleNoteGenerationProvider.messages(
+            request: request,
+            transcript: "今天学习矩阵。",
+            configuration: OpenAICompatibleNoteGenerationConfiguration(),
+            wasTruncated: false
+        )
+        let anthropicPrompt = AnthropicMessagesNoteGenerationProvider.prompt(
+            request: request,
+            transcript: "今天学习矩阵。",
+            configuration: AnthropicMessagesConfiguration(),
+            wasTruncated: false
+        )
+        let openAIText = openAIMessages.map { $0.content }.joined(separator: "\n")
+
+        #expect(openAIText.contains("## 摘要"))
+        #expect(openAIText.contains("1～3 句简短摘要"))
+        #expect(anthropicPrompt.contains("## 摘要"))
+        #expect(anthropicPrompt.contains("1～3 句简短摘要"))
+    }
+
+    @Test func documentReadingPagesDefaultToContentOnlyMetadataBehindInfoButton() {
+        #expect(RokuricsDocumentReadingLayout.defaultShowsMetadataCards == false)
+    }
+
+    @Test func recordingDetailDefaultInfoHidesRecordingIDButAdvancedKeepsFileState() {
+        let item = makeInboxItem(
+            transcriptionStatus: "transcribed",
+            transcriptionError: nil,
+            transcriptMarkdownRelativePath: "transcripts/2026-05-16/recording-01/transcript.md",
+            noteStatus: "generated",
+            noteRelativePath: "notes/2026-05-16/recording-01/note.md"
+        )
+
+        let defaultText = MacStudyRecordingDetailDisplayModel.defaultSummaryTexts(for: item).joined(separator: " ")
+        let advancedText = MacStudyRecordingDetailDisplayModel.advancedFileStatusRows(for: item)
+            .map(\.value)
+            .joined(separator: " ")
+
+        #expect(!defaultText.contains(item.id))
+        #expect(advancedText.contains(item.id))
+        #expect(advancedText.contains("transcripts/2026-05-16/recording-01/transcript.md"))
+        #expect(advancedText.contains("notes/2026-05-16/recording-01/note.md"))
+    }
+
+    @Test func rawProviderIDsMapToUserFacingDisplayNames() {
+        #expect(RokuricsProviderDisplayName.note("mockNoteGenerationProvider") == "Mock")
+        #expect(RokuricsProviderDisplayName.note("openAICompatible") == "OpenAI-compatible")
+        #expect(RokuricsProviderDisplayName.note("anthropicMessages") == "Claude / Anthropic")
+        #expect(RokuricsProviderDisplayName.transcription("mockTranscriptionProvider") == "Mock")
+        #expect(RokuricsProviderDisplayName.transcription("whisper.cpp") == "whisper.cpp")
+    }
+
     @Test func sidebarDoesNotContainTopLevelTranscriptionItem() {
         #expect(!MacSidebarItem.allCases.map(\.title).contains("转写"))
+    }
+
+    @Test func sidebarDoesNotContainTopLevelNotesItem() {
+        #expect(!MacSidebarItem.allCases.map(\.title).contains("笔记"))
+        #expect(MacSidebarItem.allCases.map(\.title) == ["仪表盘", "iPhone 连接", "学习库", "AI 对话"])
+    }
+
+    @Test func temporaryDebugMarkersAreRemovedFromPrimaryUIFiles() throws {
+        let markers = [
+            "09" + "19", "09" + "21", "10" + "03", "10" + "25", "10" + "51", "11" + "21",
+            "11" + "36", "13" + "22", "14" + "58", "17" + "18", "17" + "42"
+        ]
+        let repoURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let relativePaths = [
+            "RokuricsMac/MacSettingsView.swift",
+            "RokuricsMac/MacStudyLibraryView.swift",
+            "Rokurics/RecordingLibraryView.swift"
+        ]
+
+        for relativePath in relativePaths {
+            let text = try String(contentsOf: repoURL.appendingPathComponent(relativePath), encoding: .utf8)
+            for marker in markers {
+                #expect(!text.contains("Text(\"\(marker)\")"))
+            }
+        }
+    }
+
+    @Test func macSettingsSectionsUseKikariaStyleHomeGroups() {
+        #expect(MacSettingsSection.allCases.map(\.rawValue) == [
+            "userProfile",
+            "transcription",
+            "ai",
+            "about"
+        ])
+        #expect(MacSettingsHomeSummary.sectionOrder.map(\.title) == [
+            "用户资料",
+            "转写",
+            "AI",
+            "关于"
+        ])
+        #expect(!MacSettingsSection.allCases.map(\.title).contains("连接"))
+    }
+
+    @Test func macSettingsHomeUsesReducedRowArchitecture() {
+        #expect(MacSettingsHomeSummary.transcriptionRows == [
+            "Provider",
+            "模型",
+            "授权与测试"
+        ])
+        #expect(MacSettingsHomeSummary.aiRows == [
+            "Provider",
+            "模型",
+            "API 设置",
+            "测试"
+        ])
+        #expect(MacSettingsHomeSummary.aboutRows == [
+            "存储",
+            "隐私政策",
+            "版权"
+        ])
+    }
+
+    @Test func macSettingsHomeCanOpenPrimaryDetailPages() {
+        #expect(MacSettingsDetail.allCases.map(\.rawValue) == [
+            "profile",
+            "transcriptionProvider",
+            "transcriptionModel",
+            "transcriptionAuthorization",
+            "aiProvider",
+            "aiModel",
+            "aiAPI",
+            "aiTest",
+            "privacyPolicy",
+            "copyright"
+        ])
+        #expect(MacSettingsDetail.allCases.map(\.title) == [
+            "编辑个人资料",
+            "转写 Provider",
+            "转写模型",
+            "授权与测试",
+            "AI Provider",
+            "AI 模型",
+            "API 设置",
+            "测试",
+            "隐私政策",
+            "版权"
+        ])
+    }
+
+    @Test func macSettingsStorageLocationUsesRokuricsApplicationSupportRoot() throws {
+        let rootURL = MacSettingsStorageLocation.rootURL()
+
+        #expect(rootURL.lastPathComponent == "Rokurics")
+        #expect(rootURL.path.contains("Application Support"))
+        #expect(!rootURL.path.contains("/Desktop/"))
+        #expect(!rootURL.path.contains("/Downloads/"))
+        #expect(!rootURL.path.contains("/Documents/"))
+    }
+
+    @Test func macSettingsHomeSummaryHidesSensitiveAndVerboseConfiguration() {
+        var whisperConfiguration = WhisperCppTranscriptionConfiguration.default
+        whisperConfiguration.modelPath = "/tmp/rokurics/models/ggml-large-v3.bin"
+        whisperConfiguration.defaultLanguage = "zh"
+        let openAIConfiguration = OpenAICompatibleNoteGenerationConfiguration(
+            baseURLString: "https://secret.example/v1",
+            modelName: "deepseek-v4-pro",
+            apiKey: "visible-secret"
+        )
+        let anthropicConfiguration = AnthropicMessagesConfiguration(
+            baseURLString: "https://api.anthropic.com",
+            modelName: "claude-sonnet-4-6",
+            apiKey: "claude-secret"
+        )
+
+        let homepageText = MacSettingsHomeSummary.homepageSummaryTexts(
+            transcriptionProviderKind: .whisperCpp,
+            whisperConfiguration: whisperConfiguration,
+            noteProviderKind: .openAICompatible,
+            openAIConfiguration: openAIConfiguration,
+            anthropicConfiguration: anthropicConfiguration
+        ).joined(separator: " ")
+
+        #expect(homepageText.contains("ggml-large-v3.bin"))
+        #expect(homepageText.contains("deepseek-v4-pro"))
+        #expect(!homepageText.contains("/tmp/rokurics/models"))
+        #expect(!homepageText.contains("https://secret.example/v1"))
+        #expect(!homepageText.contains("visible-secret"))
+        #expect(!homepageText.contains("claude-secret"))
+    }
+
+    @Test func macProfileDefaultsUseSeparateLocalProfileKeys() {
+        #expect(MacSettingsProfileDefaults.displayName == MacUserProfile.defaultDisplayName)
+        #expect(MacSettingsProfileDefaults.handle == MacUserProfile.defaultHandle)
+        #expect(MacSettingsProfileDefaults.displayHandle(MacUserProfile.defaultHandle) == "@\(MacUserProfile.defaultHandle)")
+        #expect(MacSettingsProfileDefaults.normalizedHandle(" @Custom ") == "Custom")
+        #expect(MacSettingsProfileDefaults.displayNameKey.contains("profile"))
+        #expect(!MacSettingsProfileDefaults.displayNameKey.contains("apiKey"))
+        #expect(MacUserProfile.defaultDisplayName != "Vita")
+        #expect(MacUserProfile.defaultHandle != "Vita_0818")
+    }
+
+    @Test func macDesignSystemCircleIconConfigurationIsUnifiedGlass() {
+        #expect(RokuricsCircleIconButtonConfiguration.size >= 34)
+        #expect(RokuricsCircleIconButtonConfiguration.size <= 38)
+        #expect(RokuricsCircleIconButtonConfiguration.iconSize > 0)
+        #expect(RokuricsCircleIconButtonConfiguration.usesGlassBackground)
+        #expect(RokuricsCircleIconButtonConfiguration.borderWidth == 1)
+        #expect(RokuricsCircleIconButton.size == RokuricsCircleIconButtonConfiguration.size)
+    }
+
+    @Test func macNavigationIconButtonsUseSystemSymbolsWithoutVisibleBackText() {
+        #expect(RokuricsBackButton.systemImage == "chevron.left")
+        #expect(RokuricsBackButton.visibleTitle.isEmpty)
+        #expect(RokuricsBackButton.accessibilityTitle == "返回")
+        #expect(RokuricsInfoButton.systemImage == "info")
+        #expect(RokuricsInfoButton.visibleTitle.isEmpty)
+        #expect(RokuricsCircleIconButtonConfiguration.usesSystemSymbols)
+    }
+
+    @Test func mixedTypographyKeepsTechnicalRunsScoped() {
+        let fragments: [RokuricsTextFragment] = [
+            .text("Provider: ", style: .body),
+            .technical("OpenAI-compatible"),
+            .text(" 已启用", style: .body)
+        ]
+
+        #expect(fragments[0].kind == .normal(.body))
+        #expect(fragments[1].kind == .technical)
+        #expect(fragments[2].kind == .normal(.body))
+    }
+
+    @Test func macStudyLibraryTitleUsesPageTitleToken() {
+        #expect(MacStudyLibraryHeaderModel.title == "学习库")
+        #expect(MacStudyLibraryHeaderModel.titleStyle == .pageTitle)
+    }
+
+    @Test func macSettingsProfileSummaryMatchesKikariaMinimalText() {
+        let summary = MacSettingsProfileDefaults.profileSummaryTexts(
+            displayName: "Mira",
+            handle: "mira_01"
+        )
+        let visibleText = summary.joined(separator: " ")
+
+        #expect(summary == ["Mira", "@mira_01"])
+        #expect(!visibleText.contains("Local" + "-first"))
+        #expect(!visibleText.contains("学习" + "助手"))
+        #expect(!visibleText.contains("Rokurics" + " Mac"))
+    }
+
+    @Test func macEditProfileFieldsMatchKikariaTwoFieldStructure() {
+        let fieldTitles = MacSettingsProfileDefaults.editFieldTitles
+
+        #expect(fieldTitles == ["显示名称", "用户 ID"])
+        #expect(!fieldTitles.contains("身" + "份"))
+        #expect(!fieldTitles.contains("说" + "明"))
+    }
+
+    @Test func macProfileSaveNormalizationKeepsDisplayNameAndHandle() {
+        #expect(MacSettingsProfileDefaults.normalized("  Vivian  ", fallback: MacSettingsProfileDefaults.displayName) == "Vivian")
+        #expect(MacSettingsProfileDefaults.normalizedHandle(" @vivian_01 ") == "vivian_01")
+    }
+
+    @Test @MainActor func macUserProfileStorePersistsDisplayNameAndHandle() {
+        let suiteName = "RokuricsMacTests.Profile.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = MacUserProfileStore(userDefaults: defaults)
+
+        store.update(displayName: "  Vivian  ", handle: " @vivian ")
+        let reloaded = MacUserProfileStore(userDefaults: defaults)
+
+        #expect(reloaded.profile.displayName == "Vivian")
+        #expect(reloaded.profile.handle == "vivian")
+        #expect(reloaded.profile.displayHandle == "@vivian")
+    }
+
+    @Test func studyLibraryHeaderUsesPageTitleTypography() {
+        #expect(MacStudyLibraryHeaderModel.title == "学习库")
+        #expect(!MacStudyLibraryHeaderModel.showsLeadingIcon)
+        #expect(MacStudyLibraryHeaderModel.titleStyle == .pageTitle)
+    }
+
+    @Test func macTypographyDefinesSeparateChatAndPageTokens() {
+        #expect(RokuricsTextStyle.pageTitle != .chatGreeting)
+        #expect(RokuricsTextStyle.chatInput != .pageTitle)
+        #expect(RokuricsTextStyle.technical != .body)
+    }
+
+    @Test func primaryMacUIFilesDoNotHardcodeDefaultUserName() throws {
+        let repoURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let literal = "Vi" + "ta"
+        let relativePaths = [
+            "RokuricsMac/MacAIChatView.swift",
+            "RokuricsMac/MacSidebarView.swift",
+            "RokuricsMac/MacSettingsView.swift"
+        ]
+
+        for relativePath in relativePaths {
+            let text = try String(contentsOf: repoURL.appendingPathComponent(relativePath), encoding: .utf8)
+            #expect(!text.contains("\"\(literal)\""))
+        }
+    }
+
+    @Test func studyLibraryRecordingDetailNavigationRestoresBrowsePath() {
+        let originalPath = StudyBrowsePath(components: ["课堂", "线性代数", "矩阵", "矩阵乘法"])
+        var state = MacStudyLibraryNavigationState(browsePath: originalPath)
+
+        state.openRecordingDetail(recordingID: "recording-01")
+
+        #expect(state.isShowingRecordingDetail)
+        #expect(state.selectedRecordingDetailID == "recording-01")
+        #expect(state.detailReturnPath == originalPath)
+
+        state.browsePath = StudyBrowsePath()
+        state.closeRecordingDetail()
+
+        #expect(!state.isShowingRecordingDetail)
+        #expect(state.selectedRecordingDetailID == nil)
+        #expect(state.browsePath == originalPath)
     }
 
     @Test func dashboardDoesNotContainTranscriptionQueueCard() {
@@ -1515,6 +2184,19 @@ struct RokuricsMacTests {
         #expect(store.recordingItems.map(\.id) == ["mac-count-01"])
     }
 
+    @Test func audioInboxStoreExposesPlayableAudioURL() throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try saveMacInboxRecording(id: "mac-play-01", title: "播放", store: fileStore)
+        let store = AudioInboxStore(recordingFileStore: fileStore)
+
+        let audioURL = try store.audioFileURL(recordingID: "mac-play-01")
+
+        #expect(audioURL.lastPathComponent == "audio.m4a")
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(audioURL.path.hasPrefix(rootURL.path))
+    }
+
     private func makeInboxItem(
         transcriptionStatus: String,
         transcriptionError: String?,
@@ -1545,8 +2227,8 @@ struct RokuricsMacTests {
     }
 
     private func makeNoteGenerationRequest(
-        recordingID: String,
-        sanitizedRecordingID: String,
+        recordingID: String = "note-request-01",
+        sanitizedRecordingID: String = "note-request-01",
         transcriptMarkdown: String = "测试转写正文"
     ) -> NoteGenerationRequest {
         NoteGenerationRequest(

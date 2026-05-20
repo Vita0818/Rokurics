@@ -100,6 +100,52 @@ final class TranscriptStore {
         }
     }
 
+    func saveChunk(
+        result: TranscriptionResult,
+        request: TranscriptionRequest,
+        recordingTitle: String,
+        chunk: AudioChunkDescriptor
+    ) throws -> TranscriptStoreSaveResult {
+        let outputURL = request.outputDirectory
+            .standardizedFileURL
+            .appendingPathComponent("chunks", isDirectory: true)
+            .standardizedFileURL
+        let safeChunkID = sanitizedPathComponent(chunk.id)
+        guard !safeChunkID.isEmpty else {
+            throw TranscriptStoreError.invalidRecordingID
+        }
+
+        let transcriptURL = outputURL
+            .appendingPathComponent("\(safeChunkID).json", isDirectory: false)
+            .standardizedFileURL
+        let markdownURL = outputURL
+            .appendingPathComponent("\(safeChunkID).md", isDirectory: false)
+            .standardizedFileURL
+
+        guard isInsideTranscriptsDirectory(outputURL),
+              isInsideTranscriptsDirectory(transcriptURL),
+              isInsideTranscriptsDirectory(markdownURL) else {
+            throw TranscriptStoreError.unsafeDestination
+        }
+
+        do {
+            try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
+            try Self.jsonEncoder.encode(result).write(to: transcriptURL, options: .atomic)
+            try markdown(for: result, recordingTitle: "\(recordingTitle) \(chunk.id)")
+                .write(to: markdownURL, atomically: true, encoding: .utf8)
+
+            return TranscriptStoreSaveResult(
+                transcriptRelativePath: try relativePath(for: transcriptURL),
+                transcriptMarkdownRelativePath: try relativePath(for: markdownURL),
+                outputDirectoryURL: outputURL
+            )
+        } catch let error as TranscriptStoreError {
+            throw error
+        } catch {
+            throw TranscriptStoreError.writeFailed("chunk_transcript_write_failed")
+        }
+    }
+
     private func markdown(for result: TranscriptionResult, recordingTitle: String) -> String {
         let title = recordingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名录音" : recordingTitle
         let language = result.language?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? result.language! : "auto"

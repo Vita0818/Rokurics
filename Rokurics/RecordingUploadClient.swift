@@ -51,7 +51,7 @@ enum RecordingUploadError: LocalizedError {
 }
 
 final class RecordingUploadClient {
-    static let audioMaxBytes = 50 * 1024 * 1024
+    static let audioMaxBytes = 512 * 1024 * 1024
 
     private let secureClient: SecureMacUploadClient
     private let audioFileStore: AudioFileStore
@@ -112,25 +112,18 @@ final class RecordingUploadClient {
             throw RecordingUploadError.metadataUploadFailed(metadataResponse.error ?? "metadata_upload_failed")
         }
 
-        let audioBody: Data
-        do {
-            audioBody = try Data(contentsOf: audioURL)
-        } catch {
-            throw RecordingUploadError.audioUploadFailed("audio_read_failed")
-        }
-
         let audioResponse: SecureUploadServerResponse
         do {
-            audioResponse = try await secureClient.uploadSignedData(
+            audioResponse = try await secureClient.uploadSignedFile(
                 settings: settings,
                 path: "/upload-recording-audio",
-                body: audioBody,
+                fileURL: audioURL,
                 contentType: "audio/m4a",
                 uploadType: "recording-audio",
                 recordingID: metadata.id,
                 fileName: metadata.fileName,
                 requestTimeout: 30,
-                resourceTimeout: 120
+                resourceTimeout: 60 * 30
             )
         } catch let error as SecureMacUploadError {
             throw RecordingUploadError.audioUploadFailed(error.localizedDescription)

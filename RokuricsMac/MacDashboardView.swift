@@ -84,7 +84,7 @@ enum MacDashboardCardKind: String, CaseIterable, Identifiable {
         case .iPhoneConnection:
             return "iPhone 连接"
         case .audioInbox:
-            return "音频收件箱"
+            return "学习库"
         case .aiProcessing:
             return "AI 整理"
         }

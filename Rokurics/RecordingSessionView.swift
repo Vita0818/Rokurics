@@ -11,8 +11,10 @@ struct RecordingSessionView: View {
     @ObservedObject var recordingManager: RecordingManager
     @Environment(\.dismiss) private var dismiss
     @State private var didRequestStart = false
-    @State private var recordingTitle = ""
-    @State private var isDraftNamingPresented = false
+    @State private var filingType = ""
+    @State private var filingSubject = ""
+    @State private var filingChapter = ""
+    @State private var filingTopic = ""
 
     var body: some View {
         ZStack {
@@ -84,12 +86,15 @@ struct RecordingSessionView: View {
             }
             .padding(.horizontal, 22)
 
-            if isNamingOverlayPresented {
-                RecordingNamingOverlay(
-                    title: $recordingTitle,
-                    defaultTitle: recordingManager.suggestedRecordingTitle,
-                    saveAction: saveNamingOverlay,
-                    skipAction: skipNamingOverlay
+            if isFilingOverlayPresented {
+                RecordingFilingOverlay(
+                    type: $filingType,
+                    subject: $filingSubject,
+                    chapter: $filingChapter,
+                    topic: $filingTopic,
+                    candidates: recordingManager.filingCandidates,
+                    saveAction: saveFilingAndDismiss,
+                    directSaveAction: directSaveAndDismiss
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 .zIndex(10)
@@ -101,41 +106,34 @@ struct RecordingSessionView: View {
             startIfNeeded()
         }
         .onChange(of: recordingManager.state) { _, newState in
-            if newState == .naming {
-                recordingTitle = recordingManager.pendingTitle ?? ""
-                isDraftNamingPresented = false
+            if newState == .filing {
+                resetFilingDraft()
             }
         }
         .onDisappear {
-            if recordingManager.state == .naming {
-                recordingManager.finalizeRecording(title: nil)
+            if recordingManager.state == .filing {
+                recordingManager.finalizeRecordingDirectSave()
             }
         }
     }
 
     private var header: some View {
         HStack(spacing: 0) {
-            Button(action: dismissToHome) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(RokuricsColors.deepText)
-                    .frame(width: 44, height: 44)
-                    .rokuricsGlassCircle(fillOpacity: 0.38, strokeOpacity: 0.42, shadowOpacity: 0.10, shadowRadius: 10, shadowY: 5)
-            }
-            .buttonStyle(RokuricsScaleButtonStyle())
-            .accessibilityLabel("返回首页")
+            RokuricsIconCircleButton(
+                systemName: "chevron.left",
+                accessibilityLabel: "返回首页",
+                action: dismissToHome
+            )
 
             Color.clear
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: openDraftNaming)
                 .accessibilityHidden(true)
         }
     }
 
-    private var isNamingOverlayPresented: Bool {
-        recordingManager.state == .naming || isDraftNamingPresented
+    private var isFilingOverlayPresented: Bool {
+        recordingManager.state == .filing
     }
 
     private var pauseButtonTitle: String {
@@ -162,7 +160,7 @@ struct RecordingSessionView: View {
         didRequestStart = true
 
         switch recordingManager.state {
-        case .recording, .paused, .requestingPermission, .configuringSession, .stopping, .naming, .saving:
+        case .recording, .paused, .requestingPermission, .configuringSession, .stopping, .filing, .saving:
             return
         case .idle, .saved, .permissionDenied, .failed:
             recordingManager.startRecording()
@@ -189,57 +187,184 @@ struct RecordingSessionView: View {
     }
 
     private func dismissToHome() {
-        if recordingManager.state == .naming {
-            finalizeAndDismiss(title: nil)
+        if recordingManager.state == .filing {
+            directSaveAndDismiss()
             return
         }
 
         dismiss()
     }
 
-    private func finalizeAndDismiss(title: String?) {
-        recordingManager.finalizeRecording(title: title)
+    private func saveFilingAndDismiss() {
+        recordingManager.finalizeRecording(studyFiling: currentFilingDraft, directSave: false)
 
         if recordingManager.state == .saved {
             dismiss()
         }
     }
 
-    private func openDraftNaming() {
-        guard recordingManager.state == .recording || recordingManager.state == .paused else {
-            return
-        }
+    private func directSaveAndDismiss() {
+        recordingManager.finalizeRecordingDirectSave()
 
-        recordingTitle = recordingManager.pendingTitle ?? ""
-
-        withAnimation(.easeInOut(duration: 0.18)) {
-            isDraftNamingPresented = true
+        if recordingManager.state == .saved {
+            dismiss()
         }
     }
 
-    private func saveNamingOverlay() {
-        if recordingManager.state == .naming {
-            finalizeAndDismiss(title: recordingTitle)
-            return
-        }
+    private var currentFilingDraft: StudyFilingPath {
+        StudyFilingPath(
+            type: filingType,
+            subject: filingSubject,
+            chapter: filingChapter,
+            topic: filingTopic
+        )
+    }
 
-        recordingManager.updatePendingTitle(recordingTitle)
+    private func resetFilingDraft() {
+        filingType = ""
+        filingSubject = ""
+        filingChapter = ""
+        filingTopic = ""
+    }
+}
 
-        withAnimation(.easeInOut(duration: 0.16)) {
-            isDraftNamingPresented = false
+private struct RecordingFilingOverlay: View {
+    @Binding var type: String
+    @Binding var subject: String
+    @Binding var chapter: String
+    @Binding var topic: String
+    let candidates: StudyFilingCandidates
+    let saveAction: () -> Void
+    let directSaveAction: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.white.opacity(0.18)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("录音归档")
+                        .font(RokuricsTypography.chineseTitle(size: 24, weight: .bold))
+                        .foregroundStyle(RokuricsColors.deepText)
+                }
+
+                VStack(spacing: 10) {
+                    RecordingFilingField(
+                        title: StudyFilingLevel.type.title,
+                        placeholder: "课堂",
+                        text: $type,
+                        candidates: candidates.values(for: .type)
+                    )
+                    RecordingFilingField(
+                        title: StudyFilingLevel.subject.title,
+                        placeholder: "线性代数",
+                        text: $subject,
+                        candidates: candidates.values(for: .subject)
+                    )
+                    RecordingFilingField(
+                        title: StudyFilingLevel.chapter.title,
+                        placeholder: "矩阵",
+                        text: $chapter,
+                        candidates: candidates.values(for: .chapter)
+                    )
+                    RecordingFilingField(
+                        title: StudyFilingLevel.topic.title,
+                        placeholder: "矩阵乘法",
+                        text: $topic,
+                        candidates: candidates.values(for: .topic)
+                    )
+                }
+
+                HStack(spacing: 12) {
+                    Button(action: directSaveAction) {
+                        Text("直接保存")
+                            .font(RokuricsTypography.button(size: 15))
+                            .foregroundStyle(RokuricsColors.softText)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                    }
+                    .buttonStyle(RokuricsScaleButtonStyle())
+                    .rokuricsGlassCapsule(fillOpacity: 0.30, strokeOpacity: 0.32, shadowOpacity: 0.04)
+
+                    Button(action: saveAction) {
+                        Text("保存")
+                            .font(RokuricsTypography.button(size: 15))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                    }
+                    .buttonStyle(RokuricsScaleButtonStyle())
+                    .disabled(!hasAnyFiling)
+                    .background(hasAnyFiling ? RokuricsColors.actionGradient : LinearGradient(colors: [RokuricsColors.tertiaryText.opacity(0.34)], startPoint: .leading, endPoint: .trailing), in: Capsule())
+                    .overlay {
+                        Capsule()
+                            .stroke(Color.white.opacity(0.38), lineWidth: 1)
+                    }
+                    .opacity(hasAnyFiling ? 1 : 0.62)
+                    .shadow(color: RokuricsColors.shadow.opacity(hasAnyFiling ? 0.16 : 0.04), radius: 14, y: 8)
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: 360)
+            .rokuricsLiquidGlassCard(cornerRadius: 30, fillOpacity: 0.52, strokeOpacity: 0.50, shadowOpacity: 0.16, shadowRadius: 26, shadowY: 14)
+            .padding(.horizontal, 24)
         }
     }
 
-    private func skipNamingOverlay() {
-        if recordingManager.state == .naming {
-            finalizeAndDismiss(title: nil)
-            return
-        }
+    private var hasAnyFiling: Bool {
+        !StudyFilingPath(type: type, subject: subject, chapter: chapter, topic: topic).isEmpty
+    }
+}
 
-        recordingTitle = recordingManager.pendingTitle ?? ""
+private struct RecordingFilingField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    let candidates: [String]
 
-        withAnimation(.easeInOut(duration: 0.16)) {
-            isDraftNamingPresented = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(RokuricsTypography.caption(size: 12, weight: .bold))
+                .foregroundStyle(RokuricsColors.softText)
+
+            HStack(spacing: 8) {
+                TextField(placeholder, text: $text)
+                    .font(RokuricsTypography.body(size: 15, weight: .semibold))
+                    .foregroundStyle(RokuricsColors.deepText)
+                    .textInputAutocapitalization(.never)
+                    .submitLabel(.done)
+
+                Menu {
+                    if candidates.isEmpty {
+                        Text("暂无已有值")
+                    } else {
+                        ForEach(candidates, id: \.self) { candidate in
+                            Button(candidate) {
+                                text = candidate
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(RokuricsColors.aqua)
+                        .frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("选择\(title)")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 48)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(RokuricsColors.glassSurface.opacity(0.52))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(RokuricsColors.glassStroke.opacity(0.42), lineWidth: 1)
+                    }
+            )
         }
     }
 }

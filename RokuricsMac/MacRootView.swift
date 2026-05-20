@@ -10,27 +10,35 @@ import SwiftUI
 struct MacRootView: View {
     @State private var selection: MacSidebarItem? = .dashboard
     @State private var isSettingsSelected = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @StateObject private var secureReceiverService = SecureReceiverService()
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
     @StateObject private var noteGenerationCoordinator = NoteGenerationCoordinator()
+    @StateObject private var studyLibraryStore = StudyLibraryStore()
+    @StateObject private var chatCoordinator = ChatCoordinator()
     @StateObject private var transcriptionSettingsStore = TranscriptionSettingsStore.shared
     @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
+    @StateObject private var userProfileStore = MacUserProfileStore()
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        NavigationSplitView {
-            MacSidebarView(selection: $selection, isSettingsSelected: $isSettingsSelected)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            MacSidebarView(
+                selection: $selection,
+                isSettingsSelected: $isSettingsSelected,
+                userProfileStore: userProfileStore
+            )
                 .navigationSplitViewColumnWidth(min: 210, ideal: 236, max: 280)
         } detail: {
             if isSettingsSelected {
                 MacSettingsView(
-                    secureReceiverService: secureReceiverService,
                     audioInboxStore: audioInboxStore,
                     transcriptionQueue: transcriptionQueue,
                     transcriptionSettingsStore: transcriptionSettingsStore,
-                    noteGenerationSettingsStore: noteGenerationSettingsStore
+                    noteGenerationSettingsStore: noteGenerationSettingsStore,
+                    userProfileStore: userProfileStore
                 )
             } else {
                 detailView(for: selection ?? .dashboard)
@@ -56,22 +64,44 @@ struct MacRootView: View {
                 }
             )
         case .iPhoneConnection:
-            MacIPhoneConnectionView(secureReceiverService: secureReceiverService)
+            MacIPhoneConnectionView(
+                secureReceiverService: secureReceiverService,
+                isSidebarCollapsed: isSidebarCollapsed
+            )
         case .audioInbox:
-            MacAudioInboxView(
+            MacStudyLibraryView(
+                studyLibraryStore: studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
-                noteGenerationCoordinator: noteGenerationCoordinator
+                noteGenerationCoordinator: noteGenerationCoordinator,
+                onImportContext: activateAIChatContext
             )
-        case .notes:
-            MacPlaceholderWorkspace(
-                title: "Notes",
-                systemImage: "doc.text",
-                status: "Markdown",
-                caption: "课堂笔记与知识点卡片稍后支持",
-                details: ["Kikaria preset: planned", "Review cards: planned"]
+        case .studyLibrary:
+            MacStudyLibraryView(
+                studyLibraryStore: studyLibraryStore,
+                audioInboxStore: audioInboxStore,
+                transcriptionCoordinator: transcriptionCoordinator,
+                noteGenerationCoordinator: noteGenerationCoordinator,
+                onImportContext: activateAIChatContext
+            )
+        case .aiChat:
+            MacAIChatView(
+                chatCoordinator: chatCoordinator,
+                studyLibraryStore: studyLibraryStore,
+                userProfileStore: userProfileStore,
+                isSidebarCollapsed: isSidebarCollapsed
             )
         }
+    }
+
+    private var isSidebarCollapsed: Bool {
+        columnVisibility == .detailOnly
+    }
+
+    private func activateAIChatContext(_ context: ChatContext) {
+        chatCoordinator.importContext(context)
+        isSettingsSelected = false
+        selection = .aiChat
     }
 }
 

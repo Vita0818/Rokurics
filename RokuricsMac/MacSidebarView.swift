@@ -10,11 +10,12 @@ import SwiftUI
 enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
     case dashboard
     case audioInbox
-    case notes
+    case studyLibrary
     case iPhoneConnection
+    case aiChat
 
     static var allCases: [MacSidebarItem] {
-        [.dashboard, .iPhoneConnection, .audioInbox, .notes]
+        [.dashboard, .iPhoneConnection, .studyLibrary, .aiChat]
     }
 
     var id: String { rawValue }
@@ -23,8 +24,9 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return "仪表盘"
         case .audioInbox: return "音频收件箱"
-        case .notes: return "笔记"
+        case .studyLibrary: return "学习库"
         case .iPhoneConnection: return "iPhone 连接"
+        case .aiChat: return "AI 对话"
         }
     }
 
@@ -32,8 +34,9 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .dashboard: return "rectangle.3.group"
         case .audioInbox: return "tray.and.arrow.down"
-        case .notes: return "doc.text"
+        case .studyLibrary: return "books.vertical"
         case .iPhoneConnection: return "iphone"
+        case .aiChat: return "bubble.left.and.bubble.right"
         }
     }
 }
@@ -41,6 +44,7 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
 struct MacSidebarView: View {
     @Binding var selection: MacSidebarItem?
     @Binding var isSettingsSelected: Bool
+    @ObservedObject var userProfileStore: MacUserProfileStore
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -95,9 +99,21 @@ struct MacSidebarView: View {
                                 .stroke(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.46), lineWidth: 1)
                         }
 
-                    Text("Vita")
-                        .font(MacTypography.englishBody(size: 13, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        MacMixedFontText(
+                            text: userProfileStore.profile.displayName,
+                            chineseFont: MacTypography.body(size: 13, weight: .semibold),
+                            englishFont: MacTypography.englishBody(size: 13, weight: .semibold),
+                            numberFont: MacTypography.numberBody(size: 13, weight: .semibold)
+                        )
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
+                        .lineLimit(1)
+
+                        Text(userProfileStore.profile.displayHandle)
+                            .font(MacTypography.secondary(size: 10, weight: .medium))
+                            .foregroundStyle(MacTheme.softText(for: colorScheme))
+                            .lineLimit(1)
+                    }
 
                     Spacer(minLength: 8)
                 }
@@ -187,18 +203,33 @@ private struct MacSidebarTitle: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            if item == .iPhoneConnection {
-                Text("iPhone")
+            if item == .iPhoneConnection || item == .aiChat {
+                Text(item == .iPhoneConnection ? "iPhone" : "AI")
                     .font(MacTypography.englishBody(size: 13, weight: isSelected ? .semibold : .medium))
             }
 
-            Text(item == .iPhoneConnection ? "连接" : item.title)
+            Text(sidebarTitle)
                 .font(MacTypography.chineseBody(size: 13, weight: isSelected ? .semibold : .medium))
         }
         .foregroundStyle(isSelected ? MacTheme.deepText(for: colorScheme) : MacTheme.softText(for: colorScheme))
     }
+
+    private var sidebarTitle: String {
+        switch item {
+        case .iPhoneConnection:
+            return "连接"
+        case .aiChat:
+            return "对话"
+        default:
+            return item.title
+        }
+    }
 }
 
 #Preview {
-    MacSidebarView(selection: .constant(.dashboard), isSettingsSelected: .constant(false))
+    MacSidebarView(
+        selection: .constant(.dashboard),
+        isSettingsSelected: .constant(false),
+        userProfileStore: MacUserProfileStore()
+    )
 }

@@ -46,21 +46,43 @@ struct RokuricsScaleButtonStyle: ButtonStyle {
     }
 }
 
+enum RokuricsIconCircleButtonConfiguration {
+    static let size: CGFloat = 44
+    static let iconSize: CGFloat = 18
+    static let borderWidth: CGFloat = 1
+    static let fillOpacity: Double = 0.40
+    static let strokeOpacity: Double = 0.44
+    static let disabledOpacity: Double = 0.48
+    static let usesGlassBackground = true
+    static let usesSystemSymbols = true
+}
+
 struct RokuricsIconCircleButton: View {
     let systemName: String
     let accessibilityLabel: String
-    var size: CGFloat = 44
+    var size: CGFloat = RokuricsIconCircleButtonConfiguration.size
+    var tint: Color = RokuricsColors.deepText
+    var isEnabled = true
     var action: () -> Void = {}
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size * 0.40, weight: .semibold))
-                .foregroundStyle(RokuricsColors.deepText)
+                .font(.system(size: min(RokuricsIconCircleButtonConfiguration.iconSize, size * 0.42), weight: .semibold))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(isEnabled ? tint : RokuricsColors.tertiaryText)
                 .frame(width: size, height: size)
-                .rokuricsGlassCircle(fillOpacity: 0.40, strokeOpacity: 0.44, shadowOpacity: 0.10, shadowRadius: 12, shadowY: 6)
+                .rokuricsGlassCircle(
+                    fillOpacity: isEnabled ? RokuricsIconCircleButtonConfiguration.fillOpacity : 0.22,
+                    strokeOpacity: RokuricsIconCircleButtonConfiguration.strokeOpacity,
+                    shadowOpacity: isEnabled ? 0.10 : 0.04,
+                    shadowRadius: 12,
+                    shadowY: 6
+                )
         }
         .buttonStyle(RokuricsScaleButtonStyle())
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : RokuricsIconCircleButtonConfiguration.disabledOpacity)
         .accessibilityLabel(accessibilityLabel)
     }
 }

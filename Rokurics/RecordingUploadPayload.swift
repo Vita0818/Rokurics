@@ -25,6 +25,7 @@ struct RecordingUploadMetadataPayload: Codable {
     let transcriptionStatus: String
     let noteStatus: String
     let tags: [String]
+    let studyFiling: StudyFilingPath?
     let sourceDeviceName: String
     let sourceDeviceID: String
     let uploadedAt: Date
@@ -52,6 +53,7 @@ struct RecordingUploadMetadataPayload: Codable {
         self.transcriptionStatus = metadata.transcriptionStatus
         self.noteStatus = metadata.noteStatus
         self.tags = metadata.tags
+        self.studyFiling = metadata.studyFiling
         self.sourceDeviceName = sourceDeviceName
         self.sourceDeviceID = sourceDeviceID
         self.uploadedAt = uploadedAt

@@ -16,7 +16,7 @@ enum RokuricsRecordingState: Equatable {
     case recording
     case paused
     case stopping
-    case naming
+    case filing
     case saving
     case saved
     case permissionDenied
@@ -31,7 +31,7 @@ enum RokuricsRecordingState: Equatable {
     }
 
     var isBusy: Bool {
-        self == .requestingPermission || self == .configuringSession || self == .stopping || self == .naming || self == .saving
+        self == .requestingPermission || self == .configuringSession || self == .stopping || self == .filing || self == .saving
     }
 }
 
@@ -77,7 +77,7 @@ final class RecordingManager: ObservableObject {
         switch state {
         case .recording:
             stopRecording()
-        case .requestingPermission, .configuringSession, .stopping, .naming, .saving:
+        case .requestingPermission, .configuringSession, .stopping, .filing, .saving:
             log("button ignored while busy. state=\(state)")
         case .paused:
             resumeRecording()
@@ -161,6 +161,10 @@ final class RecordingManager: ObservableObject {
         recordings.filter { metadata in
             RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) != .uploaded
         }.count
+    }
+
+    var filingCandidates: StudyFilingCandidates {
+        StudyFilingCandidates.collect(from: recordings)
     }
 
     func updateUploadStatus(recordingID: String, status: RecordingUploadStatus) throws {
@@ -315,17 +319,17 @@ final class RecordingManager: ObservableObject {
         elapsedSeconds = finalDuration
         lastRecordingURL = fileURL
         lastErrorMessage = nil
-        state = .naming
-        statusMessage = "等待命名"
-        log("recording stopped for naming: \(fileURL.path)")
+        state = .filing
+        statusMessage = "等待归档"
+        log("recording stopped for filing: \(fileURL.path)")
         print("[RokuricsStorage] audio file exists: \(fileStore.fileExists(at: fileURL))")
-
-        if let pendingTitle, !pendingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            finalizeRecording(title: pendingTitle)
-        }
     }
 
-    func finalizeRecording(title rawTitle: String? = nil) {
+    func finalizeRecording(
+        title rawTitle: String? = nil,
+        studyFiling: StudyFilingPath? = nil,
+        directSave: Bool = false
+    ) {
         guard let pendingRecordingSave else {
             log("finalize ignored. no pending recording save. state=\(state)")
             return
@@ -334,12 +338,13 @@ final class RecordingManager: ObservableObject {
         state = .saving
         statusMessage = "正在保存录音"
 
-        let trimmedTitle = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let fallbackPendingTitle = pendingTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let normalizedRawTitle = RecordingTitleEditRules.normalizedTitle(trimmedTitle, fallback: pendingRecordingSave.defaultTitle)
-        let normalizedPendingTitle = RecordingTitleEditRules.normalizedTitle(fallbackPendingTitle, fallback: pendingRecordingSave.defaultTitle)
-        let finalTitle = trimmedTitle.isEmpty ? pendingRecordingSave.defaultTitle : normalizedRawTitle
-        let resolvedTitle = trimmedTitle.isEmpty && !fallbackPendingTitle.isEmpty ? normalizedPendingTitle : finalTitle
+        let resolvedFiling = studyFiling?.isEmpty == true ? nil : studyFiling
+        let resolvedTitle = RecordingSaveTitleResolver.title(
+            defaultTitle: pendingRecordingSave.defaultTitle,
+            pendingTitle: rawTitle ?? pendingTitle,
+            studyFiling: resolvedFiling,
+            directSave: directSave
+        )
 
         do {
             let metadata = try makeMetadata(
@@ -348,7 +353,8 @@ final class RecordingManager: ObservableObject {
                 createdAt: pendingRecordingSave.createdAt,
                 endedAt: pendingRecordingSave.endedAt,
                 duration: pendingRecordingSave.duration,
-                settings: pendingRecordingSave.settings
+                settings: pendingRecordingSave.settings,
+                studyFiling: directSave ? nil : resolvedFiling
             )
             try fileStore.saveMetadata(metadata)
             recordings = [metadata] + recordings.filter { $0.id != metadata.id }
@@ -373,6 +379,20 @@ final class RecordingManager: ObservableObject {
             lastRecordingURL = pendingRecordingSave.fileURL
             fail("录音已保存，但 metadata 写入失败：\(error.localizedDescription)", error: error)
         }
+    }
+
+    func finalizeRecordingDirectSave() {
+        finalizeRecording(title: nil, studyFiling: nil, directSave: true)
+    }
+
+    func updateStudyFiling(recordingID: String, studyFiling: StudyFilingPath?) throws {
+        guard let existing = recordings.first(where: { $0.id == recordingID }) ?? (try? fileStore.loadMetadata(id: recordingID)) else {
+            throw AudioFileStoreError.recordingNotFound(recordingID)
+        }
+
+        let updated = existing.updatingStudyFiling(studyFiling)
+        try fileStore.updateMetadata(updated)
+        replaceRecordingInMemory(updated)
     }
 
     private func requestPermissionIfNeeded() async -> Bool {
@@ -537,7 +557,8 @@ final class RecordingManager: ObservableObject {
         createdAt: Date,
         endedAt: Date,
         duration: TimeInterval,
-        settings: RecordingSettingsSummary
+        settings: RecordingSettingsSummary,
+        studyFiling: StudyFilingPath?
     ) throws -> RecordingMetadata {
         let id = fileURL.deletingPathExtension().lastPathComponent
         let metadataURL = try fileStore.makeMetadataURL(id: id)
@@ -566,7 +587,8 @@ final class RecordingManager: ObservableObject {
             uploadStatus: "localOnly",
             transcriptionStatus: "notStarted",
             noteStatus: "notStarted",
-            tags: []
+            tags: [],
+            studyFiling: studyFiling
         )
     }
 

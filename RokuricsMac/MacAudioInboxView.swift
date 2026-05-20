@@ -358,7 +358,7 @@ private struct MacRecordingLeadingIcon: View {
     }
 }
 
-private struct MacAudioInboxListRow: View {
+struct MacAudioInboxListRow: View {
     let item: MacRecordingInboxItem
     let isTranscribing: Bool
     let isGeneratingNote: Bool
@@ -759,7 +759,7 @@ private struct MacAudioInboxNoteActionCapsule: View {
     }
 }
 
-private struct MacAudioInboxTrashSheet: View {
+struct MacAudioInboxTrashSheet: View {
     let items: [MacRecordingInboxItem]
     let onRestore: (MacRecordingInboxItem) -> Void
     let onPermanentDelete: (MacRecordingInboxItem) -> Void
@@ -797,7 +797,7 @@ private struct MacAudioInboxTrashSheet: View {
 
                 if items.isEmpty {
                     Text("废纸篓为空")
-                        .font(MacTypography.chineseBody(size: 14, weight: .medium))
+                        .font(RokuricsDetailTypography.metadataValue)
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                         .padding(18)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -970,42 +970,23 @@ struct MacTranscriptDetailView: View {
     let item: MacRecordingInboxItem
     let onBack: () -> Void
     var loader = TranscriptMarkdownDocumentLoader()
+    var metadataLoader = RecordingDocumentMetadataLoader()
 
     @State private var loadResult: TranscriptMarkdownLoadResult = .loading
+    @State private var isInfoPresented = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Button(action: onBack) {
-                Label("返回", systemImage: "chevron.left")
-                    .font(MacTypography.chineseCaption(size: 12, weight: .bold))
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 8)
-                    .macGlassCapsule(fillOpacity: 0.32, strokeOpacity: 0.30)
+        ScrollView(showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+
+                transcriptContent
+
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-
-            VStack(alignment: .leading, spacing: 7) {
-                MacMixedFontText(
-                    text: item.title,
-                    chineseFont: MacTypography.chineseHeadline(size: 24),
-                    englishFont: MacTypography.englishLargeTitle(size: 26),
-                    numberFont: MacTypography.number(size: 25)
-                )
-                .foregroundStyle(MacTheme.deepText(for: colorScheme))
-                .lineLimit(2)
-
-                Text("transcript.md")
-                    .font(MacTypography.englishCaption(size: 12, weight: .semibold))
-                    .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
-            }
-
-            transcriptContent
-                .padding(22)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .macLiquidGlassCard(cornerRadius: 20, material: .ultraThinMaterial, fillOpacity: 0.32, strokeOpacity: 0.28, shadowOpacity: 0.04, shadowRadius: 8, shadowY: 4)
-
-            Spacer(minLength: 0)
+            .padding(.bottom, 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear(perform: loadMarkdown)
         .onChange(of: item.id) {
@@ -1014,29 +995,63 @@ struct MacTranscriptDetailView: View {
     }
 
     @ViewBuilder
+    private var header: some View {
+        switch loadResult {
+        case .loaded(let markdown):
+            let transcriptResult = loader.loadTranscriptResult(item: item)
+            let receiveRecord = metadataLoader.loadReceiveRecord(item: item)
+            RokuricsDocumentPageHeader(title: item.title, subtitle: "转写文本 / transcript", onBack: onBack) {
+                RokuricsInfoButton {
+                    isInfoPresented = true
+                }
+                .popover(isPresented: $isInfoPresented, arrowEdge: .bottom) {
+                    RokuricsDocumentInfoPopover(
+                        primaryRows: RokuricsDocumentDisplayRows.transcriptInfoRows(
+                            item: item,
+                            markdown: markdown,
+                            transcriptResult: transcriptResult,
+                            receiveRecord: receiveRecord
+                        ),
+                        advancedRows: RokuricsDocumentDisplayRows.transcriptAdvancedRows(
+                            item: item,
+                            markdown: markdown,
+                            transcriptResult: transcriptResult,
+                            receiveRecord: receiveRecord
+                        )
+                    )
+                }
+            }
+        default:
+            RokuricsDocumentPageHeader(title: item.title, subtitle: "转写文本 / transcript", onBack: onBack)
+        }
+    }
+
+    @ViewBuilder
     private var transcriptContent: some View {
         switch loadResult {
         case .loading:
-            Text("正在读取转写文档")
-                .font(MacTypography.chineseBody(size: 14, weight: .medium))
-                .foregroundStyle(MacTheme.softText(for: colorScheme))
+            RokuricsDocumentContentCard {
+                Text("正在读取转写文本")
+                    .font(RokuricsDetailTypography.metadataValue)
+                    .foregroundStyle(MacTheme.softText(for: colorScheme))
+            }
         case .loaded(let markdown):
-            Text(markdown)
-                .font(MacTypography.chineseBody(size: 14, weight: .regular))
-                .foregroundStyle(MacTheme.deepText(for: colorScheme))
-                .lineSpacing(5)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            RokuricsDocumentContentCard(title: "转写正文") {
+                RokuricsMarkdownContentView(markdown: RokuricsTranscriptMarkdownCleaner.cleanedBody(from: markdown))
+            }
         case .failed(let message):
-            Text(message)
-                .font(MacTypography.chineseBody(size: 14, weight: .medium))
-                .foregroundStyle(MacTheme.softText(for: colorScheme))
+            RokuricsDocumentContentCard {
+                Text(message)
+                    .font(RokuricsDetailTypography.metadataValue)
+                    .foregroundStyle(MacTheme.softText(for: colorScheme))
+            }
         }
     }
 
     private func loadMarkdown() {
         loadResult = loader.load(item: item)
     }
+
 }
 
 enum TranscriptMarkdownLoadResult: Equatable {
@@ -1087,6 +1102,20 @@ struct TranscriptMarkdownDocumentLoader {
         return .failed("未找到转写文档")
     }
 
+    func loadTranscriptResult(item: MacRecordingInboxItem) -> TranscriptionResult? {
+        for path in candidateJSONRelativePaths(for: item) {
+            guard let url = resolvedURL(relativePath: path),
+                  fileManager.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url) else {
+                continue
+            }
+            if let result = try? Self.decoder.decode(TranscriptionResult.self, from: data) {
+                return result
+            }
+        }
+        return nil
+    }
+
     private func candidateMarkdownRelativePaths(for item: MacRecordingInboxItem) -> [String] {
         var paths: [String] = []
         if let transcriptMarkdownRelativePath = item.transcriptMarkdownRelativePath,
@@ -1102,6 +1131,28 @@ struct TranscriptMarkdownDocumentLoader {
             }
         }
 
+        return unique(paths)
+    }
+
+    private func candidateJSONRelativePaths(for item: MacRecordingInboxItem) -> [String] {
+        var paths: [String] = []
+        if let transcriptRelativePath = item.transcriptRelativePath,
+           !transcriptRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            paths.append(transcriptRelativePath)
+        }
+
+        if let transcriptMarkdownRelativePath = item.transcriptMarkdownRelativePath,
+           !transcriptMarkdownRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let directory = (transcriptMarkdownRelativePath as NSString).deletingLastPathComponent
+            if !directory.isEmpty {
+                paths.append((directory as NSString).appendingPathComponent("transcript.json"))
+            }
+        }
+
+        return unique(paths)
+    }
+
+    private func unique(_ paths: [String]) -> [String] {
         var uniquePaths: [String] = []
         for path in paths where !uniquePaths.contains(path) {
             uniquePaths.append(path)
@@ -1125,4 +1176,10 @@ struct TranscriptMarkdownDocumentLoader {
         let filePath = url.standardizedFileURL.path
         return filePath == rootPath || filePath.hasPrefix(rootPath + "/")
     }
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
 }

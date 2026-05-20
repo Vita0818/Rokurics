@@ -41,6 +41,7 @@ struct RecordingReceiveRecord: Codable {
     var course: String?
     var category: String?
     var tags: [String]
+    var studyFiling: StudyFilingPath? = nil
     var createdAt: Date
     var duration: TimeInterval
     var fileSize: Int64
@@ -56,8 +57,12 @@ struct RecordingReceiveRecord: Codable {
     var transcriptionStartedAt: Date? = nil
     var transcriptionCompletedAt: Date? = nil
     var transcriptionError: String? = nil
+    var transcriptionMode: ProcessingMode? = nil
+    var transcriptionChunks: [RecordingTranscriptionChunkRecord]? = nil
     var isDeleted: Bool = false
     var deletedAt: Date? = nil
+    var noteGenerationMode: ProcessingMode? = nil
+    var noteSections: [RecordingNoteSectionRecord]? = nil
 
     init(
         recordingID: String,
@@ -85,6 +90,7 @@ struct RecordingReceiveRecord: Codable {
         course: String?,
         category: String?,
         tags: [String],
+        studyFiling: StudyFilingPath? = nil,
         createdAt: Date,
         duration: TimeInterval,
         fileSize: Int64,
@@ -100,8 +106,12 @@ struct RecordingReceiveRecord: Codable {
         transcriptionStartedAt: Date? = nil,
         transcriptionCompletedAt: Date? = nil,
         transcriptionError: String? = nil,
+        transcriptionMode: ProcessingMode? = nil,
+        transcriptionChunks: [RecordingTranscriptionChunkRecord]? = nil,
         isDeleted: Bool = false,
-        deletedAt: Date? = nil
+        deletedAt: Date? = nil,
+        noteGenerationMode: ProcessingMode? = nil,
+        noteSections: [RecordingNoteSectionRecord]? = nil
     ) {
         self.recordingID = recordingID
         self.sanitizedRecordingID = sanitizedRecordingID
@@ -128,6 +138,7 @@ struct RecordingReceiveRecord: Codable {
         self.course = course
         self.category = category
         self.tags = tags
+        self.studyFiling = studyFiling?.isEmpty == true ? nil : studyFiling
         self.createdAt = createdAt
         self.duration = duration
         self.fileSize = fileSize
@@ -143,8 +154,12 @@ struct RecordingReceiveRecord: Codable {
         self.transcriptionStartedAt = transcriptionStartedAt
         self.transcriptionCompletedAt = transcriptionCompletedAt
         self.transcriptionError = transcriptionError
+        self.transcriptionMode = transcriptionMode
+        self.transcriptionChunks = transcriptionChunks
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
+        self.noteGenerationMode = noteGenerationMode
+        self.noteSections = noteSections
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -173,6 +188,7 @@ struct RecordingReceiveRecord: Codable {
         case course
         case category
         case tags
+        case studyFiling
         case createdAt
         case duration
         case fileSize
@@ -188,8 +204,12 @@ struct RecordingReceiveRecord: Codable {
         case transcriptionStartedAt
         case transcriptionCompletedAt
         case transcriptionError
+        case transcriptionMode
+        case transcriptionChunks
         case isDeleted
         case deletedAt
+        case noteGenerationMode
+        case noteSections
     }
 
     init(from decoder: Decoder) throws {
@@ -219,6 +239,8 @@ struct RecordingReceiveRecord: Codable {
         course = try container.decodeIfPresent(String.self, forKey: .course)
         category = try container.decodeIfPresent(String.self, forKey: .category)
         tags = try container.decode([String].self, forKey: .tags)
+        let decodedStudyFiling = try container.decodeIfPresent(StudyFilingPath.self, forKey: .studyFiling)
+        studyFiling = decodedStudyFiling?.isEmpty == true ? nil : decodedStudyFiling
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         duration = try container.decode(TimeInterval.self, forKey: .duration)
         fileSize = try container.decode(Int64.self, forKey: .fileSize)
@@ -234,8 +256,12 @@ struct RecordingReceiveRecord: Codable {
         transcriptionStartedAt = try container.decodeIfPresent(Date.self, forKey: .transcriptionStartedAt)
         transcriptionCompletedAt = try container.decodeIfPresent(Date.self, forKey: .transcriptionCompletedAt)
         transcriptionError = try container.decodeIfPresent(String.self, forKey: .transcriptionError)
+        transcriptionMode = try container.decodeIfPresent(ProcessingMode.self, forKey: .transcriptionMode)
+        transcriptionChunks = try container.decodeIfPresent([RecordingTranscriptionChunkRecord].self, forKey: .transcriptionChunks)
         isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        noteGenerationMode = try container.decodeIfPresent(ProcessingMode.self, forKey: .noteGenerationMode)
+        noteSections = try container.decodeIfPresent([RecordingNoteSectionRecord].self, forKey: .noteSections)
     }
 
     static func normalizedNoteStatus(_ status: String?) -> String {

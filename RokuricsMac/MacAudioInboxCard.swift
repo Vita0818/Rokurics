@@ -14,7 +14,7 @@ struct MacAudioInboxCard: View {
 
     var body: some View {
         MacDashboardCard(systemImage: "tray.and.arrow.down", tint: MacTheme.mint) {
-            Text("音频收件箱")
+            Text("学习库")
                 .font(MacTypography.chineseHeadline(size: 17))
         } content: {
             VStack(alignment: .leading, spacing: 0) {
@@ -31,7 +31,7 @@ struct MacAudioInboxCard: View {
 
                 Spacer(minLength: 12)
 
-                Text("已配对 iPhone 上传的本地音频")
+                Text("录音、转写与笔记统一入口")
                     .font(MacTypography.chineseBody(size: 14, weight: .medium))
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
                     .lineLimit(1)
