@@ -1,0 +1,40 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacDocumentDetailComponents.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "在 Finder 中打开",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 200
+        }
+      },
+      {
+        "comment": "",
+        "key": "在 Finder 中打开",
+        "location": {
+          "startingColumn": 29,
+          "startingLine": 201
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无内容",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 791
+        }
+      },
+      {
+        "comment": "",
+        "key": "•",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 815
+        }
+      }
+    ]
+  },
+  "version": 1
+}

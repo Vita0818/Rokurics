@@ -1,0 +1,128 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacIPhoneConnectionView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "已复制",
+        "location": {
+          "startingColumn": 44,
+          "startingLine": 124
+        }
+      },
+      {
+        "comment": "",
+        "key": "复制配对信息",
+        "location": {
+          "startingColumn": 58,
+          "startingLine": 124
+        }
+      },
+      {
+        "comment": "",
+        "key": "配对码",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 141
+        }
+      },
+      {
+        "comment": "",
+        "key": "开始配对",
+        "location": {
+          "startingColumn": 27,
+          "startingLine": 165
+        }
+      },
+      {
+        "comment": "",
+        "key": "Mac 指纹",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 316
+        }
+      },
+      {
+        "comment": "",
+        "key": "隐藏",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 330
+        }
+      },
+      {
+        "comment": "",
+        "key": "显示",
+        "location": {
+          "startingColumn": 43,
+          "startingLine": 330
+        }
+      },
+      {
+        "comment": "",
+        "key": "立即同步",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 604
+        }
+      },
+      {
+        "comment": "",
+        "key": "查看连接信息",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 611
+        }
+      },
+      {
+        "comment": "",
+        "key": "断开连接",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 618
+        }
+      },
+      {
+        "comment": "",
+        "key": "certificate fingerprint",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 741
+        }
+      },
+      {
+        "comment": "",
+        "key": "%lld",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 826
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无已配对设备",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 831
+        }
+      },
+      {
+        "comment": "",
+        "key": "·",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 877
+        }
+      },
+      {
+        "comment": "",
+        "key": "·",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 881
+        }
+      }
+    ]
+  },
+  "version": 1
+}

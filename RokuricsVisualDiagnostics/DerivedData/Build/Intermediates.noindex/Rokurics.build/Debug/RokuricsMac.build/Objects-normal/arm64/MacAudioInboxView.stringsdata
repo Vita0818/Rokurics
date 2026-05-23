@@ -1,0 +1,184 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacAudioInboxView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "操作失败",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 154
+        }
+      },
+      {
+        "comment": "",
+        "key": "1516",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 64
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无收到的录音",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 70
+        }
+      },
+      {
+        "comment": "",
+        "key": "移入废纸篓",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 121
+        }
+      },
+      {
+        "comment": "",
+        "key": "取消",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 125
+        }
+      },
+      {
+        "comment": "",
+        "key": "永久删除",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 136
+        }
+      },
+      {
+        "comment": "",
+        "key": "取消",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 140
+        }
+      },
+      {
+        "comment": "",
+        "key": "好",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 155
+        }
+      },
+      {
+        "comment": "",
+        "key": "打开废纸篓",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 283
+        }
+      },
+      {
+        "comment": "",
+        "key": "废纸篓 %lld",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 273
+        }
+      },
+      {
+        "comment": "",
+        "key": "废纸篓",
+        "location": {
+          "startingColumn": 54,
+          "startingLine": 273
+        }
+      },
+      {
+        "comment": "",
+        "key": "移入废纸篓",
+        "location": {
+          "startingColumn": 37,
+          "startingLine": 482
+        }
+      },
+      {
+        "comment": "",
+        "key": "录音",
+        "location": {
+          "startingColumn": 57,
+          "startingLine": 482
+        }
+      },
+      {
+        "comment": "",
+        "key": "录音名称",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 488
+        }
+      },
+      {
+        "comment": "",
+        "key": "点击重命名",
+        "location": {
+          "startingColumn": 19,
+          "startingLine": 525
+        }
+      },
+      {
+        "comment": "",
+        "key": "废纸篓为空",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 799
+        }
+      },
+      {
+        "comment": "",
+        "key": "完成",
+        "location": {
+          "startingColumn": 28,
+          "startingLine": 788
+        }
+      },
+      {
+        "comment": "",
+        "key": "废纸篓",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 777
+        }
+      },
+      {
+        "comment": "",
+        "key": "已移入废纸篓的录音",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 781
+        }
+      },
+      {
+        "comment": "",
+        "key": "恢复",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 858
+        }
+      },
+      {
+        "comment": "",
+        "key": "永久删除",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 865
+        }
+      },
+      {
+        "comment": "",
+        "key": "·",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 849
+        }
+      }
+    ]
+  },
+  "version": 1
+}

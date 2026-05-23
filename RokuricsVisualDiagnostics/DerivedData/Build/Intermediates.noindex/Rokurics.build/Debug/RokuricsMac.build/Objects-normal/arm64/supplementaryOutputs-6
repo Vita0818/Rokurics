@@ -1,0 +1,72 @@
+{
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NativeAudioConverter.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NativeAudioConverter.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NativeAudioConverter.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NativeAudioConverter.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NativeAudioConverter.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NativeAudioConverter.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationCoordinator.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationCoordinator.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationCoordinator.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationCoordinator.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationCoordinator.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationCoordinator.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationError.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationError.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationError.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationError.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationError.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationError.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationProvider.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProvider.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProvider.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProvider.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProvider.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProvider.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationProviderKind.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProviderKind.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProviderKind.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProviderKind.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProviderKind.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationProviderKind.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationRequest.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationRequest.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationRequest.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationRequest.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationRequest.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationRequest.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationResult.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationResult.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationResult.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationResult.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationResult.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationResult.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationSettingsStore.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationSettingsStore.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationSettingsStore.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationSettingsStore.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationSettingsStore.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationSettingsStore.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteGenerationTranscriptLoader.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationTranscriptLoader.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationTranscriptLoader.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationTranscriptLoader.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationTranscriptLoader.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteGenerationTranscriptLoader.swiftdeps"
+  },
+  "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/NoteStore.swift" : {
+    "const-values" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteStore.swiftconstvalues",
+    "dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteStore.d",
+    "diagnostics" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteStore.dia",
+    "object" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteStore.o",
+    "swift-dependencies" : "/Users/vita/Vitemis/Vela/Rokurics/RokuricsVisualDiagnostics/DerivedData/Build/Intermediates.noindex/Rokurics.build/Debug/RokuricsMac.build/Objects-normal/arm64/NoteStore.swiftdeps"
+  }
+}

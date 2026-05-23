@@ -1,0 +1,72 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacWhisperCppSettingsView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "auto",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 75
+        }
+      },
+      {
+        "comment": "",
+        "key": "zh",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 76
+        }
+      },
+      {
+        "comment": "",
+        "key": "en",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 77
+        }
+      },
+      {
+        "comment": "",
+        "key": "文件可见性诊断",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 309
+        }
+      },
+      {
+        "comment": "",
+        "key": "从 RokuricsMac sandbox 视角只读检查 whisper.cpp 目录",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 313
+        }
+      },
+      {
+        "comment": "",
+        "key": "刷新中",
+        "location": {
+          "startingColumn": 57,
+          "startingLine": 323
+        }
+      },
+      {
+        "comment": "",
+        "key": "刷新文件诊断",
+        "location": {
+          "startingColumn": 71,
+          "startingLine": 323
+        }
+      },
+      {
+        "comment": "",
+        "key": "%@：%@",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 371
+        }
+      }
+    ]
+  },
+  "version": 1
+}

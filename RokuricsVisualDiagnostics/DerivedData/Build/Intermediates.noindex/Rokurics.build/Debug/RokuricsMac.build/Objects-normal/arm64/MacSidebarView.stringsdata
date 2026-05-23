@@ -1,0 +1,40 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacSidebarView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "Rokurics",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 53
+        }
+      },
+      {
+        "comment": "",
+        "key": "Mac",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 57
+        }
+      },
+      {
+        "comment": "",
+        "key": "iPhone",
+        "location": {
+          "startingColumn": 50,
+          "startingLine": 207
+        }
+      },
+      {
+        "comment": "",
+        "key": "AI",
+        "location": {
+          "startingColumn": 61,
+          "startingLine": 207
+        }
+      }
+    ]
+  },
+  "version": 1
+}

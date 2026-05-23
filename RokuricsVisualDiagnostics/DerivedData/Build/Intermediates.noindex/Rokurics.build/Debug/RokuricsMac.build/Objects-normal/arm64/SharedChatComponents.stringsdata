@@ -1,0 +1,16 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsShared/SharedChatComponents.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "消息",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 268
+        }
+      }
+    ]
+  },
+  "version": 1
+}

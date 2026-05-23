@@ -1,0 +1,32 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacExportCard.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "导出",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 16
+        }
+      },
+      {
+        "comment": "",
+        "key": "Kikaria / Anki",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 25
+        }
+      },
+      {
+        "comment": "",
+        "key": "稍后支持",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 28
+        }
+      }
+    ]
+  },
+  "version": 1
+}

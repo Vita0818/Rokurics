@@ -1,0 +1,24 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacDashboardView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "Rokurics",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 58
+        }
+      },
+      {
+        "comment": "",
+        "key": "Dashboard",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 62
+        }
+      }
+    ]
+  },
+  "version": 1
+}

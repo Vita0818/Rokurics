@@ -1,0 +1,56 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsShared/SharedStudyComponents.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "/",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 331
+        }
+      },
+      {
+        "comment": "",
+        "key": "%lld 项",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 395
+        }
+      },
+      {
+        "comment": "",
+        "key": "%lld 项",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 554
+        }
+      },
+      {
+        "comment": "",
+        "key": "新建",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 972
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无摘要",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 1718
+        }
+      },
+      {
+        "comment": "",
+        "key": "•",
+        "location": {
+          "startingColumn": 42,
+          "startingLine": 1706
+        }
+      }
+    ]
+  },
+  "version": 1
+}

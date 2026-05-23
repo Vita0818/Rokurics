@@ -1,0 +1,24 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacRootView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 50
+        }
+      },
+      {
+        "comment": "",
+        "key": "稍后支持",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 250
+        }
+      }
+    ]
+  },
+  "version": 1
+}

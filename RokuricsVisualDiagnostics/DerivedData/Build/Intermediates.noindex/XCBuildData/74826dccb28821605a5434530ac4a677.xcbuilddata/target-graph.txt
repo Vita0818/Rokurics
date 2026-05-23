@@ -1,0 +1,2 @@
+Target dependency graph (1 target)
+Target 'RokuricsMac' in project 'Rokurics' (no dependencies)

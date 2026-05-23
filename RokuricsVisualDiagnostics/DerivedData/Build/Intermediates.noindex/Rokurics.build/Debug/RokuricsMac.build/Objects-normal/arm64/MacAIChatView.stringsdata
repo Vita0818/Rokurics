@@ -1,0 +1,64 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacAIChatView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "取消",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 488
+        }
+      },
+      {
+        "comment": "",
+        "key": "导入当前文件夹",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 491
+        }
+      },
+      {
+        "comment": "",
+        "key": "/",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 503
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无内容",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 552
+        }
+      },
+      {
+        "comment": "",
+        "key": "暂无对话",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 631
+        }
+      },
+      {
+        "comment": "",
+        "key": "移除附件",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 769
+        }
+      },
+      {
+        "comment": "",
+        "key": "移除附件",
+        "location": {
+          "startingColumn": 37,
+          "startingLine": 770
+        }
+      }
+    ]
+  },
+  "version": 1
+}

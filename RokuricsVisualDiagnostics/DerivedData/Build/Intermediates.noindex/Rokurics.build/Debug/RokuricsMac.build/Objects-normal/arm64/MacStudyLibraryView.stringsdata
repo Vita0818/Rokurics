@@ -1,0 +1,152 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacStudyLibraryView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "学习库操作失败",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 122
+        }
+      },
+      {
+        "comment": "",
+        "key": "永久删除",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 93
+        }
+      },
+      {
+        "comment": "",
+        "key": "取消",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 97
+        }
+      },
+      {
+        "comment": "",
+        "key": "好",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 123
+        }
+      },
+      {
+        "comment": "",
+        "key": "返回上一级",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 205
+        }
+      },
+      {
+        "comment": "",
+        "key": "返回上一级",
+        "location": {
+          "startingColumn": 37,
+          "startingLine": 206
+        }
+      },
+      {
+        "comment": "",
+        "key": "新建文件夹",
+        "location": {
+          "startingColumn": 41,
+          "startingLine": 215
+        }
+      },
+      {
+        "comment": "",
+        "key": "导入 AI 对话上下文",
+        "location": {
+          "startingColumn": 27,
+          "startingLine": 220
+        }
+      },
+      {
+        "comment": "",
+        "key": "导入 AI 对话上下文",
+        "location": {
+          "startingColumn": 41,
+          "startingLine": 221
+        }
+      },
+      {
+        "comment": "",
+        "key": "打开废纸篓",
+        "location": {
+          "startingColumn": 27,
+          "startingLine": 226
+        }
+      },
+      {
+        "comment": "",
+        "key": "打开废纸篓",
+        "location": {
+          "startingColumn": 41,
+          "startingLine": 227
+        }
+      },
+      {
+        "comment": "",
+        "key": "",
+        "location": {
+          "startingColumn": 27,
+          "startingLine": 654
+        }
+      },
+      {
+        "comment": "",
+        "key": "打开%@",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 854
+        }
+      },
+      {
+        "comment": "",
+        "key": "双击移入废纸篓",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 1164
+        }
+      },
+      {
+        "comment": "",
+        "key": "新建%@",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 1306
+        }
+      },
+      {
+        "comment": "",
+        "key": "取消",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 1317
+        }
+      },
+      {
+        "comment": "",
+        "key": "保存",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 1319
+        }
+      },
+      {
+        "comment": "",
+        "key": "新建",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 1593
+        }
+      }
+    ]
+  },
+  "version": 1
+}

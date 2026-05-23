@@ -1,0 +1,80 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacSettingsView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "无法打开存储",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 57
+        }
+      },
+      {
+        "comment": "",
+        "key": "设置",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 34
+        }
+      },
+      {
+        "comment": "",
+        "key": "好",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 58
+        }
+      },
+      {
+        "comment": "",
+        "key": "编辑个人资料",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 470
+        }
+      },
+      {
+        "comment": "",
+        "key": "编辑个人资料",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 553
+        }
+      },
+      {
+        "comment": "",
+        "key": "保存",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 559
+        }
+      },
+      {
+        "comment": "",
+        "key": "头像导入稍后接入",
+        "location": {
+          "startingColumn": 19,
+          "startingLine": 586
+        }
+      },
+      {
+        "comment": "",
+        "key": "更换头像",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 578
+        }
+      },
+      {
+        "comment": "",
+        "key": "",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 895
+        }
+      }
+    ]
+  },
+  "version": 1
+}

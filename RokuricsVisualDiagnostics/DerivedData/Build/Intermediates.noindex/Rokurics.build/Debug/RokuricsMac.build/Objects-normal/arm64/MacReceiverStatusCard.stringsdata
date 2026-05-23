@@ -1,0 +1,48 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacReceiverStatusCard.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "未配对",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 46
+        }
+      },
+      {
+        "comment": "",
+        "key": "已复制",
+        "location": {
+          "startingColumn": 48,
+          "startingLine": 57
+        }
+      },
+      {
+        "comment": "",
+        "key": "复制配对信息",
+        "location": {
+          "startingColumn": 62,
+          "startingLine": 57
+        }
+      },
+      {
+        "comment": "",
+        "key": "开始配对",
+        "location": {
+          "startingColumn": 27,
+          "startingLine": 67
+        }
+      },
+      {
+        "comment": "",
+        "key": "查看详情",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 78
+        }
+      }
+    ]
+  },
+  "version": 1
+}

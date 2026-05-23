@@ -1,0 +1,32 @@
+{
+  "source": "/Users/vita/Vitemis/Vela/Rokurics/RokuricsMac/MacAudioInboxCard.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "学习库",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 17
+        }
+      },
+      {
+        "comment": "",
+        "key": "录音、转写与笔记统一入口",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 34
+        }
+      },
+      {
+        "comment": "",
+        "key": "%lld",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 22
+        }
+      }
+    ]
+  },
+  "version": 1
+}
