@@ -10,9 +10,13 @@ import SwiftUI
 struct RokuricsHomeView: View {
     @ObservedObject var recordingManager: RecordingManager
     @ObservedObject var macConnectionStore: SecureMacConnectionStore
+    @ObservedObject var userProfileStore: UserProfileStore
+    @StateObject private var uploadCoordinator = RecordingUploadCoordinator()
     @State private var isRecordingSessionPresented = false
     @State private var isRecordingLibraryPresented = false
+    @State private var isAIChatPresented = false
     @State private var isMacConnectionPresented = false
+    @State private var isSettingsPresented = false
 
     var body: some View {
         RokuricsAdaptivePage { metrics in
@@ -34,12 +38,11 @@ struct RokuricsHomeView: View {
 
                     Spacer(minLength: metrics.isPadWidth ? 32 : 20)
 
-                    RokuricsHomeDashboardCard(
+                    RokuricsHomeNavigationCard(
                         scale: metrics.dashboardScale,
-                        recordingCount: recordingManager.recordings.count,
-                        pendingUploadCount: recordingManager.pendingUploadCount,
                         isMacPaired: macConnectionStore.isPaired,
                         onOpenRecordingLibrary: openRecordingLibrary,
+                        onOpenAIChat: openAIChat,
                         onOpenMacConnection: openMacConnection
                     )
                         .padding(.bottom, metrics.homeBottomPadding)
@@ -56,11 +59,26 @@ struct RokuricsHomeView: View {
         .navigationDestination(isPresented: $isRecordingLibraryPresented) {
             RecordingLibraryView(
                 recordingManager: recordingManager,
-                macConnectionStore: macConnectionStore
+                macConnectionStore: macConnectionStore,
+                uploadCoordinator: uploadCoordinator
+            )
+        }
+        .navigationDestination(isPresented: $isAIChatPresented) {
+            IPhoneAIChatView(
+                studyLibraryStore: recordingManager.studyLibraryStore,
+                userProfileStore: userProfileStore
             )
         }
         .navigationDestination(isPresented: $isMacConnectionPresented) {
-            MacConnectionView(connectionStore: macConnectionStore)
+            MacConnectionView(
+                connectionStore: macConnectionStore,
+                studyLibraryStore: recordingManager.studyLibraryStore,
+                recordingManager: recordingManager,
+                uploadCoordinator: uploadCoordinator
+            )
+        }
+        .navigationDestination(isPresented: $isSettingsPresented) {
+            IPhoneSettingsView(userProfileStore: userProfileStore)
         }
         .onAppear {
             macConnectionStore.refreshFromStorage()
@@ -76,9 +94,12 @@ struct RokuricsHomeView: View {
             Spacer(minLength: 16)
 
             RokuricsProfileAvatarButton(
+                profile: userProfileStore.profile,
                 accessibilityLabel: "打开设置",
                 size: 46 * metrics.headerScale
-            )
+            ) {
+                isSettingsPresented = true
+            }
         }
     }
 
@@ -91,6 +112,11 @@ struct RokuricsHomeView: View {
         print("[RokuricsNavigation] open recording library")
         recordingManager.reloadRecordings()
         isRecordingLibraryPresented = true
+    }
+
+    private func openAIChat() {
+        print("[RokuricsNavigation] open AI chat")
+        isAIChatPresented = true
     }
 
     private func openMacConnection() {
@@ -479,13 +505,14 @@ private struct RokuricsStopGlyph: View {
 }
 
 private struct RokuricsProfileAvatarButton: View {
+    let profile: UserProfile
     let accessibilityLabel: String
     let size: CGFloat
     var action: () -> Void = {}
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "person.crop.circle.fill")
+            Image(systemName: profile.avatar)
                 .font(.system(size: size * 0.88, weight: .regular))
                 .foregroundStyle(RokuricsColors.aqua, .white.opacity(0.88))
                 .frame(width: size, height: size)
@@ -497,49 +524,44 @@ private struct RokuricsProfileAvatarButton: View {
     }
 }
 
-private struct RokuricsHomeDashboardCard: View {
+private struct RokuricsHomeNavigationCard: View {
     let scale: CGFloat
-    let recordingCount: Int
-    let pendingUploadCount: Int
     let isMacPaired: Bool
     let onOpenRecordingLibrary: () -> Void
+    let onOpenAIChat: () -> Void
     let onOpenMacConnection: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            RokuricsHomeDashboardColumn(
-                title: "录音",
-                value: "\(recordingCount)",
-                tint: RokuricsColors.aqua,
-                scale: scale
-            )
-            .onTapGesture(perform: onOpenRecordingLibrary)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("打开历史录音，\(recordingCount) 条")
-
-            RokuricsHomeDashboardDivider(scale: scale)
-
-            RokuricsHomeDashboardColumn(
+            RokuricsHomeNavigationButton(
                 title: "学习库",
-                value: "\(recordingCount)",
-                tint: RokuricsColors.mint,
-                scale: scale
+                systemImage: "books.vertical",
+                tint: RokuricsColors.aqua,
+                scale: scale,
+                action: onOpenRecordingLibrary
             )
-            .onTapGesture(perform: onOpenRecordingLibrary)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("打开学习库，\(recordingCount) 条")
+            .accessibilityLabel("打开学习库")
 
             RokuricsHomeDashboardDivider(scale: scale)
 
-            RokuricsHomeDashboardColumn(
-                title: "Mac",
-                value: isMacPaired ? "" : "-",
-                systemImage: isMacPaired ? "checkmark" : nil,
-                tint: RokuricsColors.softTeal,
-                scale: scale
+            RokuricsHomeNavigationButton(
+                title: "AI 对话",
+                systemImage: "bubble.left.and.bubble.right",
+                tint: RokuricsColors.mint,
+                scale: scale,
+                action: onOpenAIChat
             )
-            .onTapGesture(perform: onOpenMacConnection)
-            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("打开 AI 对话")
+
+            RokuricsHomeDashboardDivider(scale: scale)
+
+            RokuricsHomeNavigationButton(
+                title: "Mac 连接",
+                systemImage: isMacPaired ? "iphone.gen3.radiowaves.left.and.right" : "iphone.slash",
+                tint: RokuricsColors.softTeal,
+                scale: scale,
+                action: onOpenMacConnection
+            )
             .accessibilityLabel(isMacPaired ? "打开 Mac 连接，已配对" : "打开 Mac 连接，未配对")
         }
         .frame(maxWidth: .infinity, minHeight: 104 * scale)
@@ -548,38 +570,32 @@ private struct RokuricsHomeDashboardCard: View {
     }
 }
 
-private struct RokuricsHomeDashboardColumn: View {
+private struct RokuricsHomeNavigationButton: View {
     let title: String
-    let value: String
-    var systemImage: String? = nil
+    let systemImage: String
     let tint: Color
     let scale: CGFloat
+    let action: () -> Void
 
     var body: some View {
-        VStack(spacing: 9 * scale) {
-            Text(title)
-                .font(RokuricsTypography.caption(size: 13 * scale, weight: .semibold))
-                .foregroundStyle(RokuricsColors.softText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-
-            if let systemImage {
+        Button(action: action) {
+            VStack(spacing: 9 * scale) {
                 Image(systemName: systemImage)
                     .font(.system(size: 27 * scale, weight: .semibold))
                     .foregroundStyle(tint)
                     .frame(height: 34 * scale)
                     .accessibilityHidden(true)
-            } else {
-                Text(value)
-                    .font(RokuricsTypography.largeNumber(size: 28 * scale, weight: .bold))
-                    .monospacedDigit()
-                    .foregroundStyle(tint)
+
+                Text(title)
+                    .font(RokuricsTypography.caption(size: 13 * scale, weight: .semibold))
+                    .foregroundStyle(RokuricsColors.deepText)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.70)
+                    .minimumScaleFactor(0.75)
             }
+            .frame(maxWidth: .infinity, minHeight: 104 * scale)
+            .contentShape(Rectangle())
         }
-        .frame(maxWidth: .infinity, minHeight: 104 * scale)
-        .contentShape(Rectangle())
+        .buttonStyle(RokuricsScaleButtonStyle())
     }
 }
 
@@ -637,7 +653,8 @@ enum RokuricsRecordingFormat {
     NavigationStack {
         RokuricsHomeView(
             recordingManager: RecordingManager(),
-            macConnectionStore: SecureMacConnectionStore()
+            macConnectionStore: SecureMacConnectionStore(),
+            userProfileStore: UserProfileStore()
         )
     }
 }

@@ -101,7 +101,7 @@ final class PairingManager: ObservableObject {
         pairedDeviceStore.upsert(device)
         self.activeChallenge = nil
         state = .paired(deviceName: deviceName)
-        print("[RokuricsPairing] pairing success: deviceIDPrefix=\(device.idPrefix), tokenPrefix=\(device.tokenPrefix)")
+        print("[RokuricsPairing] pairing success: deviceIDPrefix=\(device.idPrefix)")
         return PairingResult(device: device, sharedSecretBase64URL: sharedSecret)
     }
 

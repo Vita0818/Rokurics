@@ -240,6 +240,10 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
     var noteStatus: String?
     var noteSections: [RecordingNoteSectionRecord]?
     var sourceDescription: String?
+    var isTrashed: Bool
+    var trashedAt: Date?
+    var modifiedByDeviceID: String?
+    var syncConflictStatus: String?
 
     init(
         itemID: StudyItemID? = nil,
@@ -262,7 +266,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         transcriptionStatus: String? = nil,
         noteStatus: String? = nil,
         noteSections: [RecordingNoteSectionRecord]? = nil,
-        sourceDescription: String? = nil
+        sourceDescription: String? = nil,
+        isTrashed: Bool = false,
+        trashedAt: Date? = nil,
+        modifiedByDeviceID: String? = nil,
+        syncConflictStatus: String? = nil
     ) {
         let normalizedRecordingID = Self.normalized(recordingID)
         let resolvedKind = normalizedRecordingID == nil && kind == .recordingBundle ? .standaloneNote : kind
@@ -292,6 +300,10 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         self.noteStatus = Self.normalized(noteStatus)
         self.noteSections = noteSections
         self.sourceDescription = Self.normalized(sourceDescription)
+        self.isTrashed = isTrashed
+        self.trashedAt = trashedAt
+        self.modifiedByDeviceID = Self.normalized(modifiedByDeviceID)
+        self.syncConflictStatus = Self.normalized(syncConflictStatus)
     }
 
     init(
@@ -312,7 +324,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         updatedAt: Date = Date(),
         transcriptionStatus: String? = nil,
         noteStatus: String? = nil,
-        noteSections: [RecordingNoteSectionRecord]? = nil
+        noteSections: [RecordingNoteSectionRecord]? = nil,
+        isTrashed: Bool = false,
+        trashedAt: Date? = nil,
+        modifiedByDeviceID: String? = nil,
+        syncConflictStatus: String? = nil
     ) {
         let filing = studyFiling?.isEmpty == true ? StudyFilingPath() : (studyFiling ?? StudyFilingPath())
         self.init(
@@ -335,7 +351,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             noteRelativePath: noteRelativePath,
             transcriptionStatus: transcriptionStatus,
             noteStatus: noteStatus,
-            noteSections: noteSections
+            noteSections: noteSections,
+            isTrashed: isTrashed,
+            trashedAt: trashedAt,
+            modifiedByDeviceID: modifiedByDeviceID,
+            syncConflictStatus: syncConflictStatus
         )
     }
 
@@ -378,10 +398,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
     func mergedWithCurrentInboxItem(_ item: MacRecordingInboxItem) -> StudyItemMetadata {
         let resolvedFiling = filing.isEmpty ? (item.studyFiling ?? StudyFilingPath()) : filing
         let resolvedFolderIDs = folderIDs.isEmpty ? Self.defaultFolderIDs(for: resolvedFiling) : folderIDs
+        let resolvedTitle = updatedAt > item.receivedAt ? title : item.title
         return StudyItemMetadata(
             itemID: itemID,
             kind: .recordingBundle,
-            title: item.title,
+            title: resolvedTitle,
             createdAt: item.receivedAt,
             updatedAt: updatedAt,
             filing: resolvedFiling,
@@ -399,7 +420,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             transcriptionStatus: item.transcriptionStatus,
             noteStatus: item.noteStatus,
             noteSections: noteSections,
-            sourceDescription: sourceDescription
+            sourceDescription: sourceDescription,
+            isTrashed: isTrashed,
+            trashedAt: trashedAt,
+            modifiedByDeviceID: modifiedByDeviceID,
+            syncConflictStatus: syncConflictStatus
         )
     }
 
@@ -414,7 +439,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             transcriptionStatus: transcriptionStatus ?? (hasTranscript ? "transcribed" : "notStarted"),
             noteStatus: noteStatus ?? (hasNote ? "generated" : "notGenerated"),
             receiveStatus: "received",
-            hasAudio: kind == .recordingBundle && audioRelativePath != nil,
+            hasAudio: kind == .recordingBundle && audioRelativePath != nil && customProperties["syncedMetadataOnly"] != "true",
             audioRelativePath: audioRelativePath,
             receiveRelativePath: receiveRelativePath,
             transcriptRelativePath: transcriptRelativePath,
@@ -470,6 +495,10 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         case noteStatus
         case noteSections
         case sourceDescription
+        case isTrashed
+        case trashedAt
+        case modifiedByDeviceID
+        case syncConflictStatus
     }
 
     init(from decoder: Decoder) throws {
@@ -509,7 +538,11 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             transcriptionStatus: try container.decodeIfPresent(String.self, forKey: .transcriptionStatus),
             noteStatus: try container.decodeIfPresent(String.self, forKey: .noteStatus),
             noteSections: try container.decodeIfPresent([RecordingNoteSectionRecord].self, forKey: .noteSections),
-            sourceDescription: try container.decodeIfPresent(String.self, forKey: .sourceDescription)
+            sourceDescription: try container.decodeIfPresent(String.self, forKey: .sourceDescription),
+            isTrashed: try container.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false,
+            trashedAt: try container.decodeIfPresent(Date.self, forKey: .trashedAt),
+            modifiedByDeviceID: try container.decodeIfPresent(String.self, forKey: .modifiedByDeviceID),
+            syncConflictStatus: try container.decodeIfPresent(String.self, forKey: .syncConflictStatus)
         )
     }
 
@@ -536,6 +569,10 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         try container.encodeIfPresent(noteStatus, forKey: .noteStatus)
         try container.encodeIfPresent(noteSections, forKey: .noteSections)
         try container.encodeIfPresent(sourceDescription, forKey: .sourceDescription)
+        try container.encode(isTrashed, forKey: .isTrashed)
+        try container.encodeIfPresent(trashedAt, forKey: .trashedAt)
+        try container.encodeIfPresent(modifiedByDeviceID, forKey: .modifiedByDeviceID)
+        try container.encodeIfPresent(syncConflictStatus, forKey: .syncConflictStatus)
     }
 
     static func recordingBundleItemID(for recordingID: String) -> StudyItemID {
@@ -693,6 +730,8 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
     var isTrashed: Bool
     var trashedAt: Date?
     var customProperties: [String: String]
+    var modifiedByDeviceID: String?
+    var syncConflictStatus: String?
 
     private enum CodingKeys: String, CodingKey {
         case folderID
@@ -708,6 +747,8 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
         case isTrashed
         case trashedAt
         case customProperties
+        case modifiedByDeviceID
+        case syncConflictStatus
     }
 
     init(
@@ -723,7 +764,9 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
         colorToken: StudyFolderColorToken? = nil,
         isTrashed: Bool = false,
         trashedAt: Date? = nil,
-        customProperties: [String: String] = [:]
+        customProperties: [String: String] = [:],
+        modifiedByDeviceID: String? = nil,
+        syncConflictStatus: String? = nil
     ) {
         self.name = StudyItemMetadata.normalized(name) ?? StudyHierarchyRule.missingValue
         self.level = level
@@ -738,6 +781,8 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
         self.isTrashed = isTrashed
         self.trashedAt = trashedAt
         self.customProperties = customProperties
+        self.modifiedByDeviceID = StudyItemMetadata.normalized(modifiedByDeviceID)
+        self.syncConflictStatus = StudyItemMetadata.normalized(syncConflictStatus)
     }
 
     init(from decoder: Decoder) throws {
@@ -760,6 +805,8 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
         self.isTrashed = try container.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false
         self.trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
         self.customProperties = try container.decodeIfPresent([String: String].self, forKey: .customProperties) ?? [:]
+        self.modifiedByDeviceID = StudyItemMetadata.normalized(try container.decodeIfPresent(String.self, forKey: .modifiedByDeviceID))
+        self.syncConflictStatus = StudyItemMetadata.normalized(try container.decodeIfPresent(String.self, forKey: .syncConflictStatus))
     }
 
     var pathComponents: [String] {

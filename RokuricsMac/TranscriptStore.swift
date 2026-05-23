@@ -40,11 +40,7 @@ final class TranscriptStore {
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        rootURL = applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
-            .standardizedFileURL
+        rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         transcriptsURL = rootURL
             .appendingPathComponent("transcripts", isDirectory: true)
             .standardizedFileURL

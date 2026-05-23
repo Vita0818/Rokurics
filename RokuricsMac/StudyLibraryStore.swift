@@ -86,6 +86,7 @@ final class StudyLibraryStore: ObservableObject {
     private let legacyItemMetadataURL: URL
     private let legacyIndexURL: URL
     private let recordingFileStore: MacRecordingFileStore
+    private let noteStore: NoteStore
     private var inboxChangeCancellable: AnyCancellable?
 
     init(
@@ -98,11 +99,7 @@ final class StudyLibraryStore: ObservableObject {
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
         } else {
-            let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? fileManager.temporaryDirectory
-            self.rootURL = applicationSupportURL
-                .appendingPathComponent("Rokurics", isDirectory: true)
-                .standardizedFileURL
+            self.rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         }
         self.studyURL = self.rootURL
             .appendingPathComponent("study", isDirectory: true)
@@ -126,6 +123,7 @@ final class StudyLibraryStore: ObservableObject {
             .appendingPathComponent("study-index.json", isDirectory: false)
             .standardizedFileURL
         self.recordingFileStore = recordingFileStore ?? MacRecordingFileStore(fileManager: fileManager, rootURL: self.rootURL)
+        self.noteStore = NoteStore(fileManager: fileManager, rootURL: self.rootURL)
 
         try? ensureStudyDirectories()
         hierarchyRules = loadHierarchyRules()
@@ -199,6 +197,100 @@ final class StudyLibraryStore: ObservableObject {
 
     func item(itemID: StudyItemID) -> StudyItemMetadata? {
         allStudyItems.first { $0.itemID == itemID }
+    }
+
+    func makeSyncManifest(deviceID: String, generatedAt: Date = Date()) -> StudyLibrarySyncManifest {
+        refresh()
+
+        var itemsByID = Dictionary(
+            (loadAllStoredItemMetadata() + allStudyItems).map { ($0.itemID, $0) },
+            uniquingKeysWith: { _, live in live }
+        )
+        let storedItemsByRecordingID = Dictionary(
+            loadAllStoredItemMetadata().compactMap { item -> (String, StudyItemMetadata)? in
+                guard let recordingID = item.recordingID else {
+                    return nil
+                }
+                return (recordingID, item)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for inboxItem in recordingFileStore.loadInboxItems() {
+            let fallback = StudyItemMetadata.defaultMetadata(for: inboxItem)
+            let metadata = storedItemsByRecordingID[inboxItem.id]?.mergedWithCurrentInboxItem(inboxItem) ?? fallback
+            itemsByID[metadata.itemID] = metadata
+        }
+
+        let foldersByID = Dictionary(
+            (loadAllFolderMetadata() + allStudyFolders).map { ($0.folderID, $0) },
+            uniquingKeysWith: { _, live in live }
+        )
+        let items = itemsByID.values.map { item -> StudyItemMetadata in
+            var sanitized = item.syncSanitized(modifiedByDeviceID: deviceID)
+            attachNoteSummaryPreview(to: &sanitized)
+            return sanitized
+        }
+        let folders = foldersByID.values.map { $0.syncSanitized(modifiedByDeviceID: deviceID) }
+        let tombstones = makeSyncTombstones(items: items, folders: folders, deviceID: deviceID)
+
+        return StudyLibrarySyncManifest.make(
+            deviceID: deviceID,
+            generatedAt: generatedAt,
+            items: items,
+            folders: folders,
+            tombstones: tombstones
+        )
+    }
+
+    @discardableResult
+    func applySyncManifest(_ manifest: StudyLibrarySyncManifest, localDeviceID: String) throws -> StudyLibrarySyncApplyResult {
+        guard manifest.hasValidChecksum else {
+            throw StudyLibraryStoreError.writeFailed("sync_manifest_checksum_mismatch")
+        }
+
+        var result = StudyLibrarySyncApplyResult()
+
+        for incomingFolder in manifest.folders {
+            do {
+                var remote = incomingFolder.syncSanitized(modifiedByDeviceID: manifest.deviceID)
+                let existing = loadStoredFolder(folderID: remote.folderID) ?? allStudyFolders.first { $0.folderID == remote.folderID }
+                guard let merged = mergedSyncFolder(existing: existing, incoming: &remote, result: &result) else {
+                    continue
+                }
+                try save(merged)
+                result.appliedFolderCount += 1
+            } catch {
+                result.failedChanges += 1
+            }
+        }
+
+        for incomingItem in manifest.items {
+            do {
+                var remote = incomingItem.syncSanitized(modifiedByDeviceID: manifest.deviceID)
+                markSyncMetadataOnlyIfNeeded(&remote)
+                let existing = editableMetadataIfAvailable(itemID: remote.itemID)
+                guard let merged = mergedSyncItem(existing: existing, incoming: &remote, result: &result) else {
+                    continue
+                }
+                try save(merged)
+                result.appliedItemCount += 1
+            } catch {
+                result.failedChanges += 1
+            }
+        }
+
+        for tombstone in manifest.tombstones {
+            do {
+                if try applySyncTombstone(tombstone, remoteDeviceID: manifest.deviceID) {
+                    result.tombstoneCount += 1
+                }
+            } catch {
+                result.failedChanges += 1
+            }
+        }
+
+        refresh()
+        return result
     }
 
     func folder(folderID: StudyFolderID) -> StudyFolderMetadata? {
@@ -629,8 +721,149 @@ final class StudyLibraryStore: ObservableObject {
         if item.kind == .standaloneNote || item.recordingID == nil {
             return true
         }
+        if item.customProperties["syncedMetadataOnly"] == "true" {
+            return true
+        }
 
         return item.recordingID.map { liveRecordingIDs.contains($0) } ?? false
+    }
+
+    private func makeSyncTombstones(
+        items: [StudyItemMetadata],
+        folders: [StudyFolderMetadata],
+        deviceID: String
+    ) -> [StudyLibrarySyncTombstone] {
+        let itemTombstones = items.filter(\.isTrashed).map { item in
+            StudyLibrarySyncTombstone(
+                id: "item:\(item.itemID)",
+                entityKind: .item,
+                entityID: item.itemID,
+                operation: .trash,
+                updatedAt: item.trashedAt ?? item.updatedAt,
+                modifiedByDeviceID: item.modifiedByDeviceID ?? deviceID
+            )
+        }
+        let folderTombstones = folders.filter(\.isTrashed).map { folder in
+            StudyLibrarySyncTombstone(
+                id: "folder:\(folder.folderID)",
+                entityKind: .folder,
+                entityID: folder.folderID,
+                operation: .trash,
+                updatedAt: folder.trashedAt ?? folder.updatedAt,
+                modifiedByDeviceID: folder.modifiedByDeviceID ?? deviceID
+            )
+        }
+
+        return itemTombstones + folderTombstones
+    }
+
+    private func mergedSyncItem(
+        existing: StudyItemMetadata?,
+        incoming: inout StudyItemMetadata,
+        result: inout StudyLibrarySyncApplyResult
+    ) -> StudyItemMetadata? {
+        guard var existing else {
+            return incoming
+        }
+
+        if incoming.updatedAt > existing.updatedAt {
+            return incoming
+        }
+
+        if incoming.updatedAt == existing.updatedAt, incoming != existing {
+            existing.syncConflictStatus = "conflict_preserved_local"
+            result.conflictCount += 1
+            return existing
+        }
+
+        result.skippedOlderCount += 1
+        return nil
+    }
+
+    private func mergedSyncFolder(
+        existing: StudyFolderMetadata?,
+        incoming: inout StudyFolderMetadata,
+        result: inout StudyLibrarySyncApplyResult
+    ) -> StudyFolderMetadata? {
+        guard var existing else {
+            return incoming
+        }
+
+        if incoming.updatedAt > existing.updatedAt {
+            incoming.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
+            incoming.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
+            return incoming
+        }
+
+        if incoming.updatedAt == existing.updatedAt, incoming != existing {
+            existing.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
+            existing.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
+            existing.syncConflictStatus = "conflict_preserved_local"
+            result.conflictCount += 1
+            return existing
+        }
+
+        result.skippedOlderCount += 1
+        return nil
+    }
+
+    private func applySyncTombstone(_ tombstone: StudyLibrarySyncTombstone, remoteDeviceID: String) throws -> Bool {
+        switch tombstone.entityKind {
+        case .item:
+            guard var item = editableMetadataIfAvailable(itemID: tombstone.entityID),
+                  tombstone.updatedAt >= item.updatedAt else {
+                return false
+            }
+            item.isTrashed = tombstone.operation == .trash || tombstone.operation == .delete || tombstone.operation == .deleteMetadataOnly
+            item.trashedAt = item.isTrashed ? tombstone.updatedAt : nil
+            item.updatedAt = tombstone.updatedAt
+            item.modifiedByDeviceID = tombstone.modifiedByDeviceID ?? remoteDeviceID
+            try save(item)
+            return true
+        case .folder:
+            guard var folder = loadStoredFolder(folderID: tombstone.entityID),
+                  tombstone.updatedAt >= folder.updatedAt else {
+                return false
+            }
+            folder.isTrashed = tombstone.operation == .trash || tombstone.operation == .delete || tombstone.operation == .deleteMetadataOnly
+            folder.trashedAt = folder.isTrashed ? tombstone.updatedAt : nil
+            folder.updatedAt = tombstone.updatedAt
+            folder.modifiedByDeviceID = tombstone.modifiedByDeviceID ?? remoteDeviceID
+            try save(folder)
+            return true
+        }
+    }
+
+    private func markSyncMetadataOnlyIfNeeded(_ item: inout StudyItemMetadata) {
+        guard let recordingID = item.recordingID,
+              !recordingFileStore.loadInboxItems().contains(where: { $0.id == recordingID }) else {
+            return
+        }
+
+        item.customProperties["syncedMetadataOnly"] = "true"
+    }
+
+    private func attachNoteSummaryPreview(to item: inout StudyItemMetadata) {
+        item.customProperties.removeValue(forKey: "noteSummaryPreview")
+        item.customProperties.removeValue(forKey: "noteKeyPointsPreview")
+
+        guard let preview = noteStore.loadSummaryPreview(noteRelativePath: item.noteRelativePath),
+              preview.isVisible else {
+            return
+        }
+
+        let summary = preview.shortSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !summary.isEmpty {
+            item.customProperties["noteSummaryPreview"] = summary
+        }
+
+        let keyPoints = preview.keyPoints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(4)
+        if !keyPoints.isEmpty {
+            item.customProperties["noteKeyPointsPreview"] = keyPoints.joined(separator: "\n")
+        }
     }
 
     private func loadAllStoredItemMetadata() -> [StudyItemMetadata] {

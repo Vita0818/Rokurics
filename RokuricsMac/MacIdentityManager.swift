@@ -61,8 +61,9 @@ final class MacIdentityManager {
     private(set) var tlsIdentity: SecIdentity?
     private(set) var lastError: String?
 
-    private let tlsKeyTag = Data("com.Vita0818.RokuricsMac.tls.private-key".utf8)
-    private let tlsCertificateLabel = "Rokurics Local Mac TLS Certificate"
+    private let tlsKeyTag = MacAppStorageProfile.tlsPrivateKeyTag
+    private let tlsPrivateKeyLabel = MacAppStorageProfile.tlsPrivateKeyLabel
+    private let tlsCertificateLabel = MacAppStorageProfile.tlsCertificateLabel
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -186,7 +187,7 @@ final class MacIdentityManager {
             kSecPrivateKeyAttrs as String: [
                 kSecAttrIsPermanent as String: true,
                 kSecAttrApplicationTag as String: tlsKeyTag,
-                kSecAttrLabel as String: "Rokurics Local Mac TLS Private Key"
+                kSecAttrLabel as String: tlsPrivateKeyLabel
             ]
         ]
 
@@ -273,11 +274,6 @@ final class MacIdentityManager {
     }
 
     private static func securityDirectoryURL(fileManager: FileManager) -> URL {
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-
-        return applicationSupportURL
-            .appendingPathComponent("RokuricsMac", isDirectory: true)
-            .appendingPathComponent("Security", isDirectory: true)
+        MacAppStorageProfile.securityDirectoryURL(fileManager: fileManager)
     }
 }

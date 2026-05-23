@@ -609,10 +609,7 @@ struct WhisperCppTranscriptionProvider: TranscriptionProvider {
     }
 
     private func validateDefaultOutputDirectory() throws {
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        let outputURL = applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
+        let outputURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent("transcripts", isDirectory: true)
             .appendingPathComponent(".configuration-check", isDirectory: true)
             .standardizedFileURL

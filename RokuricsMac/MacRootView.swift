@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct MacRootView: View {
-    @State private var selection: MacSidebarItem? = .dashboard
+    @State private var selection: MacSidebarItem? = .studyLibrary
     @State private var isSettingsSelected = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @StateObject private var secureReceiverService = SecureReceiverService()
@@ -16,7 +16,6 @@ struct MacRootView: View {
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
     @StateObject private var noteGenerationCoordinator = NoteGenerationCoordinator()
-    @StateObject private var studyLibraryStore = StudyLibraryStore()
     @StateObject private var chatCoordinator = ChatCoordinator()
     @StateObject private var transcriptionSettingsStore = TranscriptionSettingsStore.shared
     @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
@@ -41,7 +40,7 @@ struct MacRootView: View {
                     userProfileStore: userProfileStore
                 )
             } else {
-                detailView(for: selection ?? .dashboard)
+                detailView(for: selection ?? .studyLibrary)
             }
         }
         .navigationTitle("")
@@ -70,7 +69,7 @@ struct MacRootView: View {
             )
         case .audioInbox:
             MacStudyLibraryView(
-                studyLibraryStore: studyLibraryStore,
+                studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
                 noteGenerationCoordinator: noteGenerationCoordinator,
@@ -78,7 +77,7 @@ struct MacRootView: View {
             )
         case .studyLibrary:
             MacStudyLibraryView(
-                studyLibraryStore: studyLibraryStore,
+                studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
                 noteGenerationCoordinator: noteGenerationCoordinator,
@@ -87,7 +86,7 @@ struct MacRootView: View {
         case .aiChat:
             MacAIChatView(
                 chatCoordinator: chatCoordinator,
-                studyLibraryStore: studyLibraryStore,
+                studyLibraryStore: secureReceiverService.studyLibraryStore,
                 userProfileStore: userProfileStore,
                 isSidebarCollapsed: isSidebarCollapsed
             )

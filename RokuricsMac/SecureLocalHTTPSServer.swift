@@ -108,6 +108,11 @@ final class SecureLocalHTTPSServer {
     private let requestVerifier: RequestVerifier
     private let receivedFileStore: ReceivedFileStore
     private let recordingFileStore: MacRecordingFileStore
+    private let studyLibraryStore: StudyLibraryStore
+    private let gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?
+    private let deviceConnectionStatusStore: DeviceConnectionStatusStore
+    private let syncStateStore: StudyLibrarySyncStateStore
+    private let syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration
     private let onReady: ReadyHandler
     private let onFailed: FailedHandler
     private let onPairingChanged: PairingChangedHandler
@@ -126,6 +131,11 @@ final class SecureLocalHTTPSServer {
         requestVerifier: RequestVerifier,
         receivedFileStore: ReceivedFileStore,
         recordingFileStore: MacRecordingFileStore,
+        studyLibraryStore: StudyLibraryStore,
+        gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?,
+        deviceConnectionStatusStore: DeviceConnectionStatusStore,
+        syncStateStore: StudyLibrarySyncStateStore,
+        syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration = StudyLibrarySyncRuntimeConfiguration(gitBackedSyncEnabled: false),
         onReady: @escaping ReadyHandler,
         onFailed: @escaping FailedHandler,
         onPairingChanged: @escaping PairingChangedHandler,
@@ -138,6 +148,11 @@ final class SecureLocalHTTPSServer {
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
         self.recordingFileStore = recordingFileStore
+        self.studyLibraryStore = studyLibraryStore
+        self.gitBackedStudyMetadataStore = gitBackedStudyMetadataStore
+        self.deviceConnectionStatusStore = deviceConnectionStatusStore
+        self.syncStateStore = syncStateStore
+        self.syncRuntimeConfiguration = syncRuntimeConfiguration
         self.onReady = onReady
         self.onFailed = onFailed
         self.onPairingChanged = onPairingChanged
@@ -562,12 +577,247 @@ final class SecureLocalHTTPSServer {
             Task { @MainActor [weak self] in
                 self?.handleRecordingAudioUploadRequest(request, on: connection)
             }
+        case ("POST", "/device/status"):
+            Task { @MainActor [weak self] in
+                self?.handleDeviceStatusRequest(request, on: connection)
+            }
+        case ("POST", "/sync/status"):
+            Task { @MainActor [weak self] in
+                self?.handleSyncStatusRequest(request, on: connection)
+            }
+        case ("POST", "/sync/manifest"):
+            Task { @MainActor [weak self] in
+                self?.handleSyncManifestRequest(request, on: connection)
+            }
+        case ("POST", "/sync/apply"):
+            Task { @MainActor [weak self] in
+                self?.handleSyncApplyRequest(request, on: connection)
+            }
         default:
             if request.method != "GET" && request.method != "POST" {
                 sendError(statusCode: 405, reason: "Method Not Allowed", error: "method_not_allowed", on: connection)
             } else {
                 sendError(statusCode: 404, reason: "Not Found", error: "not_found", on: connection)
             }
+        }
+    }
+
+    @MainActor
+    private func handleDeviceStatusRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            guard let statusRequest = try? Self.syncJSONDecoder.decode(DeviceStatusRequest.self, from: request.body) else {
+                sendError(statusCode: 400, reason: "Bad Request", error: "bad_status_payload", on: connection)
+                return
+            }
+
+            let status = markDeviceOnline(
+                device: device,
+                displayName: statusRequest.displayName,
+                syncStatus: statusRequest.syncSummary?.statusText
+            )
+            sendJSON(
+                statusCode: 200,
+                reason: "OK",
+                body: DeviceStatusResponse(ok: true, status: status, syncState: syncStateStore.state, error: nil),
+                on: connection
+            )
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    func syncStatusResponseForVerifiedDevice(_ device: PairedDevice) -> DeviceStatusResponse {
+        let statusText = activeGitBackedStudyMetadataStore == nil
+            ? StudyLibrarySyncRuntimeConfiguration.disabledStatusText
+            : (syncStateStore.state.lastError == nil ? "待同步" : "同步失败")
+        let status = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: statusText)
+        return DeviceStatusResponse(
+            ok: true,
+            status: status,
+            syncState: syncStateStore.state,
+            error: activeGitBackedStudyMetadataStore == nil
+                ? StudyLibrarySyncRuntimeConfiguration.disabledReason
+                : nil
+        )
+    }
+
+    @MainActor
+    func syncManifestResponseForVerifiedDevice(_ device: PairedDevice) throws -> StudyLibrarySyncManifestResponse {
+        guard let gitBackedStudyMetadataStore = activeGitBackedStudyMetadataStore else {
+            return disabledSyncManifestResponse(for: device)
+        }
+
+        var manifest = studyLibraryStore.makeSyncManifest(deviceID: localSyncDeviceID)
+        let commitResult = try gitBackedStudyMetadataStore.commitManifest(
+            manifest,
+            deviceDisplayName: "Rokurics Mac",
+            message: "sync study library snapshot"
+        )
+        manifest.commitID = commitResult.commitID
+        syncStateStore.recordPush(
+            deviceID: device.id,
+            remoteManifestHash: nil,
+            remoteCommitID: manifest.commitID,
+            pendingUploads: manifest.pendingUploads.count
+        )
+        let status = deviceConnectionStatusStore.recordSyncResult(
+            deviceID: device.id,
+            displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+            statusText: "已发送 \(manifest.summaryText)"
+        )
+        return StudyLibrarySyncManifestResponse(
+            ok: true,
+            manifest: manifest,
+            syncState: syncStateStore.state,
+            deviceStatus: status,
+            applyResult: nil,
+            baseCommitID: nil,
+            newCommitID: manifest.commitID,
+            remoteChanges: manifest.changesApproximation,
+            rejectedChanges: nil,
+            error: nil
+        )
+    }
+
+    @MainActor
+    func syncApplyResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        requestBody: Data
+    ) throws -> StudyLibrarySyncManifestResponse {
+        guard let gitBackedStudyMetadataStore = activeGitBackedStudyMetadataStore else {
+            return disabledSyncManifestResponse(for: device)
+        }
+
+        let syncRequest = try Self.syncJSONDecoder.decode(StudyLibrarySyncManifestRequest.self, from: requestBody)
+        let applyResult = try studyLibraryStore.applySyncManifest(syncRequest.manifest, localDeviceID: localSyncDeviceID)
+        var manifest = studyLibraryStore.makeSyncManifest(deviceID: localSyncDeviceID)
+        let commitResult = try gitBackedStudyMetadataStore.commitManifest(
+            manifest,
+            deviceDisplayName: device.deviceName.isEmpty ? device.id : device.deviceName,
+            message: "sync study library from \(device.deviceName.isEmpty ? device.id : device.deviceName)"
+        )
+        manifest.baseCommitID = syncRequest.manifest.baseCommitID
+        manifest.commitID = commitResult.commitID
+        let pendingUploadCount = syncRequest.manifest.pendingUploads.filter { $0.status != .uploaded }.count
+        if applyResult.failedChanges == 0 {
+            syncStateStore.recordPull(
+                deviceID: device.id,
+                remoteManifestHash: syncRequest.manifest.checksum,
+                remoteCommitID: syncRequest.manifest.baseCommitID
+            )
+            syncStateStore.recordPush(
+                deviceID: device.id,
+                remoteManifestHash: syncRequest.manifest.checksum,
+                remoteCommitID: commitResult.commitID,
+                pendingUploads: pendingUploadCount
+            )
+        } else {
+            syncStateStore.recordFailure(
+                deviceID: device.id,
+                error: "sync_apply_partial_failure",
+                failedChanges: applyResult.failedChanges,
+                pendingUploads: pendingUploadCount
+            )
+        }
+        let statusText = pendingUploadCount > 0
+            ? "\(applyResult.summaryText) · 待上传 \(pendingUploadCount)"
+            : applyResult.summaryText
+        let status = deviceConnectionStatusStore.recordSyncResult(
+            deviceID: device.id,
+            displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+            statusText: statusText,
+            error: applyResult.failedChanges == 0 ? nil : "sync_apply_partial_failure"
+        )
+
+        return StudyLibrarySyncManifestResponse(
+            ok: true,
+            manifest: manifest,
+            syncState: syncStateStore.state,
+            deviceStatus: status,
+            applyResult: applyResult,
+            baseCommitID: syncRequest.manifest.baseCommitID,
+            newCommitID: commitResult.commitID,
+            remoteChanges: manifest.changesApproximation,
+            rejectedChanges: applyResult.failedChanges == 0 ? nil : syncRequest.manifest.changesApproximation,
+            error: nil
+        )
+    }
+
+    @MainActor
+    private func disabledSyncManifestResponse(for device: PairedDevice) -> StudyLibrarySyncManifestResponse {
+        let status = deviceConnectionStatusStore.recordSyncResult(
+            deviceID: device.id,
+            displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+            statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
+            error: StudyLibrarySyncRuntimeConfiguration.disabledReason
+        )
+        return StudyLibrarySyncManifestResponse(
+            ok: false,
+            manifest: nil,
+            syncState: syncStateStore.state,
+            deviceStatus: status,
+            applyResult: nil,
+            baseCommitID: nil,
+            newCommitID: nil,
+            remoteChanges: nil,
+            rejectedChanges: nil,
+            error: StudyLibrarySyncRuntimeConfiguration.disabledReason
+        )
+    }
+
+    private var activeGitBackedStudyMetadataStore: GitBackedStudyMetadataStore? {
+        guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
+            return nil
+        }
+        return gitBackedStudyMetadataStore
+    }
+
+    @MainActor
+    private func handleSyncStatusRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            sendJSON(
+                statusCode: 200,
+                reason: "OK",
+                body: syncStatusResponseForVerifiedDevice(device),
+                on: connection
+            )
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleSyncManifestRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let response = try syncManifestResponseForVerifiedDevice(device)
+                sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
+            } catch {
+                syncStateStore.recordFailure(deviceID: device.id, error: error.localizedDescription)
+                sendError(statusCode: 500, reason: "Internal Server Error", error: "git_metadata_commit_failed", on: connection)
+            }
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleSyncApplyRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let response = try syncApplyResponseForVerifiedDevice(device, requestBody: request.body)
+                sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
+            } catch {
+                syncStateStore.recordFailure(deviceID: device.id, error: error.localizedDescription)
+                sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
+            }
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
         }
     }
 
@@ -598,7 +848,7 @@ final class SecureLocalHTTPSServer {
             }
 
             onPairingChanged()
-            print("[RokuricsPairing] pairing success response prepared: deviceIDPrefix=\(result.device.idPrefix), tokenPrefix=\(result.device.tokenPrefix)")
+            print("[RokuricsPairing] pairing success response prepared: deviceIDPrefix=\(result.device.idPrefix)")
             sendJSON(
                 statusCode: 200,
                 reason: "OK",
@@ -736,6 +986,7 @@ final class SecureLocalHTTPSServer {
     private func sendJSON<Response: Encodable>(statusCode: Int, reason: String, body: Response, on connection: NWConnection) {
         do {
             let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.sortedKeys]
             let bodyData = try encoder.encode(body)
             sendJSONData(statusCode: statusCode, reason: reason, bodyData: bodyData, on: connection)
@@ -774,12 +1025,43 @@ final class SecureLocalHTTPSServer {
         switch path {
         case "/upload-recording-audio":
             return MacRecordingFileStore.audioMaxBytes
+        case "/sync/apply":
+            return 4 * 1024 * 1024
         default:
             return 1 * 1024 * 1024
         }
     }
 
+    @MainActor
+    private func markDeviceOnline(
+        device: PairedDevice,
+        displayName: String,
+        syncStatus: String?
+    ) -> DeviceConnectionStatus {
+        let normalizedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return deviceConnectionStatusStore.markConnected(
+            deviceID: device.id,
+            displayName: normalizedDisplayName.isEmpty ? device.deviceName : normalizedDisplayName,
+            lastSyncAt: syncStateStore.state.lastSuccessfulSyncAt,
+            lastSyncStatus: syncStatus ?? syncStateStore.state.lastError ?? syncStateStore.state.lastSuccessfulSyncAt.map { _ in "已同步" }
+        )
+    }
+
+    private var localSyncDeviceID: String {
+        let fingerprint = identityManager.status.displayFingerprint
+        guard fingerprint != "未生成", !fingerprint.isEmpty else {
+            return "mac-local"
+        }
+        return "mac-\(String(fingerprint.prefix(16)))"
+    }
+
     private static let recordingMetadataDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    private static let syncJSONDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder

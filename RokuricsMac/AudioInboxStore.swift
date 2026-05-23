@@ -17,7 +17,7 @@ final class AudioInboxStore: ObservableObject {
     @Published private(set) var recordingItems: [MacRecordingInboxItem] = []
     @Published private(set) var trashItems: [MacRecordingInboxItem] = []
 
-    static let localRootDisplayPath = "~/Library/Application Support/Rokurics"
+    static let localRootDisplayPath = MacAppStorageProfile.localRootDisplayPath
 
     private let recordingFileStore: MacRecordingFileStore
     private var cancellable: AnyCancellable?

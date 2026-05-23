@@ -31,6 +31,11 @@ final class SecureReceiverService: ObservableObject {
     let requestVerifier: RequestVerifier
     let receivedFileStore: ReceivedFileStore
     let recordingFileStore: MacRecordingFileStore
+    let studyLibraryStore: StudyLibraryStore
+    let gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?
+    let deviceConnectionStatusStore: DeviceConnectionStatusStore
+    let syncStateStore: StudyLibrarySyncStateStore
+    let syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration
 
     private var httpsServer: SecureLocalHTTPSServer?
     private let expiryFormatter: DateFormatter = {
@@ -40,13 +45,22 @@ final class SecureReceiverService: ObservableObject {
         return formatter
     }()
 
-    init() {
+    init(
+        syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration = StudyLibrarySyncRuntimeConfiguration(gitBackedSyncEnabled: false),
+        gitBackedStudyMetadataStore: GitBackedStudyMetadataStore? = nil
+    ) {
         let identityManager = MacIdentityManager()
         let pairedDeviceStore = PairedDeviceStore()
         let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
         let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
         let receivedFileStore = ReceivedFileStore()
         let recordingFileStore = MacRecordingFileStore()
+        let studyLibraryStore = StudyLibraryStore(recordingFileStore: recordingFileStore)
+        let resolvedGitBackedStudyMetadataStore = syncRuntimeConfiguration.gitBackedSyncEnabled
+            ? (gitBackedStudyMetadataStore ?? GitBackedStudyMetadataStore())
+            : gitBackedStudyMetadataStore
+        let deviceConnectionStatusStore = DeviceConnectionStatusStore()
+        let syncStateStore = StudyLibrarySyncStateStore()
 
         self.identityManager = identityManager
         self.pairedDeviceStore = pairedDeviceStore
@@ -54,6 +68,11 @@ final class SecureReceiverService: ObservableObject {
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
         self.recordingFileStore = recordingFileStore
+        self.studyLibraryStore = studyLibraryStore
+        self.gitBackedStudyMetadataStore = resolvedGitBackedStudyMetadataStore
+        self.deviceConnectionStatusStore = deviceConnectionStatusStore
+        self.syncStateStore = syncStateStore
+        self.syncRuntimeConfiguration = syncRuntimeConfiguration
 
         identityManager.loadOrCreateIdentity()
         acceptedUploadCount = receivedFileStore.savedFileCount()
@@ -109,6 +128,11 @@ final class SecureReceiverService: ObservableObject {
             requestVerifier: requestVerifier,
             receivedFileStore: receivedFileStore,
             recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: gitBackedStudyMetadataStore,
+            deviceConnectionStatusStore: deviceConnectionStatusStore,
+            syncStateStore: syncStateStore,
+            syncRuntimeConfiguration: syncRuntimeConfiguration,
             onReady: { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.isHTTPSRunning = true
@@ -180,8 +204,54 @@ final class SecureReceiverService: ObservableObject {
     func disconnectPairedDevices() {
         pairingManager.invalidatePairing(reason: "mac_ui_disconnect")
         pairedDeviceStore.clearAll()
+        deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
         refreshPairingState()
         lastError = pairedDeviceStore.lastError
+    }
+
+    func connectionStatus(for device: PairedDevice?) -> DeviceConnectionStatus {
+        guard let device else {
+            return .unpaired(displayName: "iPhone")
+        }
+
+        return deviceConnectionStatusStore.status(for: device.id)
+            ?? DeviceConnectionStatus(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+                state: .offline,
+                lastSeenAt: device.lastSeenAt,
+                lastHeartbeatAt: device.lastSeenAt,
+                lastSyncAt: syncStateStore.state.lastSuccessfulSyncAt,
+                lastSyncStatus: syncRuntimeConfiguration.gitBackedSyncEnabled
+                    ? syncStateStore.state.lastError ?? "待同步"
+                    : StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
+                lastError: nil
+            )
+    }
+
+    @discardableResult
+    func prepareManualStudyLibrarySync(for device: PairedDevice?) -> DeviceConnectionStatus {
+        guard let device else {
+            return deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
+        }
+
+        guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
+            return deviceConnectionStatusStore.recordSyncResult(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+                statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
+                error: StudyLibrarySyncRuntimeConfiguration.disabledReason
+            )
+        }
+
+        studyLibraryStore.refresh()
+        let manifest = studyLibraryStore.makeSyncManifest(deviceID: "mac-\(String(fingerprint.prefix(16)))")
+        syncStateStore.recordPush(deviceID: device.id, remoteManifestHash: nil, pendingUploads: manifest.pendingUploads.count)
+        return deviceConnectionStatusStore.recordSyncResult(
+            deviceID: device.id,
+            displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+            statusText: "已准备 \(manifest.summaryText)"
+        )
     }
 
     func refreshSecurityState() {

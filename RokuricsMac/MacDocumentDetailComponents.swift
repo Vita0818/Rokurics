@@ -170,11 +170,7 @@ enum FileRevealService {
     }
 
     private static func applicationSupportRootURL() -> URL {
-        let applicationSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
-            .standardizedFileURL
+        MacAppStorageProfile.applicationSupportRootURL()
     }
 }
 
@@ -980,11 +976,7 @@ struct RecordingDocumentMetadataLoader {
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
         } else {
-            let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? fileManager.temporaryDirectory
-            self.rootURL = applicationSupportURL
-                .appendingPathComponent("Rokurics", isDirectory: true)
-                .standardizedFileURL
+            self.rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         }
     }
 

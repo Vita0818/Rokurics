@@ -30,6 +30,7 @@ struct MacReceiverStatusCard: View {
         MacConnectedDeviceCardView(
             deviceName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             connectionInfo: "\(ipSummary) · \(device.idPrefix)",
+            status: secureReceiverService.connectionStatus(for: device),
             isCompact: true,
             showsDisconnectAction: true,
             usesCardChrome: false,

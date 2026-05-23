@@ -15,6 +15,7 @@ struct RokuricsTests {
     @Test func iphoneTypographyTokensExistAndChatStylesStaySeparate() {
         #expect(RokuricsTypographyToken.allCases == [
             .pageTitle,
+            .pageSubtitle,
             .sectionTitle,
             .cardTitle,
             .body,
@@ -35,6 +36,76 @@ struct RokuricsTests {
         #expect(RokuricsIconCircleButtonConfiguration.borderWidth == 1)
         #expect(RokuricsIconCircleButtonConfiguration.usesGlassBackground)
         #expect(RokuricsIconCircleButtonConfiguration.usesSystemSymbols)
+    }
+
+    @Test func lowPowerDisplayMinuteTextUsesCumulativeClockMinutes() {
+        #expect(RecordingLowPowerDisplayPolicy.minuteText(elapsedSeconds: 7) == "00")
+        #expect(RecordingLowPowerDisplayPolicy.minuteText(elapsedSeconds: 3 * 60 + 42) == "03")
+        #expect(RecordingLowPowerDisplayPolicy.minuteText(elapsedSeconds: 37 * 60 + 24) == "37")
+        #expect(RecordingLowPowerDisplayPolicy.minuteText(elapsedSeconds: 81 * 60 + 40) == "81")
+    }
+
+    @Test func lowPowerDisplayOnlyEntersForActiveForegroundRecording() {
+        #expect(RecordingLowPowerDisplayPolicy.canEnter(
+            state: .recording,
+            isAppActive: true,
+            isFilingOverlayPresented: false,
+            hasBlockingPresentation: false
+        ))
+        #expect(!RecordingLowPowerDisplayPolicy.canEnter(
+            state: .paused,
+            isAppActive: true,
+            isFilingOverlayPresented: false,
+            hasBlockingPresentation: false
+        ))
+        #expect(!RecordingLowPowerDisplayPolicy.canEnter(
+            state: .recording,
+            isAppActive: false,
+            isFilingOverlayPresented: false,
+            hasBlockingPresentation: false
+        ))
+        #expect(!RecordingLowPowerDisplayPolicy.canEnter(
+            state: .recording,
+            isAppActive: true,
+            isFilingOverlayPresented: true,
+            hasBlockingPresentation: false
+        ))
+        #expect(!RecordingLowPowerDisplayPolicy.canEnter(
+            state: .recording,
+            isAppActive: true,
+            isFilingOverlayPresented: false,
+            hasBlockingPresentation: true
+        ))
+    }
+
+    @Test func lowPowerElapsedRefreshDoesNotChangeRecordingManagerState() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let manager = RecordingManager(fileStore: store)
+
+        manager.setLowPowerElapsedRefreshEnabled(true)
+
+        #expect(manager.state == .idle)
+    }
+
+    @Test func recordingLiveActivityStateKeepsMinimalStatusText() {
+        let recordingState = RecordingLiveActivityAttributes.ContentState(
+            title: "课堂录音",
+            elapsedMinutes: 81,
+            isPaused: false,
+            isSavingLocally: false
+        )
+        let savingState = RecordingLiveActivityAttributes.ContentState(
+            title: "课堂录音",
+            elapsedMinutes: 3,
+            isPaused: false,
+            isSavingLocally: true
+        )
+
+        #expect(recordingState.elapsedMinuteText == "81")
+        #expect(recordingState.statusText == "录音中")
+        #expect(savingState.elapsedMinuteText == "03")
+        #expect(savingState.statusText == "本地保存中")
     }
 
     @Test func iphoneTechnicalInlineFragmentsDoNotPromoteWholeStringsToMonospace() {
@@ -334,6 +405,138 @@ struct RokuricsTests {
         #expect(finalContent.recordings.map(\.id) == ["iphone-browser-update"])
     }
 
+    @Test func studyFilingSelectionClearsDescendantLevels() {
+        var draft = StudyFilingSelectionDraft(
+            path: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "乘法")
+        )
+
+        draft.select(.subject, value: "高等数学")
+
+        #expect(draft.type == "课堂")
+        #expect(draft.subject == "高等数学")
+        #expect(draft.chapter.isEmpty)
+        #expect(draft.topic.isEmpty)
+
+        draft.select(.type, value: "复习")
+
+        #expect(draft.type == "复习")
+        #expect(draft.subject.isEmpty)
+        #expect(draft.chapter.isEmpty)
+        #expect(draft.topic.isEmpty)
+    }
+
+    @Test func studyFilingCandidatesFilterByParentPath() {
+        let first = StudyItemMetadata(
+            recordingID: "candidate-filter-01",
+            title: "A",
+            createdAt: Date(timeIntervalSince1970: 10),
+            duration: 12,
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵")
+        )
+        let second = StudyItemMetadata(
+            recordingID: "candidate-filter-02",
+            title: "B",
+            createdAt: Date(timeIntervalSince1970: 20),
+            duration: 12,
+            studyFiling: StudyFilingPath(type: "复习", subject: "高等数学", chapter: "积分")
+        )
+        let folder = StudyFolderMetadata(
+            name: "离散数学",
+            level: .subject,
+            path: StudyFilingPath(type: "课堂", subject: "离散数学")
+        )
+
+        let subjects = StudyFilingCandidateResolver.candidates(
+            for: .subject,
+            current: StudyFilingPath(type: "课堂"),
+            items: [first, second],
+            folders: [folder]
+        )
+
+        #expect(Set(subjects) == Set(["线性代数", "离散数学"]))
+        #expect(!subjects.contains("高等数学"))
+    }
+
+    @Test func studyLibraryStoreWritesRecordingBundleAndFolderIndex() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(
+            id: "study-store-recording",
+            title: "矩阵乘法",
+            store: audioStore,
+            studyFiling: StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
+        )
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+
+        let item = try studyStore.upsertRecordingMetadata(metadata)
+        let content = StudyLibraryBrowser.content(
+            items: studyStore.allStudyItems,
+            folders: studyStore.allStudyFolders,
+            path: StudyBrowsePath(components: ["课堂", "线性代数", "矩阵", "矩阵乘法"])
+        )
+
+        #expect(item.kind == .recordingBundle)
+        #expect(content.items.map(\.itemID) == [item.itemID])
+        #expect(studyStore.allStudyFolders.contains { folder in
+            folder.itemIDs.contains(item.itemID)
+        })
+    }
+
+    @Test func studyLibraryStoreRepairsMissingFolderItemReferences() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let item = StudyItemMetadata(
+            kind: .standaloneNote,
+            title: "独立笔记",
+            createdAt: Date(timeIntervalSince1970: 30),
+            filing: StudyFilingPath(type: "课堂")
+        )
+        try studyStore.save(item)
+        let folder = StudyFolderMetadata(
+            name: "课堂",
+            level: .type,
+            path: StudyFilingPath(type: "课堂"),
+            itemIDs: ["missing-item-id", item.itemID]
+        )
+        try studyStore.save(folder)
+
+        studyStore.refresh()
+
+        let repaired = try #require(studyStore.allStudyFolders.first { $0.folderID == folder.folderID })
+        #expect(repaired.itemIDs == [item.itemID])
+    }
+
+    @Test func studyLibraryStoreReadsLegacyReceiveJSONWithMissingFields() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let receiveDirectory = rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("2026-05-21", isDirectory: true)
+            .appendingPathComponent("legacy", isDirectory: true)
+        try FileManager.default.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
+        let receiveURL = receiveDirectory.appendingPathComponent("receive.json", isDirectory: false)
+        let receiveObject: [String: Any] = [
+            "recordingID": "legacy-receive",
+            "normalizedTitle": "旧接收录音",
+            "createdAt": "2026-05-21T00:00:00Z",
+            "duration": 42,
+            "studyFiling": [
+                "type": "课堂",
+                "subject": "物理"
+            ],
+            "audioRelativePath": "audio/inbox/2026-05-21/legacy/audio.m4a"
+        ]
+        try JSONSerialization.data(withJSONObject: receiveObject, options: [.prettyPrinted])
+            .write(to: receiveURL, options: .atomic)
+
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+
+        #expect(studyStore.allStudyItems.first?.recordingID == "legacy-receive")
+        #expect(studyStore.allStudyItems.first?.filing.subject == "物理")
+    }
+
     @Test func softDeleteRecordingUpdatesMetadataButKeepsFiles() throws {
         let (store, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -477,6 +680,286 @@ struct RokuricsTests {
         #expect(RecordingRowIconInteraction.deletionTapCount == 2)
     }
 
+    @Test func studyItemMetadataMissingSyncFieldsDefaultsSafely() throws {
+        let metadata = StudyItemMetadata(
+            recordingID: "legacy-sync-fields",
+            title: "旧 metadata",
+            createdAt: Date(timeIntervalSince1970: 1),
+            duration: 1,
+            studyFiling: StudyFilingPath(type: "课堂")
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: try Self.studyEncoder.encode(metadata)) as? [String: Any])
+        object.removeValue(forKey: "isTrashed")
+        object.removeValue(forKey: "trashedAt")
+        object.removeValue(forKey: "modifiedByDeviceID")
+        object.removeValue(forKey: "syncConflictStatus")
+        let data = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try Self.studyDecoder.decode(StudyItemMetadata.self, from: data)
+
+        #expect(decoded.isTrashed == false)
+        #expect(decoded.trashedAt == nil)
+        #expect(decoded.modifiedByDeviceID == nil)
+        #expect(decoded.syncConflictStatus == nil)
+    }
+
+    @Test func studyLibraryManifestFiltersSensitiveCustomProperties() {
+        let item = StudyItemMetadata(
+            recordingID: "manifest-sensitive",
+            title: "敏感字段",
+            createdAt: Date(timeIntervalSince1970: 1),
+            duration: 1,
+            customProperties: [
+                "apiKey": "should-not-sync",
+                "rawProviderResponse": "{}",
+                "safePreview": "保留"
+            ]
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-01",
+            generatedAt: Date(timeIntervalSince1970: 2),
+            items: [item.syncSanitized(modifiedByDeviceID: "iphone-01")],
+            folders: []
+        )
+
+        #expect(manifest.hasValidChecksum)
+        #expect(manifest.items.first?.customProperties == ["safePreview": "保留"])
+    }
+
+    @Test func applyingNewerMacMetadataUpdatesIPhoneMetadataWithoutDeletingAudio() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let recording = try saveRecording(id: "sync-lww-iphone", title: "iPhone 标题", store: audioStore)
+        let audioURL = try audioStore.audioURL(for: recording)
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let baseItem = try #require(studyStore.item(recordingID: recording.id))
+        var macItem = baseItem
+        macItem.title = "Mac 标题"
+        macItem.transcriptionStatus = "transcribed"
+        macItem.noteStatus = "generated"
+        macItem.updatedAt = baseItem.updatedAt.addingTimeInterval(60)
+        macItem.modifiedByDeviceID = "mac-01"
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "mac-01",
+            generatedAt: macItem.updatedAt.addingTimeInterval(1),
+            items: [macItem],
+            folders: []
+        )
+
+        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
+        let updatedRecording = try audioStore.loadMetadata(id: recording.id)
+
+        #expect(result.appliedItemCount == 1)
+        #expect(updatedRecording.title == "Mac 标题")
+        #expect(updatedRecording.transcriptionStatus == "transcribed")
+        #expect(updatedRecording.noteStatus == "generated")
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    @Test func applyingTrashTombstoneDoesNotDeleteRealFiles() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let recording = try saveRecording(id: "sync-trash-safe", title: "保留文件", store: audioStore)
+        let audioURL = try audioStore.audioURL(for: recording)
+        let metadataURL = try audioStore.makeMetadataURL(id: recording.id)
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let item = try #require(studyStore.item(recordingID: recording.id))
+        let tombstoneUpdatedAt = item.updatedAt.addingTimeInterval(60)
+        let tombstone = StudyLibrarySyncTombstone(
+            id: "item:\(item.itemID)",
+            entityKind: .item,
+            entityID: item.itemID,
+            operation: .trash,
+            updatedAt: tombstoneUpdatedAt,
+            modifiedByDeviceID: "mac-01"
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "mac-01",
+            generatedAt: tombstoneUpdatedAt.addingTimeInterval(1),
+            items: [],
+            folders: [],
+            tombstones: [tombstone]
+        )
+
+        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
+        let updatedRecording = try audioStore.loadMetadata(id: recording.id)
+
+        #expect(result.tombstoneCount == 1)
+        #expect(updatedRecording.isDeleted)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(FileManager.default.fileExists(atPath: metadataURL.path))
+    }
+
+    @Test func iphoneSyncManifestCarriesPendingUploadsForUnuploadedRecordings() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        _ = try saveRecording(id: "pending-upload-01", title: "待上传", store: audioStore, uploadStatus: "localOnly")
+        _ = try saveRecording(id: "pending-upload-02", title: "已上传", store: audioStore, uploadStatus: "uploaded")
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+
+        let manifest = studyStore.makeSyncManifest(deviceID: "mac-01", generatedAt: Date(timeIntervalSince1970: 4))
+
+        #expect(manifest.hasValidChecksum)
+        #expect(manifest.pendingUploads.map(\.recordingID) == ["pending-upload-01"])
+        #expect(manifest.pendingUploads.first?.localAudioRelativePath.hasSuffix(".m4a") == true)
+    }
+
+    @Test func studyLibrarySyncStateMissingPendingUploadsDefaultsSafely() throws {
+        let state = StudyLibrarySyncState(
+            deviceID: "mac-01",
+            pendingLocalChanges: 1,
+            failedChanges: 1,
+            lastError: "old"
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: try Self.studyEncoder.encode(state)) as? [String: Any])
+        object.removeValue(forKey: "pendingUploads")
+        let data = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try Self.studyDecoder.decode(StudyLibrarySyncState.self, from: data)
+
+        #expect(decoded.pendingUploads == 0)
+        #expect(decoded.pendingLocalChanges == 1)
+        #expect(decoded.lastKnownRemoteCommitID == nil)
+    }
+
+    @Test func studyLibrarySyncStateRecordsRemoteCommitIDAfterPullAndPush() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(rootURL: rootURL)
+
+        store.recordPull(
+            deviceID: "mac-01",
+            remoteManifestHash: "remote-hash-1",
+            remoteCommitID: "commit-pull",
+            at: Date(timeIntervalSince1970: 10)
+        )
+        #expect(store.state.lastKnownRemoteCommitID == "commit-pull")
+        #expect(store.state.lastRemoteManifestHash == "remote-hash-1")
+
+        store.recordPush(
+            deviceID: "mac-01",
+            remoteManifestHash: "remote-hash-2",
+            remoteCommitID: "commit-push",
+            pendingUploads: 0,
+            at: Date(timeIntervalSince1970: 20)
+        )
+
+        let reloaded = StudyLibrarySyncStateStore(rootURL: rootURL)
+        #expect(reloaded.state.lastKnownRemoteCommitID == "commit-push")
+        #expect(reloaded.state.lastRemoteManifestHash == "remote-hash-2")
+        #expect(reloaded.state.pendingLocalChanges == 0)
+        #expect(reloaded.state.failedChanges == 0)
+    }
+
+    @Test func studyLibrarySyncStateClearsSuccessfulPendingUploadsAndRetainsFailures() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(rootURL: rootURL)
+
+        store.recordPendingUploads(
+            deviceID: "mac-01",
+            pendingUploads: 2,
+            failedChanges: 1,
+            error: "upload_failed"
+        )
+
+        #expect(store.state.pendingUploads == 2)
+        #expect(store.state.failedChanges == 1)
+        #expect(store.state.lastError == "upload_failed")
+
+        store.recordPush(
+            deviceID: "mac-01",
+            remoteManifestHash: "remote-hash",
+            remoteCommitID: "commit-after-upload",
+            pendingUploads: 0,
+            at: Date(timeIntervalSince1970: 30)
+        )
+
+        #expect(store.state.pendingUploads == 0)
+        #expect(store.state.failedChanges == 0)
+        #expect(store.state.lastError == nil)
+        #expect(store.state.lastKnownRemoteCommitID == "commit-after-upload")
+    }
+
+    @Test func studyLibrarySyncFailureRetainsPendingChangesAndUploads() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(rootURL: rootURL)
+
+        store.recordFailure(
+            deviceID: "mac-01",
+            error: "sync_failed",
+            failedChanges: 3,
+            pendingUploads: 2
+        )
+
+        let reloaded = StudyLibrarySyncStateStore(rootURL: rootURL)
+        #expect(reloaded.state.pendingLocalChanges == 3)
+        #expect(reloaded.state.failedChanges == 3)
+        #expect(reloaded.state.pendingUploads == 2)
+        #expect(reloaded.state.lastError == "sync_failed")
+    }
+
+    @Test func gitBackedStudySyncRuntimeDefaultsToDisabled() {
+        #expect(!StudyLibrarySyncRuntimeConfiguration.default.gitBackedSyncEnabled)
+        #expect(!StudyLibrarySyncRuntimeConfiguration.disabled.gitBackedSyncEnabled)
+        #expect(StudyLibrarySyncRuntimeConfiguration.disabledReason == "Git-backed study sync is disabled")
+    }
+
+    @Test func disabledSyncCoordinatorDoesNotStartAutomationOrClearPendingState() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        syncStateStore.replace(StudyLibrarySyncState(
+            deviceID: "mac-disabled",
+            pendingLocalChanges: 5,
+            pendingUploads: 2,
+            failedChanges: 1,
+            lastError: "previous_failure"
+        ))
+        let connectionProvider = FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot())
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: connectionProvider,
+            studyLibraryStore: studyStore,
+            statusStore: statusStore,
+            syncStateStore: syncStateStore,
+            runtimeConfiguration: .default,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+
+        coordinator.startForegroundMonitoring()
+        let manualResult = await coordinator.synchronizeNow()
+
+        #expect(manualResult == nil)
+        #expect(!coordinator.isAutomaticSyncMonitoringActive)
+        #expect(coordinator.syncSummary.statusText == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(coordinator.connectionStatus.lastSyncStatus == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(syncStateStore.state.pendingLocalChanges == 5)
+        #expect(syncStateStore.state.pendingUploads == 2)
+        #expect(syncStateStore.state.failedChanges == 1)
+        #expect(syncStateStore.state.lastError == "previous_failure")
+        coordinator.stopMonitoring()
+    }
+
+    @Test func disabledGitBackedSyncDoesNotTurnOffSecureManualUploads() {
+        #expect(!StudyLibrarySyncRuntimeConfiguration.default.gitBackedSyncEnabled)
+        #expect(SecureMacUploadClient.isHTTPSUploadEnabled)
+    }
+
+    @Test func iphoneAIProviderPresetFiltersLocalDesktopProviders() {
+        let visible = AIProviderPreset.iPhoneVisibleCases
+
+        #expect(visible.contains(.openAI))
+        #expect(visible.contains(.deepSeek))
+        #expect(visible.contains(.gemini))
+        #expect(visible.contains(.customOpenAICompatible))
+        #expect(!visible.contains(.lmStudioLocal))
+        #expect(!visible.contains(.ollamaLocal))
+    }
+
     private func makeStore() throws -> (AudioFileStore, URL) {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("RokuricsTests", isDirectory: true)
@@ -490,7 +973,8 @@ struct RokuricsTests {
         id: String,
         title: String,
         store: AudioFileStore,
-        uploadStatus: String = "localOnly"
+        uploadStatus: String = "localOnly",
+        studyFiling: StudyFilingPath? = nil
     ) throws -> RecordingMetadata {
         let audioURL = try store.recordingsDirectory()
             .appendingPathComponent(id, isDirectory: false)
@@ -502,7 +986,8 @@ struct RokuricsTests {
             title: title,
             relativeAudioPath: try store.relativePath(for: audioURL),
             relativeMetadataPath: try store.relativePath(for: metadataURL),
-            uploadStatus: uploadStatus
+            uploadStatus: uploadStatus,
+            studyFiling: studyFiling
         )
         try store.saveMetadata(metadata)
         return metadata
@@ -538,4 +1023,39 @@ struct RokuricsTests {
             studyFiling: studyFiling
         )
     }
+
+    private static let studyEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }()
+
+    private static let studyDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}
+
+@MainActor
+private final class FakeSecureMacConnectionSnapshotProvider: SecureMacConnectionSnapshotProviding {
+    var snapshot: SecureMacConnectionSnapshot
+
+    init(snapshot: SecureMacConnectionSnapshot) {
+        self.snapshot = snapshot
+    }
+}
+
+private func makePairedMacSnapshot() -> SecureMacConnectionSnapshot {
+    SecureMacConnectionSnapshot(
+        macHost: "127.0.0.1",
+        macPort: 8787,
+        macFingerprint: String(repeating: "a", count: 64),
+        macName: "Rokurics Mac",
+        macModel: "Mac",
+        deviceID: "mac-disabled",
+        sharedSecretBase64URL: "c3luYy1zZWNyZXQ",
+        pairedAt: "2026-05-22T00:00:00Z"
+    )
 }

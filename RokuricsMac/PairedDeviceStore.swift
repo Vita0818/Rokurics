@@ -15,10 +15,6 @@ struct PairedDevice: Codable, Identifiable {
     let pairedAt: Date
     var lastSeenAt: Date?
 
-    var tokenPrefix: String {
-        String(sharedSecretBase64URL.prefix(8))
-    }
-
     var idPrefix: String {
         String(id.prefix(12))
     }
@@ -108,11 +104,6 @@ final class PairedDeviceStore: ObservableObject {
     }
 
     private static func securityDirectoryURL(fileManager: FileManager) -> URL {
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-
-        return applicationSupportURL
-            .appendingPathComponent("RokuricsMac", isDirectory: true)
-            .appendingPathComponent("Security", isDirectory: true)
+        MacAppStorageProfile.securityDirectoryURL(fileManager: fileManager)
     }
 }

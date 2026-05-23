@@ -9,6 +9,7 @@ import SwiftUI
 
 enum RokuricsTypographyToken: Equatable, CaseIterable {
     case pageTitle
+    case pageSubtitle
     case sectionTitle
     case cardTitle
     case body
@@ -24,6 +25,8 @@ enum RokuricsTypography {
         switch token {
         case .pageTitle:
             return pageTitle()
+        case .pageSubtitle:
+            return pageSubtitle()
         case .sectionTitle:
             return sectionTitle()
         case .cardTitle:
@@ -45,6 +48,10 @@ enum RokuricsTypography {
 
     static func pageTitle(size: CGFloat = 34, weight: Font.Weight = .bold) -> Font {
         chineseTitle(size: size, weight: weight)
+    }
+
+    static func pageSubtitle(size: CGFloat = 14, weight: Font.Weight = .medium) -> Font {
+        chineseBody(size: size, weight: weight)
     }
 
     static func sectionTitle(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
@@ -137,6 +144,225 @@ enum RokuricsTypography {
 
     static func button(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
         .system(size: size, weight: weight)
+    }
+}
+
+struct RokuricsText: View {
+    let text: String
+    var token: RokuricsTypographyToken
+    var size: CGFloat?
+    var weight: Font.Weight?
+    var forceTechnical = false
+
+    init(
+        _ text: String,
+        token: RokuricsTypographyToken = .body,
+        size: CGFloat? = nil,
+        weight: Font.Weight? = nil,
+        forceTechnical: Bool = false
+    ) {
+        self.text = text
+        self.token = token
+        self.size = size
+        self.weight = weight
+        self.forceTechnical = forceTechnical
+    }
+
+    var body: some View {
+        Text(RokuricsTypography.attributedString(for: text, token: token, size: size, weight: weight, forceTechnical: forceTechnical))
+    }
+}
+
+struct RokuricsMixedTypographyStyle: Equatable {
+    let latin: RokuricsTypographyTokenSpec
+    let chinese: RokuricsTypographyTokenSpec
+    let number: RokuricsTypographyTokenSpec
+    let punctuation: RokuricsTypographyTokenSpec
+    let technical: RokuricsTypographyTokenSpec
+
+    init(size: CGFloat, weight: Font.Weight) {
+        latin = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .serif)
+        chinese = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .default)
+        number = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .serif, usesMonospacedDigits: true)
+        punctuation = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .default)
+        technical = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .monospaced)
+    }
+
+    func font(for kind: RokuricsMixedTextRun.Kind) -> Font {
+        switch kind {
+        case .latin:
+            return latin.font
+        case .chinese:
+            return chinese.font
+        case .number:
+            return number.font
+        case .punctuation:
+            return punctuation.font
+        case .technical:
+            return technical.font
+        }
+    }
+}
+
+struct RokuricsTypographyTokenSpec: Equatable {
+    let size: CGFloat
+    let weight: Font.Weight
+    let design: Font.Design
+    var usesMonospacedDigits = false
+
+    var font: Font {
+        let font = Font.system(size: size, weight: weight, design: design)
+        return usesMonospacedDigits ? font.monospacedDigit() : font
+    }
+}
+
+extension RokuricsTypography {
+    static func mixedStyle(
+        for token: RokuricsTypographyToken,
+        size overrideSize: CGFloat? = nil,
+        weight overrideWeight: Font.Weight? = nil
+    ) -> RokuricsMixedTypographyStyle {
+        let fallback: (CGFloat, Font.Weight)
+        switch token {
+        case .pageTitle:
+            fallback = (34, .bold)
+        case .pageSubtitle:
+            fallback = (14, .medium)
+        case .sectionTitle:
+            fallback = (17, .semibold)
+        case .cardTitle:
+            fallback = (16, .semibold)
+        case .body:
+            fallback = (15, .regular)
+        case .secondary:
+            fallback = (12, .medium)
+        case .chatGreeting:
+            fallback = (24, .semibold)
+        case .chatMessage, .chatInput:
+            fallback = (15, .regular)
+        case .technical:
+            fallback = (15, .semibold)
+        }
+
+        return RokuricsMixedTypographyStyle(
+            size: overrideSize ?? fallback.0,
+            weight: overrideWeight ?? fallback.1
+        )
+    }
+
+    static func attributedString(
+        for text: String,
+        token: RokuricsTypographyToken,
+        size: CGFloat? = nil,
+        weight: Font.Weight? = nil,
+        forceTechnical: Bool = false
+    ) -> AttributedString {
+        let style = mixedStyle(for: token, size: size, weight: weight)
+        var result = AttributedString()
+        for run in RokuricsMixedTextRun.runs(in: text, forceTechnical: forceTechnical || token == .technical) {
+            var segment = AttributedString(run.value)
+            segment.font = style.font(for: run.kind)
+            result += segment
+        }
+        return result
+    }
+}
+
+struct RokuricsMixedTextRun: Equatable {
+    enum Kind: Equatable {
+        case latin
+        case chinese
+        case number
+        case punctuation
+        case technical
+    }
+
+    let kind: Kind
+    let value: String
+
+    static func runs(in text: String, forceTechnical: Bool = false) -> [RokuricsMixedTextRun] {
+        guard !text.isEmpty else {
+            return []
+        }
+        if forceTechnical {
+            return [RokuricsMixedTextRun(kind: .technical, value: text)]
+        }
+
+        var runs: [RokuricsMixedTextRun] = []
+        var token = ""
+
+        func flushToken() {
+            guard !token.isEmpty else {
+                return
+            }
+            appendRuns(for: token, to: &runs)
+            token = ""
+        }
+
+        for character in text {
+            if character.rokuricsIsWhitespace {
+                flushToken()
+                appendRun(kind: .punctuation, value: String(character), to: &runs)
+            } else {
+                token.append(character)
+            }
+        }
+
+        flushToken()
+        return runs
+    }
+
+    private static func appendRuns(for token: String, to runs: inout [RokuricsMixedTextRun]) {
+        if token.rokuricsLooksTechnicalToken {
+            appendRun(kind: .technical, value: token, to: &runs)
+            return
+        }
+
+        if token.rokuricsLooksNumericToken {
+            appendRun(kind: .number, value: token, to: &runs)
+            return
+        }
+
+        if token.rokuricsLooksLatinWordToken {
+            appendRun(kind: .latin, value: token, to: &runs)
+            return
+        }
+
+        var currentKind: Kind?
+        var currentValue = ""
+
+        func flushCurrent() {
+            guard let currentKind, !currentValue.isEmpty else {
+                return
+            }
+            appendRun(kind: currentKind, value: currentValue, to: &runs)
+            currentValue = ""
+        }
+
+        for character in token {
+            let kind = character.rokuricsPreferredMixedTextKind
+            if currentKind == kind {
+                currentValue.append(character)
+            } else {
+                flushCurrent()
+                currentKind = kind
+                currentValue = String(character)
+            }
+        }
+
+        flushCurrent()
+    }
+
+    private static func appendRun(kind: Kind, value: String, to runs: inout [RokuricsMixedTextRun]) {
+        guard !value.isEmpty else {
+            return
+        }
+
+        if let last = runs.last, last.kind == kind {
+            runs[runs.count - 1] = RokuricsMixedTextRun(kind: kind, value: last.value + value)
+        } else {
+            runs.append(RokuricsMixedTextRun(kind: kind, value: value))
+        }
     }
 }
 
@@ -346,7 +572,7 @@ private extension Character {
             return .chinese
         }
 
-        return .number
+        return .chinese
     }
 
     private var rokuricsContainsCJKScalar: Bool {
@@ -360,6 +586,102 @@ private extension Character {
             default:
                 return false
             }
+        }
+    }
+}
+
+private extension Character {
+    var rokuricsIsWhitespace: Bool {
+        unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+
+    var rokuricsPreferredMixedTextKind: RokuricsMixedTextRun.Kind {
+        if rokuricsContainsCJKScalar {
+            return .chinese
+        }
+
+        if unicodeScalars.allSatisfy({ CharacterSet.decimalDigits.contains($0) }) {
+            return .number
+        }
+
+        if unicodeScalars.allSatisfy({ $0.rokuricsIsLatinLetter }) {
+            return .latin
+        }
+
+        return .punctuation
+    }
+}
+
+private extension String {
+    var rokuricsLooksNumericToken: Bool {
+        let allowed = CharacterSet(charactersIn: "0123456789.:/-_")
+        return unicodeScalars.contains(where: { CharacterSet.decimalDigits.contains($0) })
+            && unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    var rokuricsLooksLatinWordToken: Bool {
+        let connectorScalars = CharacterSet(charactersIn: "'’-")
+        return unicodeScalars.contains(where: \.rokuricsIsLatinLetter)
+            && unicodeScalars.allSatisfy { $0.rokuricsIsLatinLetter || CharacterSet.decimalDigits.contains($0) || connectorScalars.contains($0) }
+    }
+
+    var rokuricsLooksTechnicalToken: Bool {
+        let trimmed = trimmingCharacters(in: CharacterSet(charactersIn: " \t\n,，.。;；)）]】}」』!！?？"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "([{（【「『"))
+        guard !trimmed.isEmpty else {
+            return false
+        }
+
+        let lowered = trimmed.lowercased()
+        if lowered.range(of: #"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lowered.range(of: #"^[0-9a-f]{16,}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lowered.range(of: #"^([0-9a-f]{2}:){5,}[0-9a-f]{2}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lowered.hasPrefix("/") || lowered.hasPrefix("~") {
+            return true
+        }
+
+        let knownPathPrefixes = ["audio/", "recordings/", "transcripts/", "notes/", "study/", "metadata/"]
+        if knownPathPrefixes.contains(where: { lowered.hasPrefix($0) }) {
+            return true
+        }
+        if lowered.contains("/"),
+           lowered.unicodeScalars.contains(where: \.rokuricsIsLatinLetter) || lowered.contains(".") {
+            return true
+        }
+        if lowered.range(of: #"^[a-z0-9_-]+\.[a-z0-9]{1,8}$"#, options: .regularExpression) != nil,
+           lowered.unicodeScalars.contains(where: \.rokuricsIsLatinLetter) {
+            return true
+        }
+
+        let technicalPrefixes = [
+            "recording", "transcript", "note", "folder", "item",
+            "hash", "fingerprint", "endpoint"
+        ]
+        for prefix in technicalPrefixes {
+            if lowered.range(of: #"^\#(prefix)[-_][a-z0-9][a-z0-9_-]*$"#, options: .regularExpression) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+private extension UnicodeScalar {
+    var rokuricsIsLatinLetter: Bool {
+        switch value {
+        case 0x0041...0x005A,
+             0x0061...0x007A,
+             0x00C0...0x024F:
+            return true
+        default:
+            return false
         }
     }
 }

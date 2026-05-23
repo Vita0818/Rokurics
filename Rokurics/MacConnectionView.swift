@@ -23,6 +23,8 @@ private enum MacConnectionFeedbackKind {
 
 struct MacConnectionView: View {
     @ObservedObject var connectionStore: SecureMacConnectionStore
+    @ObservedObject private var studyLibraryStore: StudyLibraryStore
+    @Environment(\.dismiss) private var dismiss
     @State private var pairingCode = ""
     @State private var isFingerprintVisible = false
     @State private var isCheckingHTTPS = false
@@ -44,9 +46,22 @@ struct MacConnectionView: View {
     @FocusState private var focusedField: MacConnectionFocusedField?
 
     @StateObject private var uploadClient = SecureMacUploadClient()
+    @StateObject private var syncCoordinator: StudyLibrarySyncCoordinator
 
-    init(connectionStore: SecureMacConnectionStore) {
+    init(
+        connectionStore: SecureMacConnectionStore,
+        studyLibraryStore: StudyLibraryStore,
+        recordingManager: RecordingManager? = nil,
+        uploadCoordinator: RecordingUploadCoordinator? = nil
+    ) {
         self.connectionStore = connectionStore
+        _studyLibraryStore = ObservedObject(wrappedValue: studyLibraryStore)
+        _syncCoordinator = StateObject(wrappedValue: StudyLibrarySyncCoordinator(
+            connectionStore: connectionStore,
+            studyLibraryStore: studyLibraryStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator
+        ))
     }
 
     var body: some View {
@@ -57,7 +72,7 @@ struct MacConnectionView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        header
+                        pageHeader
 
                         if settingsSnapshot.isPaired {
                             pairedContent(metrics: metrics)
@@ -65,8 +80,8 @@ struct MacConnectionView: View {
                             unpairedContent
                         }
                     }
-                    .padding(.horizontal, metrics.horizontalPadding)
-                    .padding(.top, 24)
+                    .padding(.horizontal, RokuricsMobilePageLayoutMetrics.horizontalPadding)
+                    .padding(.top, RokuricsMobilePageLayoutMetrics.topPadding)
                     .padding(.bottom, 34)
                     .rokuricsCenteredColumn(maxWidth: metrics.homeMaxWidth)
                     .background {
@@ -96,7 +111,8 @@ struct MacConnectionView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $isDetailPresented) {
             MacConnectionDetailView(
                 snapshot: settingsSnapshot,
@@ -112,10 +128,12 @@ struct MacConnectionView: View {
         .onAppear {
             isViewActive = true
             refreshConnectionState()
+            syncCoordinator.startForegroundMonitoring()
         }
         .onDisappear {
             isViewActive = false
             cancelConnectionTasks()
+            syncCoordinator.stopMonitoring()
         }
         .onChange(of: connectionStore.macHost) { _, _ in
             resetConnectionFeedback()
@@ -133,16 +151,26 @@ struct MacConnectionView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 14) {
-            RokuricsMixedLanguageTitle(english: "Mac", chinese: "连接", englishSize: 34, chineseSize: 34)
-                .foregroundStyle(RokuricsColors.deepText)
-
-            Spacer(minLength: 12)
-
-            if !settingsSnapshot.isPaired {
-                MacConnectionStateCapsule(text: "未配对")
+    private var pageHeader: some View {
+        RokuricsMobilePageHeader(
+            leading: {
+                RokuricsMobileBackButton(tint: RokuricsColors.deepText) {
+                    dismiss()
+                }
+            },
+            trailing: {
+                if !settingsSnapshot.isPaired {
+                    MacConnectionStateCapsule(text: "未配对")
+                }
             }
+        ) {
+            RokuricsMixedLanguageTitle(
+                english: "Mac",
+                chinese: "连接",
+                englishSize: RokuricsMobilePageLayoutMetrics.titleSize,
+                chineseSize: RokuricsMobilePageLayoutMetrics.titleSize
+            )
+                .foregroundStyle(RokuricsColors.deepText)
         }
     }
 
@@ -219,8 +247,13 @@ struct MacConnectionView: View {
 
             ConnectedDeviceCardView(
                 snapshot: settingsSnapshot,
+                status: syncCoordinator.connectionStatus,
+                isSyncing: syncCoordinator.isSyncing,
                 onShowDetails: {
                     isDetailPresented = true
+                },
+                onSyncNow: {
+                    startManualSync()
                 },
                 onDisconnect: disconnect
             )
@@ -481,6 +514,7 @@ struct MacConnectionView: View {
     @MainActor
     private func disconnect() {
         do {
+            syncCoordinator.stopMonitoring()
             try connectionStore.clearPairing()
             pairingCode = ""
             isFingerprintVisible = false
@@ -489,6 +523,13 @@ struct MacConnectionView: View {
             isDetailPresented = false
         } catch {
             showTransientNotice("断开失败：\(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func startManualSync() {
+        Task {
+            await syncCoordinator.synchronizeNow()
         }
     }
 
@@ -881,7 +922,10 @@ private struct ConnectedDeviceBubbleView: View {
 
 private struct ConnectedDeviceCardView: View {
     let snapshot: SecureMacConnectionSnapshot
+    let status: DeviceConnectionStatus
+    let isSyncing: Bool
     let onShowDetails: () -> Void
+    let onSyncNow: () -> Void
     let onDisconnect: () -> Void
 
     var body: some View {
@@ -903,8 +947,25 @@ private struct ConnectedDeviceCardView: View {
             }
 
             VStack(spacing: 10) {
+                MacConnectionStatusLine(title: "状态", value: stateText, tint: stateTint)
+                MacConnectionStatusLine(title: "最近连接", value: status.lastSeenAt.map { Self.relativeDateFormatter.localizedString(for: $0, relativeTo: Date()) } ?? "暂无", tint: RokuricsColors.softText)
+                MacConnectionStatusLine(title: "最近同步", value: lastSyncText, tint: RokuricsColors.softText)
+            }
+            .padding(14)
+            .rokuricsLiquidGlassCard(cornerRadius: 20, material: .thinMaterial, fillOpacity: 0.30, strokeOpacity: 0.26, shadowOpacity: 0.04, shadowRadius: 7, shadowY: 3)
+
+            VStack(spacing: 10) {
+                Button {
+                    onSyncNow()
+                } label: {
+                    Label(isSyncing ? "同步中" : "立即同步", systemImage: isSyncing ? "arrow.triangle.2.circlepath" : "arrow.triangle.2.circlepath.circle")
+                }
+                .buttonStyle(.rokuricsPrimary)
+                .disabled(isSyncing || !snapshot.isPaired)
+                .opacity(isSyncing || !snapshot.isPaired ? 0.62 : 1)
+
                 Button("查看连接信息", action: onShowDetails)
-                    .buttonStyle(.rokuricsPrimary)
+                    .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.softTeal, verticalPadding: 13))
 
                 Button("断开连接", action: onDisconnect)
                     .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.coral))
@@ -924,6 +985,72 @@ private struct ConnectedDeviceCardView: View {
         let host = snapshot.macHost.isEmpty ? "-" : snapshot.macHost
         let port = snapshot.macPort > 0 ? "\(snapshot.macPort)" : "\(SecureMacConnectionSettings.defaultPort)"
         return "\(host) · \(port)"
+    }
+
+    private var stateText: String {
+        switch status.state {
+        case .unpaired:
+            return "未配对"
+        case .offline:
+            return "已配对但离线"
+        case .connecting:
+            return "正在连接"
+        case .connected:
+            return "已连接"
+        }
+    }
+
+    private var stateTint: Color {
+        switch status.state {
+        case .connected:
+            return RokuricsColors.softTeal
+        case .connecting:
+            return RokuricsColors.aqua
+        case .offline, .unpaired:
+            return RokuricsColors.coral
+        }
+    }
+
+    private var lastSyncText: String {
+        if let lastSyncAt = status.lastSyncAt {
+            let relative = Self.relativeDateFormatter.localizedString(for: lastSyncAt, relativeTo: Date())
+            if let lastSyncStatus = status.lastSyncStatus, !lastSyncStatus.isEmpty {
+                return "\(relative) · \(lastSyncStatus)"
+            }
+            return relative
+        }
+
+        return status.lastSyncStatus ?? "暂无"
+    }
+
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+}
+
+private struct MacConnectionStatusLine: View {
+    let title: String
+    let value: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(RokuricsTypography.caption(size: 12, weight: .bold))
+                .foregroundStyle(RokuricsColors.tertiaryText)
+                .frame(width: 64, alignment: .leading)
+
+            Text(value)
+                .font(RokuricsTypography.body(size: 14, weight: .semibold))
+                .foregroundStyle(tint)
+                .lineLimit(2)
+                .minimumScaleFactor(0.78)
+
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -1181,6 +1308,9 @@ private func maskedCertificateFingerprint(_ value: String) -> String {
 
 #Preview {
     NavigationStack {
-        MacConnectionView(connectionStore: SecureMacConnectionStore())
+        MacConnectionView(
+            connectionStore: SecureMacConnectionStore(),
+            studyLibraryStore: StudyLibraryStore()
+        )
     }
 }

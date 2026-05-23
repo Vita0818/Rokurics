@@ -47,12 +47,12 @@ struct RokuricsScaleButtonStyle: ButtonStyle {
 }
 
 enum RokuricsIconCircleButtonConfiguration {
-    static let size: CGFloat = 44
-    static let iconSize: CGFloat = 18
+    static let size: CGFloat = RokuricsIconButtonMetrics.size
+    static let iconSize: CGFloat = RokuricsIconButtonMetrics.iconSize
     static let borderWidth: CGFloat = 1
     static let fillOpacity: Double = 0.40
     static let strokeOpacity: Double = 0.44
-    static let disabledOpacity: Double = 0.48
+    static let disabledOpacity: Double = RokuricsIconButtonMetrics.disabledOpacity
     static let usesGlassBackground = true
     static let usesSystemSymbols = true
 }
@@ -84,6 +84,32 @@ struct RokuricsIconCircleButton: View {
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : RokuricsIconCircleButtonConfiguration.disabledOpacity)
         .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+struct RokuricsBackButton: View {
+    var tint: Color = RokuricsColors.deepText
+    let action: () -> Void
+
+    var body: some View {
+        RokuricsIconCircleButton(
+            systemName: "chevron.left",
+            accessibilityLabel: "返回",
+            tint: tint,
+            action: action
+        )
+    }
+}
+
+struct RokuricsInfoButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        RokuricsIconCircleButton(
+            systemName: "info",
+            accessibilityLabel: "信息",
+            action: action
+        )
     }
 }
 

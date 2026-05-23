@@ -15,6 +15,7 @@ struct MacIPhoneConnectionView: View {
     @State private var isFingerprintVisible = false
     @State private var didCopyPairingInfo = false
     @State private var activeSheet: MacIPhoneConnectionSheet?
+    @State private var manualSyncStatus: DeviceConnectionStatus?
 
     var body: some View {
         ZStack {
@@ -171,14 +172,20 @@ struct MacIPhoneConnectionView: View {
     }
 
     private func connectedContent(for device: PairedDevice) -> some View {
-        MacConnectedDeviceLayout(
+        let status = manualSyncStatus ?? secureReceiverService.connectionStatus(for: device)
+        return MacConnectedDeviceLayout(
             device: device,
+            status: status,
             connectionAddress: connectionAddress,
             deviceID: device.idPrefix,
             onShowDetail: {
                 activeSheet = .connectionDetail
             },
+            onSyncNow: {
+                manualSyncStatus = secureReceiverService.prepareManualStudyLibrarySync(for: device)
+            },
             onDisconnect: {
+                manualSyncStatus = nil
                 secureReceiverService.disconnectPairedDevices()
             }
         )
@@ -446,9 +453,11 @@ private struct MacConnectedDeviceBubbleView: View {
 
 private struct MacConnectedDeviceLayout: View {
     let device: PairedDevice
+    let status: DeviceConnectionStatus
     let connectionAddress: String
     let deviceID: String
     let onShowDetail: () -> Void
+    let onSyncNow: () -> Void
     let onDisconnect: () -> Void
 
     var body: some View {
@@ -466,10 +475,12 @@ private struct MacConnectedDeviceLayout: View {
 
                         MacConnectedDeviceCardView(
                             device: device,
+                            status: status,
                             connectionAddress: connectionAddress,
                             deviceID: deviceID,
                             isCompact: isCompact,
                             onShowDetail: onShowDetail,
+                            onSyncNow: onSyncNow,
                             onDisconnect: onDisconnect
                         )
                         .frame(width: cardWidth)
@@ -481,10 +492,12 @@ private struct MacConnectedDeviceLayout: View {
 
                         MacConnectedDeviceCardView(
                             device: device,
+                            status: status,
                             connectionAddress: connectionAddress,
                             deviceID: deviceID,
                             isCompact: isCompact,
                             onShowDetail: onShowDetail,
+                            onSyncNow: onSyncNow,
                             onDisconnect: onDisconnect
                         )
                         .frame(width: cardWidth)
@@ -501,47 +514,57 @@ private struct MacConnectedDeviceLayout: View {
 struct MacConnectedDeviceCardView: View {
     let deviceName: String
     let connectionInfo: String
+    let status: DeviceConnectionStatus
     var isCompact: Bool
     var showsDisconnectAction = true
     var usesCardChrome = true
     let onShowDetail: () -> Void
+    let onSyncNow: (() -> Void)?
     let onDisconnect: (() -> Void)?
     @Environment(\.colorScheme) private var colorScheme
 
     init(
         device: PairedDevice,
+        status: DeviceConnectionStatus,
         connectionAddress: String,
         deviceID: String,
         isCompact: Bool,
         showsDisconnectAction: Bool = true,
         usesCardChrome: Bool = true,
         onShowDetail: @escaping () -> Void,
+        onSyncNow: (() -> Void)? = nil,
         onDisconnect: (() -> Void)? = nil
     ) {
         self.deviceName = device.deviceName.isEmpty ? "iPhone" : device.deviceName
         self.connectionInfo = "\(connectionAddress) · \(deviceID)"
+        self.status = status
         self.isCompact = isCompact
         self.showsDisconnectAction = showsDisconnectAction
         self.usesCardChrome = usesCardChrome
         self.onShowDetail = onShowDetail
+        self.onSyncNow = onSyncNow
         self.onDisconnect = onDisconnect
     }
 
     init(
         deviceName: String,
         connectionInfo: String,
+        status: DeviceConnectionStatus = .unpaired(displayName: "iPhone"),
         isCompact: Bool,
         showsDisconnectAction: Bool = true,
         usesCardChrome: Bool = true,
         onShowDetail: @escaping () -> Void,
+        onSyncNow: (() -> Void)? = nil,
         onDisconnect: (() -> Void)? = nil
     ) {
         self.deviceName = deviceName.isEmpty ? "iPhone" : deviceName
         self.connectionInfo = connectionInfo
+        self.status = status
         self.isCompact = isCompact
         self.showsDisconnectAction = showsDisconnectAction
         self.usesCardChrome = usesCardChrome
         self.onShowDetail = onShowDetail
+        self.onSyncNow = onSyncNow
         self.onDisconnect = onDisconnect
     }
 
@@ -567,7 +590,23 @@ struct MacConnectedDeviceCardView: View {
 
             connectionInfoView
 
+            VStack(spacing: 8) {
+                MacConnectedStatusRow(title: "状态", value: stateText, tint: stateTint)
+                MacConnectedStatusRow(title: "最近在线", value: status.lastSeenAt.map { Self.relativeDateFormatter.localizedString(for: $0, relativeTo: Date()) } ?? "暂无", tint: MacTheme.softText(for: colorScheme))
+                MacConnectedStatusRow(title: "最近同步", value: lastSyncText, tint: MacTheme.softText(for: colorScheme))
+            }
+            .padding(12)
+            .macLiquidGlassCard(cornerRadius: 16, material: .ultraThinMaterial, fillOpacity: 0.24, strokeOpacity: 0.22, shadowOpacity: 0.02, shadowRadius: 5, shadowY: 2)
+
             VStack(spacing: 10) {
+                if let onSyncNow {
+                    Button(action: onSyncNow) {
+                        Label("立即同步", systemImage: "arrow.triangle.2.circlepath.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(MacConnectionPrimaryButtonStyle(verticalPadding: isCompact ? 8 : 10))
+                }
+
                 Button(action: onShowDetail) {
                     Text("查看连接信息")
                         .frame(maxWidth: .infinity)
@@ -594,6 +633,72 @@ struct MacConnectedDeviceCardView: View {
             .truncationMode(.middle)
             .textSelection(.enabled)
     }
+
+    private var stateText: String {
+        switch status.state {
+        case .unpaired:
+            return "未配对"
+        case .offline:
+            return "已配对但离线"
+        case .connecting:
+            return "正在连接"
+        case .connected:
+            return "已连接"
+        }
+    }
+
+    private var stateTint: Color {
+        switch status.state {
+        case .connected:
+            return MacTheme.aqua
+        case .connecting:
+            return MacTheme.mint
+        case .offline, .unpaired:
+            return MacTheme.coral
+        }
+    }
+
+    private var lastSyncText: String {
+        if let lastSyncAt = status.lastSyncAt {
+            let relative = Self.relativeDateFormatter.localizedString(for: lastSyncAt, relativeTo: Date())
+            if let lastSyncStatus = status.lastSyncStatus, !lastSyncStatus.isEmpty {
+                return "\(relative) · \(lastSyncStatus)"
+            }
+            return relative
+        }
+        return status.lastSyncStatus ?? "暂无"
+    }
+
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+}
+
+private struct MacConnectedStatusRow: View {
+    let title: String
+    let value: String
+    let tint: Color
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .font(MacTypography.chineseCaption(size: 11, weight: .semibold))
+                .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
+                .frame(width: 58, alignment: .leading)
+
+            Text(value)
+                .font(value.macContainsCJK ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.numberBody(size: 12, weight: .semibold))
+                .foregroundStyle(tint)
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 0)
+        }
+    }
 }
 
 private struct MacIPhoneConnectionDetailSheet: View {
@@ -617,9 +722,13 @@ private struct MacIPhoneConnectionDetailSheet: View {
                     MacConnectionDivider()
                     detailRow("IP", secureReceiverService.localIPAddress, style: .technical)
                     MacConnectionDivider()
+                    detailRow("连接状态", connectionStateText, style: .name)
+                    MacConnectionDivider()
                     detailRow("配对时间", device.map { formattedDate($0.pairedAt) } ?? "未知", style: .number)
                     MacConnectionDivider()
-                    detailRow("最近连接", device?.lastSeenAt.map(formattedDate) ?? "暂无", style: .number)
+                    detailRow("最近连接", status.lastSeenAt.map(formattedDate) ?? "暂无", style: .number)
+                    MacConnectionDivider()
+                    detailRow("最近同步", lastSyncText, style: .name)
                     MacConnectionDivider()
                     detailRow("安全上传测试", "\(secureReceiverService.acceptedUploadCount)", style: .number)
                     MacConnectionDivider()
@@ -654,6 +763,30 @@ private struct MacIPhoneConnectionDetailSheet: View {
         secureReceiverService.fingerprint == "未生成"
             ? "HTTPS 身份未就绪"
             : secureReceiverService.fingerprint.uppercased().macGroupedFingerprint(groupsPerLine: 8)
+    }
+
+    private var status: DeviceConnectionStatus {
+        secureReceiverService.connectionStatus(for: device)
+    }
+
+    private var connectionStateText: String {
+        switch status.state {
+        case .unpaired:
+            return "未配对"
+        case .offline:
+            return "已配对但离线"
+        case .connecting:
+            return "正在连接"
+        case .connected:
+            return "已连接"
+        }
+    }
+
+    private var lastSyncText: String {
+        if let lastSyncAt = status.lastSyncAt {
+            return formattedDate(lastSyncAt)
+        }
+        return status.lastSyncStatus ?? "暂无"
     }
 
     private func detailRow(_ label: String, _ value: String, style: MacConnectionDetailValueStyle) -> some View {

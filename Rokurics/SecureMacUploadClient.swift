@@ -26,10 +26,6 @@ struct SecurePairingResult {
     var deviceIDPrefix: String {
         String(deviceID.prefix(12))
     }
-
-    var secretPrefix: String {
-        String(sharedSecretBase64URL.prefix(8))
-    }
 }
 
 struct SecureUploadResult {
@@ -211,7 +207,7 @@ final class SecureMacUploadClient: ObservableObject {
                 macName: pairResponse.macName ?? pairResponse.macDisplayName ?? "",
                 macModel: pairResponse.macModel ?? pairResponse.macDeviceModel ?? ""
             )
-            print("[RokuricsPairing] pairing success: deviceIDPrefix=\(result.deviceIDPrefix), secretPrefix=\(result.secretPrefix)")
+            print("[RokuricsPairing] pairing success: deviceIDPrefix=\(result.deviceIDPrefix)")
             return result
         } catch {
             if let pinningError = pinnedSession.context.currentPinningError {
@@ -300,6 +296,39 @@ final class SecureMacUploadClient: ObservableObject {
             print("[RokuricsSecureUpload] errors: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    func sendDeviceStatus(settings: SecureMacConnectionSnapshot, statusRequest: DeviceStatusRequest) async throws -> DeviceStatusResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/device/status",
+            body: statusRequest,
+            requestTimeout: 5,
+            resourceTimeout: 8
+        )
+    }
+
+    func fetchStudyLibraryManifest(settings: SecureMacConnectionSnapshot) async throws -> StudyLibrarySyncManifestResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/manifest",
+            body: SyncEmptyRequest(),
+            requestTimeout: 10,
+            resourceTimeout: 20
+        )
+    }
+
+    func applyStudyLibraryManifest(
+        settings: SecureMacConnectionSnapshot,
+        manifest: StudyLibrarySyncManifest
+    ) async throws -> StudyLibrarySyncManifestResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/apply",
+            body: StudyLibrarySyncManifestRequest(manifest: manifest),
+            requestTimeout: 15,
+            resourceTimeout: 30
+        )
     }
 
     func uploadSignedData(
@@ -473,6 +502,99 @@ final class SecureMacUploadClient: ObservableObject {
         let delegate: PinnedURLSessionDelegate
     }
 
+    private struct SyncEmptyRequest: Encodable {}
+
+    func prepareSignedJSONRequest<Body: Encodable>(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        body: Body,
+        now: Date = Date()
+    ) throws -> SecureUploadPreparedRequest {
+        guard settings.isPaired else {
+            throw SecureMacUploadError.notPaired
+        }
+
+        let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
+        let bodyData = try Self.jsonEncoder.encode(body)
+        let bodySHA256 = SecureUploadUtilities.sha256Hex(bodyData)
+        let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
+        let nonce = SecureUploadUtilities.randomBase64URLToken()
+        let signaturePayload = [
+            "POST",
+            path,
+            timestamp,
+            nonce,
+            bodySHA256
+        ].joined(separator: "\n")
+
+        guard let signature = SecureUploadUtilities.hmacSHA256Base64URL(
+            message: signaturePayload,
+            secretBase64URL: settings.sharedSecretBase64URL
+        ) else {
+            throw SecureMacUploadError.invalidSecret
+        }
+
+        let headers = [
+            "Content-Type": "application/json",
+            "X-Rokurics-Device-ID": settings.deviceID,
+            "X-Rokurics-Timestamp": timestamp,
+            "X-Rokurics-Nonce": nonce,
+            "X-Rokurics-Body-SHA256": bodySHA256,
+            "X-Rokurics-Signature": signature
+        ]
+
+        return SecureUploadPreparedRequest(url: url, body: bodyData, headers: headers)
+    }
+
+    private func postSignedJSON<Body: Encodable, Response: Decodable>(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        body: Body,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
+        let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
+        let preparedRequest = try prepareSignedJSONRequest(settings: settings, path: path, body: body)
+        let pinnedSession = makePinnedSession(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: nil,
+            requestTimeout: requestTimeout,
+            resourceTimeout: resourceTimeout
+        )
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: preparedRequest.url)
+        request.httpMethod = "POST"
+        preparedRequest.headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        print("[RokuricsSync] POST \(path), bodySize=\(preparedRequest.body.count), deviceIDPrefix=\(String(settings.deviceID.prefix(12)))")
+
+        do {
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: preparedRequest.body)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("[RokuricsSync] response status code: \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                throw SecureMacUploadError.serverRejected(Self.serverErrorMessage(from: data) ?? "sync_request_failed")
+            }
+
+            do {
+                return try Self.jsonDecoder.decode(Response.self, from: data)
+            } catch {
+                throw SecureMacUploadError.invalidResponse
+            }
+        } catch {
+            if let pinningError = pinnedSession.context.currentPinningError {
+                throw pinningError
+            }
+            throw error
+        }
+    }
+
     private func makePinnedSession(
         expectedFingerprint: String,
         diagnostics: ((String) -> Void)?,
@@ -523,6 +645,26 @@ final class SecureMacUploadClient: ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return "rokurics_secure_test_\(formatter.string(from: createdAt)).json"
     }
+
+    private static func serverErrorMessage(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object["error"] as? String
+    }
+
+    private static let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    private static let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
 
     private func mapHealthCheckError(_ error: Error, context: PinnedRequestContext) -> Error {
         if let secureError = error as? SecureMacUploadError {

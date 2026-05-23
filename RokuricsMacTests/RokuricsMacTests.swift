@@ -1489,7 +1489,9 @@ struct RokuricsMacTests {
         let transcriptText = try String(contentsOf: repoURL.appendingPathComponent("RokuricsMac/MacAudioInboxView.swift"), encoding: .utf8)
         let noteText = try String(contentsOf: repoURL.appendingPathComponent("RokuricsMac/MacNoteDetailView.swift"), encoding: .utf8)
         #expect(transcriptText.contains("RokuricsDocumentPageHeader"))
+        #expect(transcriptText.contains("RokuricsInfoButton"))
         #expect(noteText.contains("RokuricsDocumentPageHeader"))
+        #expect(noteText.contains("RokuricsInfoButton"))
     }
 
     @Test func fileRevealServiceRevealsFilesAndOpensFolders() throws {
@@ -1524,8 +1526,9 @@ struct RokuricsMacTests {
         #expect(state.browsePath.components == ["数学", "线性代数", "Ch1"])
     }
 
-    @Test func systemFolderIconProviderUsesMacOSFolderFileType() {
-        #expect(MacSystemFolderIconProvider.folderFileType == "public.folder")
+    @Test func sharedFolderTileUsesSharedFolderAccentPalette() {
+        #expect(StudyFolderColorToken.blue.sharedAccentColor != nil)
+        #expect(StudyFolderColorToken.default.sharedAccentColor == nil)
     }
 
     @Test func folderContextMenuUsesFinderLikeActionAndTwoColorRows() {
@@ -1565,10 +1568,11 @@ struct RokuricsMacTests {
         内容
         """
 
-        let defaultText = RokuricsDocumentDisplayRows.noteInfoRows(item: item, markdown: markdown, receiveRecord: nil)
+        let metadata = StudyItemMetadata.defaultMetadata(for: item)
+        let defaultText = StudyReadingMetadataRows.noteInfoRows(item: metadata, markdown: markdown, receiveRecord: nil)
             .map(\.value)
             .joined(separator: " ")
-        let advancedText = RokuricsDocumentDisplayRows.noteAdvancedRows(item: item, markdown: markdown, receiveRecord: nil)
+        let advancedText = StudyReadingMetadataRows.noteAdvancedRows(item: metadata, markdown: markdown, receiveRecord: nil)
             .map(\.value)
             .joined(separator: " ")
 
@@ -1595,10 +1599,11 @@ struct RokuricsMacTests {
         内容
         """
 
-        let defaultText = RokuricsDocumentDisplayRows.transcriptInfoRows(item: item, markdown: markdown, transcriptResult: nil)
+        let metadata = StudyItemMetadata.defaultMetadata(for: item)
+        let defaultText = StudyReadingMetadataRows.transcriptInfoRows(item: metadata, markdown: markdown, transcriptResult: nil, receiveRecord: nil)
             .map(\.value)
             .joined(separator: " ")
-        let advancedText = RokuricsDocumentDisplayRows.transcriptAdvancedRows(item: item, markdown: markdown, transcriptResult: nil, receiveRecord: nil)
+        let advancedText = StudyReadingMetadataRows.transcriptAdvancedRows(item: metadata, markdown: markdown, transcriptResult: nil, receiveRecord: nil)
             .map(\.value)
             .joined(separator: " ")
 
@@ -1622,10 +1627,11 @@ struct RokuricsMacTests {
             completedAt: Date(timeIntervalSince1970: 2),
             status: "transcribed"
         )
-        let rows = RokuricsDocumentDisplayRows.transcriptInfoRows(
-            item: item,
+        let rows = StudyReadingMetadataRows.transcriptInfoRows(
+            item: StudyItemMetadata.defaultMetadata(for: item),
             markdown: "## Transcript\n正文",
-            transcriptResult: result
+            transcriptResult: result,
+            receiveRecord: nil
         )
         let text = rows.map { "\($0.label)=\($0.value)" }.joined(separator: " ")
 
@@ -1638,8 +1644,8 @@ struct RokuricsMacTests {
 
     @Test func noteInfoPanelRowsContainReadableGenerationMetadata() {
         let item = makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil)
-        let rows = RokuricsDocumentDisplayRows.noteInfoRows(
-            item: item,
+        let rows = StudyReadingMetadataRows.noteInfoRows(
+            item: StudyItemMetadata.defaultMetadata(for: item),
             markdown: "> Provider: mockNoteGenerationProvider\n> Model: mock-note-local\n\n## 基本信息\n- 生成时间：2026-05-19 20:00\n\n## 摘要\n摘要",
             receiveRecord: nil
         )
@@ -1685,8 +1691,12 @@ struct RokuricsMacTests {
             noteRelativePath: "notes/2026-05-16/recording-01/note.md"
         )
 
-        let defaultText = MacStudyRecordingDetailDisplayModel.defaultSummaryTexts(for: item).joined(separator: " ")
-        let advancedText = MacStudyRecordingDetailDisplayModel.advancedFileStatusRows(for: item)
+        let rows = StudyRecordingFileStatusRows.rows(for: StudyItemMetadata.defaultMetadata(for: item))
+        let defaultText = rows
+            .filter { !$0.isTechnical }
+            .map(\.value)
+            .joined(separator: " ")
+        let advancedText = rows
             .map(\.value)
             .joined(separator: " ")
 
@@ -1710,7 +1720,8 @@ struct RokuricsMacTests {
 
     @Test func sidebarDoesNotContainTopLevelNotesItem() {
         #expect(!MacSidebarItem.allCases.map(\.title).contains("笔记"))
-        #expect(MacSidebarItem.allCases.map(\.title) == ["仪表盘", "iPhone 连接", "学习库", "AI 对话"])
+        #expect(!MacSidebarItem.allCases.map(\.title).contains("仪表盘"))
+        #expect(MacSidebarItem.allCases.map(\.title) == ["学习库", "AI 对话", "iPhone 连接"])
     }
 
     @Test func temporaryDebugMarkersAreRemovedFromPrimaryUIFiles() throws {

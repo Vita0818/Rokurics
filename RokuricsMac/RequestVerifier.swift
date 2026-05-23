@@ -39,6 +39,26 @@ final class RequestVerifier {
             maxBodyBytes: MacRecordingFileStore.audioMaxBytes,
             allowedContentTypePrefixes: ["audio/mp4", "audio/m4a", "application/octet-stream"],
             requiredUploadType: "recording-audio"
+        ),
+        "/device/status": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/status": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/manifest": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/apply": PathRule(
+            maxBodyBytes: 4 * 1024 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
         )
     ]
 

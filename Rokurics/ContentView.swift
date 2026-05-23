@@ -10,12 +10,14 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var recordingManager = RecordingManager()
     @StateObject private var macConnectionStore = SecureMacConnectionStore()
+    @StateObject private var userProfileStore = UserProfileStore()
 
     var body: some View {
         NavigationStack {
             RokuricsHomeView(
                 recordingManager: recordingManager,
-                macConnectionStore: macConnectionStore
+                macConnectionStore: macConnectionStore,
+                userProfileStore: userProfileStore
             )
         }
     }

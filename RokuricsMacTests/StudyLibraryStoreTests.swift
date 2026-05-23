@@ -1080,6 +1080,195 @@ struct StudyLibraryStoreTests {
         #expect(after.transcriptMarkdownRelativePath == before.transcriptMarkdownRelativePath)
     }
 
+    @MainActor
+    @Test func syncManifestEndpointRejectsUnpairedDevice() {
+        let body = Data("{}".utf8)
+        let bodyHash = MacSecurityUtilities.sha256Hex(body)
+        let timestamp = "1000"
+        let nonce = "nonce-sync-unpaired"
+        let headers = [
+            "Content-Type": "application/json",
+            "X-Rokurics-Device-ID": "unknown-device",
+            "X-Rokurics-Timestamp": timestamp,
+            "X-Rokurics-Nonce": nonce,
+            "X-Rokurics-Body-SHA256": bodyHash,
+            "X-Rokurics-Signature": "signature"
+        ]
+        let verifier = RequestVerifier(pairedDeviceProvider: { _ in nil })
+
+        let result = verifier.verify(
+            method: "POST",
+            path: "/sync/manifest",
+            headers: headers,
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        guard case .rejected(let reason) = result else {
+            Issue.record("Expected unpaired sync request to be rejected")
+            return
+        }
+        #expect(reason == "unknown_device")
+    }
+
+    @MainActor
+    @Test func syncManifestEndpointAcceptsSignedPairedDevice() throws {
+        let secret = Data("sync-secret".utf8).base64URLEncodedString()
+        let device = PairedDevice(
+            id: "device-sync-01",
+            deviceName: "Vita iPhone",
+            sharedSecretBase64URL: secret,
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let body = Data("{}".utf8)
+        let bodyHash = MacSecurityUtilities.sha256Hex(body)
+        let timestamp = "1000"
+        let nonce = "nonce-sync-accepted"
+        let payload = ["POST", "/sync/manifest", timestamp, nonce, bodyHash].joined(separator: "\n")
+        let signature = try #require(MacSecurityUtilities.hmacSHA256Base64URL(message: payload, secretBase64URL: secret))
+        let headers = [
+            "Content-Type": "application/json",
+            "X-Rokurics-Device-ID": device.id,
+            "X-Rokurics-Timestamp": timestamp,
+            "X-Rokurics-Nonce": nonce,
+            "X-Rokurics-Body-SHA256": bodyHash,
+            "X-Rokurics-Signature": signature
+        ]
+        let verifier = RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil })
+
+        let result = verifier.verify(
+            method: "POST",
+            path: "/sync/manifest",
+            headers: headers,
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        guard case .accepted(let acceptedDevice) = result else {
+            Issue.record("Expected signed sync request to be accepted")
+            return
+        }
+        #expect(acceptedDevice.id == device.id)
+    }
+
+    @Test func macAppliesIPhoneMetadataOnlyRecordingWithoutPretendingAudioExists() throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+        let remoteItem = StudyItemMetadata(
+            recordingID: "iphone-new-metadata",
+            title: "iPhone 新录音",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 32,
+            audioRelativePath: "Recordings/iphone-new-metadata.m4a",
+            studyFiling: StudyFilingPath(type: "课堂", subject: "物理"),
+            updatedAt: Date(timeIntervalSince1970: 2_100),
+            transcriptionStatus: "notStarted",
+            noteStatus: "notStarted"
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_101),
+            items: [remoteItem],
+            folders: []
+        )
+
+        let result = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let synced = try #require(store.item(recordingID: "iphone-new-metadata"))
+
+        #expect(result.appliedItemCount == 1)
+        #expect(synced.title == "iPhone 新录音")
+        #expect(synced.customProperties["syncedMetadataOnly"] == "true")
+        #expect(!synced.asInboxItem().hasAudio)
+    }
+
+    @Test func macSyncLastWriteWinsForFilingAndKeepsFolderIndexSafe() throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        try saveInboxRecording(
+            id: "sync-filing-lww",
+            title: "旧归档",
+            store: fileStore,
+            studyFiling: StudyFilingPath(type: "课堂", subject: "数学")
+        )
+        let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+        let existing = try #require(store.item(recordingID: "sync-filing-lww"))
+        var remote = existing
+        remote.filing = StudyFilingPath(type: "复习", subject: "线性代数", chapter: "矩阵")
+        remote.folderIDs = StudyItemMetadata.defaultFolderIDs(for: remote.filing)
+        remote.updatedAt = existing.updatedAt.addingTimeInterval(60)
+        remote.modifiedByDeviceID = "iphone-device"
+        let folder = StudyFolderMetadata(
+            name: "矩阵",
+            level: .chapter,
+            path: remote.filing,
+            itemIDs: [remote.itemID],
+            updatedAt: remote.updatedAt
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: remote.updatedAt.addingTimeInterval(1),
+            items: [remote],
+            folders: [folder]
+        )
+
+        _ = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let synced = try #require(store.item(recordingID: "sync-filing-lww"))
+        let syncedFolder = try #require(store.folder(folderID: remote.folderIDs[0]))
+
+        #expect(synced.filing.subject == "线性代数")
+        #expect(syncedFolder.itemIDs.contains(remote.itemID))
+    }
+
+    @Test func syncManifestMissingPendingUploadsDecodesAsEmpty() throws {
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_200),
+            items: [],
+            folders: []
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: try Self.encoder.encode(manifest)) as? [String: Any])
+        object.removeValue(forKey: "pendingUploads")
+        let data = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try Self.decoder.decode(StudyLibrarySyncManifest.self, from: data)
+
+        #expect(decoded.pendingUploads.isEmpty)
+        #expect(decoded.hasValidChecksum)
+    }
+
+    @Test func deleteMetadataOnlyTombstoneDoesNotDeleteMacAudioFile() throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let recordingDirectoryURL = try saveInboxRecording(id: "delete-metadata-only", title: "只删 metadata", store: fileStore)
+        let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false)
+        let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+        let item = try #require(store.item(recordingID: "delete-metadata-only"))
+        let tombstone = StudyLibrarySyncTombstone(
+            id: "item:\(item.itemID)",
+            entityKind: .item,
+            entityID: item.itemID,
+            operation: .deleteMetadataOnly,
+            updatedAt: item.updatedAt.addingTimeInterval(20),
+            modifiedByDeviceID: "iphone-device"
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_300),
+            items: [],
+            folders: [],
+            tombstones: [tombstone]
+        )
+
+        let result = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let synced = try #require(store.item(recordingID: "delete-metadata-only"))
+
+        #expect(result.tombstoneCount == 1)
+        #expect(synced.isTrashed)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
     private static func makeFilteredCandidateItems() -> [StudyItemMetadata] {
         [
             StudyItemMetadata(

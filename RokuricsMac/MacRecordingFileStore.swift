@@ -115,11 +115,7 @@ final class MacRecordingFileStore {
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
         } else {
-            let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? fileManager.temporaryDirectory
-            self.rootURL = applicationSupportURL
-                .appendingPathComponent("Rokurics", isDirectory: true)
-                .standardizedFileURL
+            self.rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         }
         audioInboxURL = self.rootURL
             .appendingPathComponent("audio", isDirectory: true)

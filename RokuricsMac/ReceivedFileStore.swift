@@ -30,7 +30,7 @@ enum ReceivedFileStoreError: LocalizedError {
 }
 
 final class ReceivedFileStore {
-    static let displayPath = "~/Rokurics/test-uploads/ 或 App Support/Rokurics/test-uploads/"
+    static let displayPath = "~/Rokurics/test-uploads/ 或 App Support/\(MacAppStorageProfile.applicationSupportFolderName)/test-uploads/"
 
     private let fileManager: FileManager
     private let preferredDirectoryURL: URL
@@ -43,10 +43,7 @@ final class ReceivedFileStore {
             .appendingPathComponent("Rokurics", isDirectory: true)
             .appendingPathComponent("test-uploads", isDirectory: true)
             .standardizedFileURL
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        fallbackDirectoryURL = applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
+        fallbackDirectoryURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
             .appendingPathComponent("test-uploads", isDirectory: true)
             .standardizedFileURL
         directoryURL = preferredDirectoryURL

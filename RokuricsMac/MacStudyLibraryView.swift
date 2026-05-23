@@ -873,14 +873,12 @@ enum MacSystemFolderIconProvider {
 }
 
 enum MacFolderContextMenuModel {
-    static let primaryActionTitles = ["重命名", "移入废纸篓"]
-    static let colorTokens = StudyFolderColorToken.finderPalette
-    static let colorColumnsPerRow = 6
+    static let primaryActionTitles = StudyFolderMenuModel.primaryActionTitles
+    static let colorTokens = StudyFolderMenuModel.colorTokens
+    static let colorColumnsPerRow = StudyFolderMenuModel.colorColumnsPerRow
 
     static var colorRows: [[StudyFolderColorToken]] {
-        stride(from: 0, to: colorTokens.count, by: colorColumnsPerRow).map { startIndex in
-            Array(colorTokens[startIndex..<min(startIndex + colorColumnsPerRow, colorTokens.count)])
-        }
+        StudyFolderMenuModel.colorRows
     }
 }
 
@@ -998,8 +996,8 @@ private struct MacStudyFolderContextMenuPopover: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
-                MacFolderContextActionButton(title: "重命名", role: nil, action: onRename)
-                MacFolderContextActionButton(title: "移入废纸篓", role: .destructive, action: onMoveToTrash)
+                MacFolderContextActionButton(title: MacFolderContextMenuModel.primaryActionTitles[0], role: nil, action: onRename)
+                MacFolderContextActionButton(title: MacFolderContextMenuModel.primaryActionTitles[1], role: .destructive, action: onMoveToTrash)
             }
 
             VStack(spacing: 8) {

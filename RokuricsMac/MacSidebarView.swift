@@ -15,7 +15,7 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
     case aiChat
 
     static var allCases: [MacSidebarItem] {
-        [.dashboard, .iPhoneConnection, .studyLibrary, .aiChat]
+        [.studyLibrary, .aiChat, .iPhoneConnection]
     }
 
     var id: String { rawValue }

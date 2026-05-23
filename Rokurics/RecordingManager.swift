@@ -50,25 +50,42 @@ final class RecordingManager: ObservableObject {
     @Published private(set) var pendingTitle: String?
 
     private let fileStore: AudioFileStore
+    let studyLibraryStore: StudyLibraryStore
     private var audioRecorder: AVAudioRecorder?
     private var activeRecordingURL: URL?
     private var recordingStartedAt: Date?
     private var timer: Timer?
     private var activeSettingsName: String?
     private var pendingRecordingSave: PendingRecordingSave?
+    private let liveActivityController = RecordingLiveActivityController()
+    private var elapsedRefreshCadence: ElapsedRefreshCadence = .normal
+    private var shouldResumeAfterInterruption = false
+    private var audioSessionInterruptionObserver: NSObjectProtocol?
+    private var mediaServicesResetObserver: NSObjectProtocol?
 
     init() {
-        self.fileStore = AudioFileStore()
+        let fileStore = AudioFileStore()
+        self.fileStore = fileStore
+        self.studyLibraryStore = StudyLibraryStore(audioFileStore: fileStore)
         loadExistingRecordings()
+        observeAudioSessionNotifications()
     }
 
     init(fileStore: AudioFileStore) {
         self.fileStore = fileStore
+        self.studyLibraryStore = StudyLibraryStore(audioFileStore: fileStore)
         loadExistingRecordings()
+        observeAudioSessionNotifications()
     }
 
     deinit {
         timer?.invalidate()
+        if let audioSessionInterruptionObserver {
+            NotificationCenter.default.removeObserver(audioSessionInterruptionObserver)
+        }
+        if let mediaServicesResetObserver {
+            NotificationCenter.default.removeObserver(mediaServicesResetObserver)
+        }
     }
 
     func toggleRecording() {
@@ -92,6 +109,7 @@ final class RecordingManager: ObservableObject {
             return
         }
 
+        studyLibraryStore.refresh()
         cleanupRecorderOnly()
         lastErrorMessage = nil
         elapsedSeconds = 0
@@ -125,6 +143,13 @@ final class RecordingManager: ObservableObject {
         elapsedSeconds = recorder.currentTime > 0 ? recorder.currentTime : elapsedSeconds
         state = .paused
         statusMessage = "已暂停"
+        liveActivityController.update(
+            title: activeLiveActivityTitle,
+            elapsedSeconds: elapsedSeconds,
+            isPaused: true,
+            isSavingLocally: false,
+            force: true
+        )
         log("recording paused. currentTime=\(recorder.currentTime)")
     }
 
@@ -151,6 +176,13 @@ final class RecordingManager: ObservableObject {
         state = .recording
         statusMessage = "正在录音"
         startTimer()
+        liveActivityController.update(
+            title: activeLiveActivityTitle,
+            elapsedSeconds: elapsedSeconds,
+            isPaused: false,
+            isSavingLocally: false,
+            force: true
+        )
     }
 
     func reloadRecordings() {
@@ -164,7 +196,7 @@ final class RecordingManager: ObservableObject {
     }
 
     var filingCandidates: StudyFilingCandidates {
-        StudyFilingCandidates.collect(from: recordings)
+        studyLibraryStore.filingCandidates
     }
 
     func updateUploadStatus(recordingID: String, status: RecordingUploadStatus) throws {
@@ -199,6 +231,7 @@ final class RecordingManager: ObservableObject {
 
         do {
             let updated = try fileStore.updateTitle(recordingID: recordingID, rawTitle: title)
+            try studyLibraryStore.upsertRecordingMetadata(updated)
             replaceRecordingInMemory(updated)
             lastErrorMessage = nil
             statusMessage = Self.recentRecordingStatusMessage(for: updated, prefix: "已重命名")
@@ -217,6 +250,7 @@ final class RecordingManager: ObservableObject {
             let trashedMetadata = try fileStore.moveRecordingToTrash(metadata)
             recordings.removeAll { $0.id == recordingID }
             replaceTrashedRecordingInMemory(trashedMetadata)
+            studyLibraryStore.refresh()
             refreshLatestRecordingAfterDeletion()
             lastErrorMessage = nil
             log("moved recording to trash: \(recordingID)")
@@ -230,6 +264,7 @@ final class RecordingManager: ObservableObject {
         do {
             let restoredMetadata = try fileStore.restoreRecording(id: recordingID)
             trashedRecordings.removeAll { $0.id == recordingID }
+            try studyLibraryStore.upsertRecordingMetadata(restoredMetadata)
             replaceRecordingInMemory(restoredMetadata)
             latestRecordingMetadata = recordings.first
             lastErrorMessage = nil
@@ -246,6 +281,7 @@ final class RecordingManager: ObservableObject {
             try fileStore.permanentlyDeleteRecording(id: recordingID)
             recordings.removeAll { $0.id == recordingID }
             trashedRecordings.removeAll { $0.id == recordingID }
+            studyLibraryStore.refresh()
             refreshLatestRecordingAfterDeletion()
             lastErrorMessage = nil
             log("permanently deleted recording: \(recordingID)")
@@ -270,6 +306,25 @@ final class RecordingManager: ObservableObject {
         log("pending title updated")
     }
 
+    func setLowPowerElapsedRefreshEnabled(_ isEnabled: Bool) {
+        let newCadence: ElapsedRefreshCadence = isEnabled ? .lowPowerMinute : .normal
+        guard elapsedRefreshCadence != newCadence else {
+            return
+        }
+
+        elapsedRefreshCadence = newCadence
+        guard state == .recording else {
+            return
+        }
+
+        refreshElapsedTime()
+        startTimer()
+    }
+
+    func refreshElapsedNow() {
+        refreshElapsedTime()
+    }
+
     func stopRecording() {
         guard state == .recording || state == .paused else {
             log("stop ignored. state=\(state)")
@@ -292,6 +347,11 @@ final class RecordingManager: ObservableObject {
         log("stopRecording begin. currentTime=\(recorder.currentTime), isRecording=\(recorder.isRecording)")
         recorder.stop()
         audioRecorder = nil
+        liveActivityController.end(
+            title: activeLiveActivityTitle,
+            elapsedSeconds: finalDuration,
+            isSavingLocally: true
+        )
         deactivateAudioSession()
 
         guard let fileURL = activeRecordingURL else {
@@ -357,6 +417,7 @@ final class RecordingManager: ObservableObject {
                 studyFiling: directSave ? nil : resolvedFiling
             )
             try fileStore.saveMetadata(metadata)
+            try studyLibraryStore.upsertRecordingMetadata(metadata)
             recordings = [metadata] + recordings.filter { $0.id != metadata.id }
             trashedRecordings.removeAll { $0.id == metadata.id }
             latestRecordingMetadata = metadata
@@ -392,6 +453,7 @@ final class RecordingManager: ObservableObject {
 
         let updated = existing.updatingStudyFiling(studyFiling)
         try fileStore.updateMetadata(updated)
+        try studyLibraryStore.updateFiling(for: recordingID, studyFiling: studyFiling)
         replaceRecordingInMemory(updated)
     }
 
@@ -469,6 +531,7 @@ final class RecordingManager: ObservableObject {
             state = .recording
             statusMessage = "正在录音"
             startTimer()
+            liveActivityController.start(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
             log("recording started with \(activeSettingsName ?? "unknown") settings")
         } catch {
             fail("录音启动失败：\(error.localizedDescription)", error: error)
@@ -479,7 +542,7 @@ final class RecordingManager: ObservableObject {
         let session = AVAudioSession.sharedInstance()
 
         do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
             log("setCategory succeeded: \(session.category.rawValue), mode=\(session.mode.rawValue)")
         } catch {
             errorLog("setCategory failed: \(error.localizedDescription)")
@@ -538,6 +601,7 @@ final class RecordingManager: ObservableObject {
             recordings = loadedRecordings
             trashedRecordings = loadedTrashedRecordings
             latestRecordingMetadata = loadedRecordings.first
+            studyLibraryStore.refresh()
 
             if let latestRecordingMetadata {
                 elapsedSeconds = latestRecordingMetadata.duration
@@ -703,6 +767,7 @@ final class RecordingManager: ObservableObject {
 
     private func permissionDenied() {
         cleanupRecorderOnly()
+        liveActivityController.end(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
         pendingRecordingSave = nil
         pendingDefaultTitle = nil
         pendingTitle = nil
@@ -714,6 +779,7 @@ final class RecordingManager: ObservableObject {
     }
 
     private func fail(_ message: String, error: Error? = nil) {
+        liveActivityController.end(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
         cleanupRecorderOnly()
         deactivateAudioSession()
         state = .failed
@@ -758,9 +824,17 @@ final class RecordingManager: ObservableObject {
     private func startTimer() {
         stopTimer()
 
-        let timer = Timer(timeInterval: 0.25, repeats: true) { _ in
+        let timer = Timer(timeInterval: nextElapsedRefreshInterval(), repeats: elapsedRefreshCadence == .normal) { _ in
             Task { @MainActor [weak self] in
-                self?.refreshElapsedTime()
+                guard let self else {
+                    return
+                }
+
+                self.refreshElapsedTime()
+
+                if self.state == .recording && self.elapsedRefreshCadence == .lowPowerMinute {
+                    self.startTimer()
+                }
             }
         }
 
@@ -780,6 +854,12 @@ final class RecordingManager: ObservableObject {
 
         let recorderTime = audioRecorder?.currentTime ?? 0
         elapsedSeconds = recorderTime > 0 ? recorderTime : max(elapsedSeconds, secondsSinceRecordingStarted())
+        liveActivityController.update(
+            title: activeLiveActivityTitle,
+            elapsedSeconds: elapsedSeconds,
+            isPaused: false,
+            isSavingLocally: false
+        )
     }
 
     private func secondsSinceRecordingStarted() -> TimeInterval {
@@ -788,6 +868,99 @@ final class RecordingManager: ObservableObject {
         }
 
         return max(0, Date().timeIntervalSince(recordingStartedAt))
+    }
+
+    private var activeLiveActivityTitle: String {
+        let trimmedTitle = (pendingTitle ?? pendingDefaultTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "课堂录音" : trimmedTitle
+    }
+
+    private func nextElapsedRefreshInterval() -> TimeInterval {
+        switch elapsedRefreshCadence {
+        case .normal:
+            return 0.25
+        case .lowPowerMinute:
+            let currentSeconds = audioRecorder?.currentTime ?? max(elapsedSeconds, secondsSinceRecordingStarted())
+            let secondsIntoMinute = max(0, currentSeconds).truncatingRemainder(dividingBy: 60)
+            return max(0.5, 60 - secondsIntoMinute + 0.05)
+        }
+    }
+
+    private func observeAudioSessionNotifications() {
+        audioSessionInterruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: nil
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                self?.handleAudioSessionInterruption(notification)
+            }
+        }
+
+        mediaServicesResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleMediaServicesReset()
+            }
+        }
+    }
+
+    private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+
+        switch type {
+        case .began:
+            shouldResumeAfterInterruption = state == .recording
+            guard state == .recording else {
+                return
+            }
+
+            let recorderTime = audioRecorder?.currentTime ?? 0
+            elapsedSeconds = recorderTime > 0 ? recorderTime : max(elapsedSeconds, secondsSinceRecordingStarted())
+            audioRecorder?.pause()
+            stopTimer()
+            state = .paused
+            statusMessage = "已暂停"
+            liveActivityController.update(
+                title: activeLiveActivityTitle,
+                elapsedSeconds: elapsedSeconds,
+                isPaused: true,
+                isSavingLocally: false,
+                force: true
+            )
+            log("audio session interrupted; recording paused")
+        case .ended:
+            guard shouldResumeAfterInterruption else {
+                return
+            }
+
+            shouldResumeAfterInterruption = false
+            let optionValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionValue)
+            guard options.contains(.shouldResume), state == .paused else {
+                log("audio session interruption ended without automatic resume")
+                return
+            }
+
+            resumeRecording()
+            log("audio session interruption ended; recording resumed")
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleMediaServicesReset() {
+        guard state == .recording || state == .paused || state == .configuringSession else {
+            return
+        }
+
+        fail("录音被系统音频服务重置，请重新开始")
     }
 
     private func log(_ message: String) {
@@ -880,6 +1053,11 @@ private struct PendingRecordingSave {
     let duration: TimeInterval
     let settings: RecordingSettingsSummary
     let defaultTitle: String
+}
+
+private enum ElapsedRefreshCadence {
+    case normal
+    case lowPowerMinute
 }
 
 private enum RecordingManagerError: LocalizedError {

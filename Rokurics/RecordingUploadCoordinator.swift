@@ -37,35 +37,54 @@ final class RecordingUploadCoordinator: ObservableObject {
             return
         }
 
-        guard settings.isPaired else {
-            activeStatuses[metadata.id] = .failed
-            errorMessages[metadata.id] = RecordingUploadError.notPaired.localizedDescription
-            return
-        }
-
-        activeStatuses[metadata.id] = .uploading
-        errorMessages[metadata.id] = nil
-
         uploadTasks[metadata.id] = Task { [weak self, weak recordingManager] in
             guard let self, let recordingManager else {
                 return
             }
 
-            do {
-                try recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
-                _ = try await uploadClient.uploadRecording(metadata: metadata.updatingUploadStatus(.uploading), settings: settings)
-                try recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploaded)
-                activeStatuses[metadata.id] = nil
-                errorMessages[metadata.id] = nil
-            } catch is CancellationError {
-                activeStatuses[metadata.id] = nil
-            } catch {
-                try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
-                activeStatuses[metadata.id] = .failed
-                errorMessages[metadata.id] = error.localizedDescription
-            }
+            _ = await self.uploadAndWait(
+                metadata: metadata,
+                settings: settings,
+                recordingManager: recordingManager
+            )
+            self.uploadTasks[metadata.id] = nil
+        }
+    }
 
-            uploadTasks[metadata.id] = nil
+    @discardableResult
+    func uploadAndWait(
+        metadata: RecordingMetadata,
+        settings: SecureMacConnectionSnapshot,
+        recordingManager: RecordingManager
+    ) async -> RecordingUploadStatus {
+        if activeStatuses[metadata.id] == .uploading {
+            return .uploading
+        }
+
+        guard settings.isPaired else {
+            activeStatuses[metadata.id] = .failed
+            errorMessages[metadata.id] = RecordingUploadError.notPaired.localizedDescription
+            return .failed
+        }
+
+        activeStatuses[metadata.id] = .uploading
+        errorMessages[metadata.id] = nil
+
+        do {
+            try recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
+            _ = try await uploadClient.uploadRecording(metadata: metadata.updatingUploadStatus(.uploading), settings: settings)
+            try recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploaded)
+            activeStatuses[metadata.id] = nil
+            errorMessages[metadata.id] = nil
+            return .uploaded
+        } catch is CancellationError {
+            activeStatuses[metadata.id] = nil
+            return .localOnly
+        } catch {
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            activeStatuses[metadata.id] = .failed
+            errorMessages[metadata.id] = error.localizedDescription
+            return .failed
         }
     }
 }

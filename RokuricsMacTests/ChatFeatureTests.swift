@@ -11,9 +11,10 @@ import Testing
 
 struct ChatFeatureTests {
     @Test func sidebarContainsAIChatBesideCoreEntries() {
-        #expect(MacSidebarItem.allCases == [.dashboard, .iPhoneConnection, .studyLibrary, .aiChat])
+        #expect(MacSidebarItem.allCases == [.studyLibrary, .aiChat, .iPhoneConnection])
         #expect(MacSidebarItem.allCases.contains(.aiChat))
         #expect(!MacSidebarItem.allCases.contains(.audioInbox))
+        #expect(!MacSidebarItem.allCases.contains(.dashboard))
         #expect(MacSidebarItem.aiChat.title == "AI 对话")
     }
 
@@ -397,15 +398,15 @@ struct ChatFeatureTests {
         let evening = try Self.date(hour: 21, calendar: calendar)
         let lateNight = try Self.date(hour: 3, calendar: calendar)
 
-        #expect(MacAIChatGreeting.make(userName: "Ari", date: morning, calendar: calendar).text == "Ari，早上好！")
-        #expect(MacAIChatGreeting.make(userName: "Ari", date: afternoon, calendar: calendar).text == "Ari，下午好！")
-        #expect(MacAIChatGreeting.make(userName: "Ari", date: evening, calendar: calendar).text == "Ari，晚上好！")
-        #expect(MacAIChatGreeting.make(userName: "Ari", date: lateNight, calendar: calendar).text == "Ari，晚上好！")
+        #expect(ChatGreeting.make(userName: "Ari", defaultName: MacUserProfile.defaultDisplayName, date: morning, calendar: calendar).text == "Ari，早上好！")
+        #expect(ChatGreeting.make(userName: "Ari", defaultName: MacUserProfile.defaultDisplayName, date: afternoon, calendar: calendar).text == "Ari，下午好！")
+        #expect(ChatGreeting.make(userName: "Ari", defaultName: MacUserProfile.defaultDisplayName, date: evening, calendar: calendar).text == "Ari，晚上好！")
+        #expect(ChatGreeting.make(userName: "Ari", defaultName: MacUserProfile.defaultDisplayName, date: lateNight, calendar: calendar).text == "Ari，晚上好！")
     }
 
     @Test func emptyConversationGreetingUsesProfileDisplayName() {
         let profile = MacUserProfile(displayName: " Vivian ", handle: "vivian")
-        let greeting = MacAIChatGreeting.make(userName: profile.displayName, date: Date(timeIntervalSince1970: 0), calendar: .current)
+        let greeting = ChatGreeting.make(userName: profile.displayName, defaultName: MacUserProfile.defaultDisplayName, date: Date(timeIntervalSince1970: 0), calendar: .current)
 
         #expect(greeting.text.contains("Vivian"))
     }

@@ -212,11 +212,7 @@ final class NoteStore {
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
         } else {
-            let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? fileManager.temporaryDirectory
-            self.rootURL = applicationSupportURL
-                .appendingPathComponent("Rokurics", isDirectory: true)
-                .standardizedFileURL
+            self.rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         }
         notesURL = self.rootURL
             .appendingPathComponent("notes", isDirectory: true)

@@ -394,11 +394,7 @@ enum MacSettingsDetail: String, CaseIterable, Identifiable {
 
 enum MacSettingsStorageLocation {
     static func rootURL(fileManager: FileManager = .default) -> URL {
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        return applicationSupportURL
-            .appendingPathComponent("Rokurics", isDirectory: true)
-            .standardizedFileURL
+        MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
     }
 
     static func ensureRootExists(fileManager: FileManager = .default) throws -> URL {
