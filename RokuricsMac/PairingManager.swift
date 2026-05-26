@@ -57,7 +57,7 @@ final class PairingManager: ObservableObject {
 
         activeChallenge = challenge
         state = .pairing(code: code, expiresAt: expiresAt)
-        print("[RokuricsPairing] pairing code generated: \(code), expiresAt=\(expiresAt)")
+        print("[RokuricsPairing] pairing code generated: codeIssued=true, expiresAt=\(expiresAt)")
     }
 
     func invalidatePairing(reason: String = "invalidated") {

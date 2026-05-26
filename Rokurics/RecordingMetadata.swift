@@ -27,6 +27,11 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
     let noteStatus: String
     let tags: [String]
     let studyFiling: StudyFilingPath?
+    let uploadProgressFraction: Double?
+    let uploadProgressConfirmedBytes: Int64?
+    let uploadProgressTotalBytes: Int64?
+    let uploadPhase: String?
+    let uploadProgressDescription: String?
     let isDeleted: Bool
     let deletedAt: Date?
 
@@ -50,6 +55,11 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         noteStatus: String,
         tags: [String],
         studyFiling: StudyFilingPath? = nil,
+        uploadProgressFraction: Double? = nil,
+        uploadProgressConfirmedBytes: Int64? = nil,
+        uploadProgressTotalBytes: Int64? = nil,
+        uploadPhase: String? = nil,
+        uploadProgressDescription: String? = nil,
         isDeleted: Bool = false,
         deletedAt: Date? = nil
     ) {
@@ -72,6 +82,11 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         self.noteStatus = noteStatus
         self.tags = tags
         self.studyFiling = studyFiling?.isEmpty == true ? nil : studyFiling
+        self.uploadProgressFraction = uploadProgressFraction
+        self.uploadProgressConfirmedBytes = uploadProgressConfirmedBytes
+        self.uploadProgressTotalBytes = uploadProgressTotalBytes
+        self.uploadPhase = uploadPhase
+        self.uploadProgressDescription = uploadProgressDescription
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
     }
@@ -96,6 +111,11 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         case noteStatus
         case tags
         case studyFiling
+        case uploadProgressFraction
+        case uploadProgressConfirmedBytes
+        case uploadProgressTotalBytes
+        case uploadPhase
+        case uploadProgressDescription
         case isDeleted
         case deletedAt
     }
@@ -122,6 +142,11 @@ struct RecordingMetadata: Codable, Identifiable, Equatable {
         tags = try container.decode([String].self, forKey: .tags)
         let decodedStudyFiling = try container.decodeIfPresent(StudyFilingPath.self, forKey: .studyFiling)
         studyFiling = decodedStudyFiling?.isEmpty == true ? nil : decodedStudyFiling
+        uploadProgressFraction = try container.decodeIfPresent(Double.self, forKey: .uploadProgressFraction)
+        uploadProgressConfirmedBytes = try container.decodeIfPresent(Int64.self, forKey: .uploadProgressConfirmedBytes)
+        uploadProgressTotalBytes = try container.decodeIfPresent(Int64.self, forKey: .uploadProgressTotalBytes)
+        uploadPhase = try container.decodeIfPresent(String.self, forKey: .uploadPhase)
+        uploadProgressDescription = try container.decodeIfPresent(String.self, forKey: .uploadProgressDescription)
         isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
@@ -149,6 +174,11 @@ extension RecordingMetadata {
             noteStatus: noteStatus,
             tags: tags,
             studyFiling: studyFiling,
+            uploadProgressFraction: uploadProgressFraction,
+            uploadProgressConfirmedBytes: uploadProgressConfirmedBytes,
+            uploadProgressTotalBytes: uploadProgressTotalBytes,
+            uploadPhase: uploadPhase,
+            uploadProgressDescription: uploadProgressDescription,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )
@@ -175,9 +205,59 @@ extension RecordingMetadata {
             noteStatus: noteStatus,
             tags: tags,
             studyFiling: studyFiling,
+            uploadProgressFraction: uploadProgressFraction,
+            uploadProgressConfirmedBytes: uploadProgressConfirmedBytes,
+            uploadProgressTotalBytes: uploadProgressTotalBytes,
+            uploadPhase: uploadPhase,
+            uploadProgressDescription: uploadProgressDescription,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )
+    }
+
+    func updatingUploadProgress(
+        fraction: Double?,
+        confirmedBytes: Int64?,
+        totalBytes: Int64?,
+        phase: String?,
+        description: String?
+    ) -> RecordingMetadata {
+        RecordingMetadata(
+            id: id,
+            title: title,
+            fileName: fileName,
+            relativeAudioPath: relativeAudioPath,
+            relativeMetadataPath: relativeMetadataPath,
+            createdAt: createdAt,
+            endedAt: endedAt,
+            duration: duration,
+            format: format,
+            codec: codec,
+            sampleRate: sampleRate,
+            channels: channels,
+            bitrate: bitrate,
+            fileSize: fileSize,
+            uploadStatus: uploadStatus,
+            transcriptionStatus: transcriptionStatus,
+            noteStatus: noteStatus,
+            tags: tags,
+            studyFiling: studyFiling,
+            uploadProgressFraction: fraction,
+            uploadProgressConfirmedBytes: confirmedBytes,
+            uploadProgressTotalBytes: totalBytes,
+            uploadPhase: phase,
+            uploadProgressDescription: description,
+            isDeleted: isDeleted,
+            deletedAt: deletedAt
+        )
+    }
+
+    func recoveringStaleUploadingStatus() -> RecordingMetadata {
+        guard RecordingUploadStatus(rawMetadataValue: uploadStatus) == .uploading else {
+            return self
+        }
+
+        return updatingUploadStatus(.failed)
     }
 
     func updatingTrashState(isDeleted: Bool, deletedAt: Date?) -> RecordingMetadata {
@@ -201,6 +281,11 @@ extension RecordingMetadata {
             noteStatus: noteStatus,
             tags: tags,
             studyFiling: studyFiling,
+            uploadProgressFraction: uploadProgressFraction,
+            uploadProgressConfirmedBytes: uploadProgressConfirmedBytes,
+            uploadProgressTotalBytes: uploadProgressTotalBytes,
+            uploadPhase: uploadPhase,
+            uploadProgressDescription: uploadProgressDescription,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )
@@ -227,6 +312,11 @@ extension RecordingMetadata {
             noteStatus: noteStatus,
             tags: tags,
             studyFiling: studyFiling,
+            uploadProgressFraction: uploadProgressFraction,
+            uploadProgressConfirmedBytes: uploadProgressConfirmedBytes,
+            uploadProgressTotalBytes: uploadProgressTotalBytes,
+            uploadPhase: uploadPhase,
+            uploadProgressDescription: uploadProgressDescription,
             isDeleted: isDeleted,
             deletedAt: deletedAt
         )

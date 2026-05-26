@@ -35,16 +35,35 @@ struct SecureUploadResult {
 struct SecureUploadServerResponse: Decodable {
     let ok: Bool
     let message: String?
+    let disposition: String?
     let fileName: String?
     let recordingID: String?
     let metadataFileName: String?
     let audioFileName: String?
+    let receiveStatus: String?
+    let processingStatus: String?
     let error: String?
+    let reason: String?
 }
 
 struct SecureHTTPSHealthCheckResult {
     let statusCode: Int
     let body: String
+}
+
+struct ConnectionProbeRequest: Codable, Equatable {
+    var sequenceNumber: UInt64
+    var clientPayload: String
+    var sentAt: Date
+}
+
+struct ConnectionProbeResponse: Codable, Equatable {
+    var ok: Bool
+    var disposition: String
+    var receivedSequenceNumber: UInt64
+    var echoedClientPayload: String
+    var serverPayload: String
+    var serverTime: Date
 }
 
 enum SecureMacUploadError: LocalizedError {
@@ -308,6 +327,44 @@ final class SecureMacUploadClient: ObservableObject {
         )
     }
 
+    func sendLocalNetworkSyncDeviceStatus(settings: SecureMacConnectionSnapshot, statusRequest: DeviceStatusRequest) async throws -> DeviceStatusResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/device-status",
+            body: statusRequest,
+            requestTimeout: 5,
+            resourceTimeout: 8
+        )
+    }
+
+    func sendConnectionHeartbeat(
+        settings: SecureMacConnectionSnapshot,
+        request: ConnectionHeartbeatRequest,
+        requestTimeout: TimeInterval = 2
+    ) async throws -> ConnectionHeartbeatResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/connection/heartbeat",
+            body: request,
+            requestTimeout: requestTimeout,
+            resourceTimeout: max(requestTimeout, 3)
+        )
+    }
+
+    func sendConnectionProbe(
+        settings: SecureMacConnectionSnapshot,
+        request: ConnectionProbeRequest,
+        requestTimeout: TimeInterval = 2
+    ) async throws -> ConnectionProbeResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/connection/probe",
+            body: request,
+            requestTimeout: requestTimeout,
+            resourceTimeout: max(requestTimeout, 3)
+        )
+    }
+
     func fetchStudyLibraryManifest(settings: SecureMacConnectionSnapshot) async throws -> StudyLibrarySyncManifestResponse {
         try await postSignedJSON(
             settings: settings,
@@ -327,6 +384,49 @@ final class SecureMacUploadClient: ObservableObject {
             path: "/sync/apply",
             body: StudyLibrarySyncManifestRequest(manifest: manifest),
             requestTimeout: 15,
+            resourceTimeout: 30
+        )
+    }
+
+    func fetchLocalNetworkSyncInventory(
+        settings: SecureMacConnectionSnapshot,
+        localInventory: LocalNetworkSyncInventory
+    ) async throws -> LocalNetworkSyncInventoryResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/inventory",
+            body: LocalNetworkSyncInventoryRequest(
+                deviceID: localInventory.device.deviceID,
+                generatedAt: Date(),
+                localInventoryHash: localInventory.inventoryHash
+            ),
+            requestTimeout: 10,
+            resourceTimeout: 20
+        )
+    }
+
+    func applyLocalNetworkSyncMetadata(
+        settings: SecureMacConnectionSnapshot,
+        manifest: StudyLibrarySyncManifest
+    ) async throws -> StudyLibrarySyncManifestResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/apply-metadata",
+            body: StudyLibrarySyncManifestRequest(manifest: manifest),
+            requestTimeout: 15,
+            resourceTimeout: 30
+        )
+    }
+
+    func requestLocalNetworkSyncArtifact(
+        settings: SecureMacConnectionSnapshot,
+        artifactID: String
+    ) async throws -> LocalNetworkSyncArtifactResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/artifact-request",
+            body: LocalNetworkSyncArtifactRequest(artifactID: artifactID),
+            requestTimeout: 10,
             resourceTimeout: 30
         )
     }
@@ -494,6 +594,136 @@ final class SecureMacUploadClient: ObservableObject {
             print("[RokuricsRecordingUpload] errors: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    func startResumableAudioUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadStartRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/upload-recording-audio-session/start",
+            body: request,
+            requestTimeout: 15,
+            resourceTimeout: 30
+        )
+    }
+
+    func fetchResumableAudioUploadStatus(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadStatusRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/upload-recording-audio-session/status",
+            body: request,
+            requestTimeout: 10,
+            resourceTimeout: 20
+        )
+    }
+
+    func uploadResumableAudioChunk(
+        settings: SecureMacConnectionSnapshot,
+        recordingID: String,
+        sessionID: String,
+        offset: Int64,
+        totalSHA256: String,
+        chunk: Data
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        guard settings.isPaired else {
+            throw SecureMacUploadError.notPaired
+        }
+
+        let path = "/upload-recording-audio-session/chunk"
+        let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
+        let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
+        let now = Date()
+        let bodySHA256 = SecureUploadUtilities.sha256Hex(chunk)
+        let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
+        let nonce = SecureUploadUtilities.randomBase64URLToken()
+        let signaturePayload = [
+            "POST",
+            path,
+            timestamp,
+            nonce,
+            bodySHA256
+        ].joined(separator: "\n")
+
+        guard let signature = SecureUploadUtilities.hmacSHA256Base64URL(
+            message: signaturePayload,
+            secretBase64URL: settings.sharedSecretBase64URL
+        ) else {
+            throw SecureMacUploadError.invalidSecret
+        }
+
+        let pinnedSession = makePinnedSession(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: nil,
+            requestTimeout: 30,
+            resourceTimeout: 60
+        )
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(settings.deviceID, forHTTPHeaderField: "X-Rokurics-Device-ID")
+        request.setValue(timestamp, forHTTPHeaderField: "X-Rokurics-Timestamp")
+        request.setValue(nonce, forHTTPHeaderField: "X-Rokurics-Nonce")
+        request.setValue(bodySHA256, forHTTPHeaderField: "X-Rokurics-Body-SHA256")
+        request.setValue(signature, forHTTPHeaderField: "X-Rokurics-Signature")
+        request.setValue(recordingID, forHTTPHeaderField: "X-Rokurics-Recording-ID")
+        request.setValue("audio.m4a.part", forHTTPHeaderField: "X-Rokurics-Filename")
+        request.setValue("recording-audio-chunk", forHTTPHeaderField: "X-Rokurics-Upload-Type")
+        request.setValue(sessionID, forHTTPHeaderField: "X-Rokurics-Session-ID")
+        request.setValue(String(offset), forHTTPHeaderField: "X-Rokurics-Chunk-Offset")
+        request.setValue(String(chunk.count), forHTTPHeaderField: "X-Rokurics-Chunk-Length")
+        request.setValue(bodySHA256, forHTTPHeaderField: "X-Rokurics-Chunk-SHA256")
+        request.setValue(totalSHA256, forHTTPHeaderField: "X-Rokurics-Total-SHA256")
+
+        print("[RokuricsRecordingUpload] POST \(path), chunkSize=\(chunk.count), offset=\(offset), recordingIDPrefix=\(String(recordingID.prefix(12)))")
+
+        do {
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: chunk)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("[RokuricsRecordingUpload] chunk response status code: \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                throw SecureMacUploadError.serverRejected(Self.serverErrorMessage(from: data) ?? "resumable_chunk_failed")
+            }
+
+            do {
+                let uploadResponse = try Self.jsonDecoder.decode(ResumableAudioUploadSessionResponse.self, from: data)
+                guard uploadResponse.ok else {
+                    throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "resumable_chunk_failed")
+                }
+                return uploadResponse
+            } catch let error as SecureMacUploadError {
+                throw error
+            } catch {
+                throw SecureMacUploadError.invalidResponse
+            }
+        } catch {
+            if let pinningError = pinnedSession.context.currentPinningError {
+                throw pinningError
+            }
+            throw error
+        }
+    }
+
+    func finalizeResumableAudioUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadFinalizeRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/upload-recording-audio-session/finalize",
+            body: request,
+            requestTimeout: 15,
+            resourceTimeout: 60
+        )
     }
 
     private struct PinnedSession {

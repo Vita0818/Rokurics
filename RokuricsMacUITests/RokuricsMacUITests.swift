@@ -8,7 +8,6 @@
 import XCTest
 
 final class RokuricsMacUITests: XCTestCase {
-
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
 
@@ -19,7 +18,6 @@ final class RokuricsMacUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
     }
 
     @MainActor
@@ -39,5 +37,61 @@ final class RokuricsMacUITests: XCTestCase {
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             XCUIApplication().launch()
         }
+    }
+
+    @MainActor
+    func testIPhoneConnectionStartPairingPublishesCodeAndEnablesCopy() throws {
+        let app = makeIsolatedApp()
+        app.launch()
+
+        let sidebarButton = app.buttons["mac-sidebar-iphone-connection"]
+        XCTAssertTrue(sidebarButton.waitForExistence(timeout: 8), "iPhone connection sidebar button should exist")
+        sidebarButton.click()
+
+        let startButton = app.buttons["mac-iphone-start-pairing-button"]
+        XCTAssertTrue(startButton.waitForExistence(timeout: 8), "Start pairing button should exist in the real Mac UI")
+        XCTAssertTrue(startButton.isEnabled, "Start pairing button must be enabled in fresh unpaired UI state")
+        startButton.click()
+
+        let pairingCode = app.descendants(matching: .any)["mac-iphone-pairing-code"]
+        guard pairingCode.waitForExistence(timeout: 8) else {
+            XCTFail("Pairing code should be published into the real UI.\n\(app.debugDescription)")
+            return
+        }
+        let pairingCodeText = pairingCode.label.isEmpty ? (pairingCode.value as? String ?? "") : pairingCode.label
+        XCTAssertNotNil(
+            pairingCodeText.range(of: #"^\d{6}$"#, options: .regularExpression),
+            "Pairing code should be a six digit code"
+        )
+
+        let copyButton = app.buttons["mac-iphone-copy-pairing-info-button"]
+        XCTAssertTrue(copyButton.waitForExistence(timeout: 2), "Copy pairing info button should remain in the real UI")
+        XCTAssertTrue(copyButton.isEnabled, "Copy pairing info button should become enabled after payload publication")
+    }
+
+    private func makeIsolatedApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["ROKURICS_UI_TEST_MODE"] = "1"
+        app.launchEnvironment["ROKURICS_UI_TEST_STORAGE_NAMESPACE"] = UUID().uuidString
+        app.launchEnvironment["ROKURICS_UI_TEST_RECEIVER_PORT"] = "0"
+        app.launchEnvironment["ROKURICS_UI_TEST_HOST"] = "127.0.0.1"
+        return app
+    }
+
+    private func waitForDiagnostics(
+        at url: URL,
+        containing phases: [String],
+        timeout: TimeInterval = 6
+    ) throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8),
+               phases.allSatisfy({ text.contains($0) }) {
+                return text
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+
+        return try String(contentsOf: url, encoding: .utf8)
     }
 }

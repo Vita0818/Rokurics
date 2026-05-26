@@ -1152,6 +1152,44 @@ struct StudyLibraryStoreTests {
         #expect(acceptedDevice.id == device.id)
     }
 
+    @MainActor
+    @Test func uploadEndpointRejectsBadSignatureForPairedDevice() throws {
+        let secret = Data("sync-secret".utf8).base64URLEncodedString()
+        let device = PairedDevice(
+            id: "device-upload-01",
+            deviceName: "Vita iPhone",
+            sharedSecretBase64URL: secret,
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let body = Data("audio".utf8)
+        let bodyHash = MacSecurityUtilities.sha256Hex(body)
+        let headers = [
+            "Content-Type": "audio/m4a",
+            "X-Rokurics-Upload-Type": "recording-audio",
+            "X-Rokurics-Device-ID": device.id,
+            "X-Rokurics-Timestamp": "1000",
+            "X-Rokurics-Nonce": "nonce-upload-bad-signature",
+            "X-Rokurics-Body-SHA256": bodyHash,
+            "X-Rokurics-Signature": "bad-signature"
+        ]
+        let verifier = RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil })
+
+        let result = verifier.verify(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: headers,
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        guard case .rejected(let reason) = result else {
+            Issue.record("Expected bad signature to be rejected")
+            return
+        }
+        #expect(reason == "signature_mismatch")
+    }
+
     @Test func macAppliesIPhoneMetadataOnlyRecordingWithoutPretendingAudioExists() throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }

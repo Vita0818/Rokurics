@@ -405,6 +405,170 @@ struct StudyLibrarySyncTests {
         #expect(result.tombstoneCount == 1)
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
     }
+
+    @MainActor
+    @Test func localNetworkSyncInventoryRequiresPairedSignedRequest() throws {
+        let device = makePairedDevice(id: "sync-device-01")
+        let body = try JSONEncoder().encode(LocalNetworkSyncInventoryRequest(deviceID: "iphone-01", generatedAt: Date(timeIntervalSince1970: 1), localInventoryHash: nil))
+        let verifier = RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil })
+        let accepted = verifier.verify(
+            method: "POST",
+            path: "/sync/inventory",
+            headers: try signedSyncHeaders(device: device, path: "/sync/inventory", body: body, nonce: "nonce-inventory-good"),
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+        var badHeaders = try signedSyncHeaders(device: device, path: "/sync/inventory", body: body, nonce: "nonce-inventory-bad")
+        badHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badSignature = verifier.verify(method: "POST", path: "/sync/inventory", headers: badHeaders, body: body, now: Date(timeIntervalSince1970: 1_000))
+        let unpairedVerifier = RequestVerifier(pairedDeviceProvider: { _ in nil })
+        let unpaired = unpairedVerifier.verify(
+            method: "POST",
+            path: "/sync/inventory",
+            headers: try signedSyncHeaders(device: device, path: "/sync/inventory", body: body, nonce: "nonce-inventory-unpaired"),
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        if case .accepted = accepted {
+        } else {
+            Issue.record("Expected signed inventory request to be accepted")
+        }
+        if case .rejected("signature_mismatch") = badSignature {
+        } else {
+            Issue.record("Expected bad signature to be rejected")
+        }
+        if case .rejected("unknown_device") = unpaired {
+        } else {
+            Issue.record("Expected unpaired inventory request to be rejected")
+        }
+    }
+
+    @MainActor
+    @Test func localNetworkSyncInventoryReturnsReceiveAndTranscriptMetadataWithoutSecretsOrPaths() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try saveInboxRecording(id: "inventory-recording", title: "已转写", store: fileStore)
+        let transcriptRelativePath = "transcripts/inventory-recording/transcript.md"
+        let transcriptURL = appRootURL.appendingPathComponent(transcriptRelativePath, isDirectory: false)
+        try FileManager.default.createDirectory(at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("mac transcript".utf8).write(to: transcriptURL)
+        try fileStore.updateTranscriptionStatus(
+            recordingID: "inventory-recording",
+            status: "transcribed",
+            transcriptRelativePath: nil,
+            transcriptMarkdownRelativePath: transcriptRelativePath,
+            providerID: "whisper.cpp",
+            modelName: "small",
+            startedAt: nil,
+            completedAt: Date(timeIntervalSince1970: 2_000),
+            errorMessage: nil
+        )
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+
+        let response = server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice())
+        let inventory = try #require(response.inventory)
+        let encoded = String(data: try JSONEncoder().encode(inventory), encoding: .utf8) ?? ""
+
+        #expect(response.ok)
+        #expect(inventory.recordings.first { $0.recordingID == "inventory-recording" }?.receiveStatus == "completed")
+        #expect(inventory.artifacts.contains { $0.kind == .transcriptMarkdown && $0.logicalPathToken == transcriptRelativePath })
+        #expect(!encoded.contains(appRootURL.path))
+        #expect(!encoded.lowercased().contains("sharedsecret"))
+    }
+
+    @MainActor
+    @Test func localNetworkSyncArtifactRequestRejectsTraversalAndServesApprovedTranscript() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try saveInboxRecording(id: "artifact-recording", title: "Artifact", store: fileStore)
+        let transcriptRelativePath = "transcripts/artifact-recording/transcript.md"
+        let transcriptURL = appRootURL.appendingPathComponent(transcriptRelativePath, isDirectory: false)
+        try FileManager.default.createDirectory(at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("approved transcript".utf8).write(to: transcriptURL)
+        try fileStore.updateTranscriptionStatus(
+            recordingID: "artifact-recording",
+            status: "transcribed",
+            transcriptRelativePath: nil,
+            transcriptMarkdownRelativePath: transcriptRelativePath,
+            providerID: "whisper.cpp",
+            modelName: "small",
+            startedAt: nil,
+            completedAt: Date(timeIntervalSince1970: 2_000),
+            errorMessage: nil
+        )
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let inventory = try #require(server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice()).inventory)
+        let artifact = try #require(inventory.artifacts.first { $0.kind == .transcriptMarkdown })
+        let requestBody = try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: artifact.artifactID))
+
+        let response = server.localNetworkSyncArtifactResponseForVerifiedDevice(makePairedDevice(), requestBody: requestBody)
+        let traversal = server.localNetworkSyncArtifactResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: "../secret"))
+        )
+        let unknown = server.localNetworkSyncArtifactResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "missing", logicalPathToken: "transcripts/missing.md")))
+        )
+
+        let expectedChecksum = try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: transcriptURL)
+
+        #expect(response.ok)
+        #expect(response.checksum == expectedChecksum)
+        #expect(response.size == Int64(Data("approved transcript".utf8).count))
+        #expect(String(data: Data(base64Encoded: try #require(response.dataBase64)) ?? Data(), encoding: .utf8) == "approved transcript")
+        #expect(!traversal.ok)
+        #expect(traversal.error == "invalid_artifact_id")
+        #expect(!unknown.ok)
+        #expect(unknown.error == "artifact_not_found")
+    }
+
+    @MainActor
+    @Test func localNetworkSyncApplyMetadataMergesStudyMetadataWithoutTouchingAudio() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        let recordingDirectory = try saveInboxRecording(id: "apply-metadata-recording", title: "旧标题", store: fileStore)
+        let audioURL = recordingDirectory.appendingPathComponent("audio.m4a", isDirectory: false)
+        let studyStore = StudyLibraryStore(rootURL: appRootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+        var item = try #require(studyStore.item(recordingID: "apply-metadata-recording"))
+        item.title = "同步后的标题"
+        item.updatedAt = item.updatedAt.addingTimeInterval(90)
+        item.modifiedByDeviceID = "iphone-01"
+        let manifest = StudyLibrarySyncManifest.make(deviceID: "iphone-01", items: [item], folders: [])
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let response = try server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: manifest))
+        )
+        let reloaded = StudyLibraryStore(rootURL: appRootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+
+        #expect(response.ok)
+        #expect(response.applyResult?.appliedItemCount == 1)
+        #expect(reloaded.item(recordingID: "apply-metadata-recording")?.title == "同步后的标题")
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
 }
 
 private func makeSyncManifest(recordingID: String) -> StudyLibrarySyncManifest {
@@ -542,6 +706,39 @@ private func makePairedDevice(id: String = "device-01") -> PairedDevice {
         pairedAt: Date(timeIntervalSince1970: 1_000),
         lastSeenAt: nil
     )
+}
+
+private func signedSyncHeaders(
+    device: PairedDevice,
+    path: String,
+    body: Data,
+    nonce: String
+) throws -> [String: String] {
+    let bodyHash = MacSecurityUtilities.sha256Hex(body)
+    let timestamp = "1000"
+    let payload = ["POST", path, timestamp, nonce, bodyHash].joined(separator: "\n")
+    let signature = try #require(MacSecurityUtilities.hmacSHA256Base64URL(
+        message: payload,
+        secretBase64URL: device.sharedSecretBase64URL
+    ))
+
+    return [
+        "Content-Type": "application/json",
+        "X-Rokurics-Device-ID": device.id,
+        "X-Rokurics-Timestamp": timestamp,
+        "X-Rokurics-Nonce": nonce,
+        "X-Rokurics-Body-SHA256": bodyHash,
+        "X-Rokurics-Signature": signature
+    ]
+}
+
+private extension JSONEncoder {
+    static var syncTestEncoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
 }
 
 private func makeScratchDirectory() throws -> URL {

@@ -16,14 +16,23 @@ final class DeviceConnectionStatusStore: ObservableObject {
     private let fileManager: FileManager
     private let storeURL: URL
     private let offlineThreshold: TimeInterval
+    private let staleAfter: TimeInterval
+    private let disconnectedAfter: TimeInterval
+    private let missedHeartbeatLimit: Int
 
     init(
         fileManager: FileManager = .default,
         rootURL: URL? = nil,
-        offlineThreshold: TimeInterval = 12
+        offlineThreshold: TimeInterval = 12,
+        staleAfter: TimeInterval = 6,
+        disconnectedAfter: TimeInterval = 10,
+        missedHeartbeatLimit: Int = 3
     ) {
         self.fileManager = fileManager
         self.offlineThreshold = offlineThreshold
+        self.staleAfter = staleAfter
+        self.disconnectedAfter = disconnectedAfter
+        self.missedHeartbeatLimit = missedHeartbeatLimit
         storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
             .appendingPathComponent("device-connection-status.json", isDirectory: false)
         load()
@@ -40,14 +49,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
             return nil
         }
 
-        if status.state == .connected,
-           let lastHeartbeatAt = status.lastHeartbeatAt,
-           now.timeIntervalSince(lastHeartbeatAt) > offlineThreshold {
-            status.state = .offline
-            status.lastError = status.lastError ?? "heartbeat_timeout"
-        }
-
-        return status
+        return evaluatedStatus(status, now: now)
     }
 
     @discardableResult
@@ -72,7 +74,11 @@ final class DeviceConnectionStatusStore: ObservableObject {
         )
         status.displayName = displayName
         status.state = .connecting
+        status.presenceState = .connecting
+        status.monitoringMode = .foregroundActive
         status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
         return status
@@ -100,9 +106,16 @@ final class DeviceConnectionStatusStore: ObservableObject {
         status.state = .connected
         status.lastSeenAt = now
         status.lastHeartbeatAt = now
+        status.presenceState = .online
+        status.monitoringMode = status.monitoringMode ?? .foregroundActive
+        status.lastSignedRequestSucceededAt = now
+        status.missedHeartbeatCount = 0
+        status.consecutiveFailureCount = 0
         status.lastSyncAt = lastSyncAt ?? status.lastSyncAt
         status.lastSyncStatus = lastSyncStatus ?? status.lastSyncStatus
         status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
         return status
@@ -122,7 +135,10 @@ final class DeviceConnectionStatusStore: ObservableObject {
         )
         status.displayName = displayName
         status.state = .offline
+        status.presenceState = .disconnected
         status.lastError = error
+        status.lastErrorCode = error
+        status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
         return status
@@ -154,7 +170,177 @@ final class DeviceConnectionStatusStore: ObservableObject {
             status.state = .connected
             status.lastSeenAt = date
             status.lastHeartbeatAt = date
+            status.lastSignedRequestSucceededAt = date
+            status.presenceState = .online
+            status.missedHeartbeatCount = 0
+            status.consecutiveFailureCount = 0
+            status.lastErrorCode = nil
+        } else {
+            status.presenceState = .disconnected
+            status.lastErrorCode = error
         }
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return status
+    }
+
+    @discardableResult
+    func markHeartbeatSent(
+        deviceID: String,
+        displayName: String,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connecting,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.state = status.presenceState == .online ? .connected : .connecting
+        status.presenceState = status.presenceState == .online ? .online : .connecting
+        status.monitoringMode = .foregroundActive
+        status.lastHeartbeatSentAt = now
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return status
+    }
+
+    @discardableResult
+    func recordHeartbeatSuccess(
+        deviceID: String,
+        displayName: String,
+        sentAt: Date?,
+        receivedAt: Date = Date(),
+        latencyMilliseconds: Double? = nil
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connected,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.state = .connected
+        status.presenceState = .online
+        status.monitoringMode = .foregroundActive
+        status.lastSeenAt = receivedAt
+        status.lastHeartbeatAt = receivedAt
+        status.lastHeartbeatSentAt = sentAt ?? status.lastHeartbeatSentAt
+        status.lastHeartbeatReceivedAt = receivedAt
+        status.lastSuccessfulHeartbeatAt = receivedAt
+        status.missedHeartbeatCount = 0
+        status.consecutiveFailureCount = 0
+        status.latencyMilliseconds = latencyMilliseconds
+        status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return status
+    }
+
+    @discardableResult
+    func recordHeartbeatFailure(
+        deviceID: String,
+        displayName: String,
+        errorCode: String,
+        errorMessage: String,
+        isSecurityFailure: Bool = false,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .offline,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        let missedCount = (status.missedHeartbeatCount ?? 0) + 1
+        let failureCount = (status.consecutiveFailureCount ?? 0) + 1
+        status.displayName = displayName
+        status.state = .offline
+        status.presenceState = isSecurityFailure
+            ? .securityError
+            : (missedCount >= missedHeartbeatLimit ? .disconnected : .stale)
+        status.monitoringMode = .foregroundActive
+        status.missedHeartbeatCount = missedCount
+        status.consecutiveFailureCount = failureCount
+        status.lastError = errorMessage
+        status.lastErrorCode = errorCode
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: now)
+    }
+
+    @discardableResult
+    func markMonitoringSuspended(
+        deviceID: String,
+        displayName: String,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .offline,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.state = .offline
+        status.presenceState = .stale
+        status.monitoringMode = .suspended
+        status.lastErrorCode = "not_actively_monitoring"
+        status.lastError = "Heartbeat monitoring is suspended."
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: now)
+    }
+
+    @discardableResult
+    func recordSignedRequestSucceeded(
+        deviceID: String,
+        displayName: String,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connected,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.state = .connected
+        status.presenceState = .online
+        status.lastSeenAt = now
+        status.lastSignedRequestSucceededAt = now
+        status.missedHeartbeatCount = 0
+        status.consecutiveFailureCount = 0
+        status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
         return status
@@ -187,6 +373,49 @@ final class DeviceConnectionStatusStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private func evaluatedStatus(_ status: DeviceConnectionStatus, now: Date) -> DeviceConnectionStatus {
+        guard status.state != .unpaired else {
+            return status
+        }
+
+        var evaluated = status
+        guard let lastEvidenceAt = latestOnlineEvidenceDate(for: status) else {
+            if evaluated.presenceState == nil {
+                evaluated.presenceState = .unknown
+            }
+            return evaluated
+        }
+
+        let age = now.timeIntervalSince(lastEvidenceAt)
+        if age > disconnectedAfter {
+            evaluated.state = .offline
+            evaluated.presenceState = .disconnected
+            evaluated.lastErrorCode = evaluated.lastErrorCode ?? "heartbeat_disconnected"
+            evaluated.lastError = evaluated.lastError ?? "Heartbeat timed out."
+        } else if age > staleAfter || age > offlineThreshold {
+            evaluated.state = .offline
+            evaluated.presenceState = .stale
+            evaluated.lastErrorCode = evaluated.lastErrorCode ?? "heartbeat_stale"
+            evaluated.lastError = evaluated.lastError ?? "Heartbeat is stale."
+        }
+        return evaluated
+    }
+
+    private func latestOnlineEvidenceDate(for status: DeviceConnectionStatus) -> Date? {
+        [
+            status.lastSuccessfulHeartbeatAt,
+            status.lastSignedRequestSucceededAt,
+            status.lastSeenAt,
+            status.lastHeartbeatAt
+        ]
+        .compactMap { $0 }
+        .max()
+    }
+
+    private func nextRevision(after status: DeviceConnectionStatus) -> Int {
+        (status.connectionStatusRevision ?? 0) + 1
     }
 
     private static func syncDirectoryURL(fileManager: FileManager, rootURL: URL?) -> URL {
@@ -285,6 +514,140 @@ final class StudyLibrarySyncStateStore: ObservableObject {
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(state).write(to: storeURL, options: .atomic)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private static func syncDirectoryURL(fileManager: FileManager, rootURL: URL?) -> URL {
+        if let rootURL {
+            return rootURL.appendingPathComponent("Sync", isDirectory: true)
+        }
+        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        return applicationSupportURL
+            .appendingPathComponent("Rokurics", isDirectory: true)
+            .appendingPathComponent("Sync", isDirectory: true)
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncStateStore: ObservableObject {
+    @Published private(set) var state: LocalNetworkSyncState = .empty
+    @Published private(set) var lastError: String?
+
+    private let fileManager: FileManager
+    private let storeURL: URL
+
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
+        self.fileManager = fileManager
+        storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
+            .appendingPathComponent("local-network-sync-state.json", isDirectory: false)
+            .standardizedFileURL
+        load()
+    }
+
+    func recordAttempt(
+        peerDeviceID: String?,
+        localInventoryHash: String?,
+        peerInventoryHash: String?,
+        pendingUploadCount: Int,
+        pendingDownloadCount: Int,
+        at date: Date = Date()
+    ) {
+        state.lastSyncAt = date
+        state.lastPeerDeviceID = peerDeviceID ?? state.lastPeerDeviceID
+        state.lastLocalInventoryHash = localInventoryHash ?? state.lastLocalInventoryHash
+        state.lastPeerInventoryHash = peerInventoryHash ?? state.lastPeerInventoryHash
+        state.pendingUploadCount = pendingUploadCount
+        state.pendingDownloadCount = pendingDownloadCount
+        save()
+    }
+
+    func recordSuccess(
+        peerDeviceID: String,
+        localInventoryHash: String,
+        peerInventoryHash: String,
+        appliedPeerRevision: String?,
+        pendingUploadCount: Int,
+        pendingDownloadCount: Int,
+        at date: Date = Date()
+    ) {
+        state.version = LocalNetworkSyncState.currentVersion
+        state.lastSyncAt = date
+        state.lastSuccessfulSyncAt = date
+        state.lastPeerDeviceID = peerDeviceID
+        state.lastLocalInventoryHash = localInventoryHash
+        state.lastPeerInventoryHash = peerInventoryHash
+        state.lastAppliedPeerRevision = appliedPeerRevision ?? state.lastAppliedPeerRevision
+        state.consecutiveFailureCount = 0
+        state.nextAllowedSyncAt = nil
+        state.lastErrorCode = nil
+        state.lastErrorMessage = nil
+        state.pendingUploadCount = pendingUploadCount
+        state.pendingDownloadCount = pendingDownloadCount
+        save()
+    }
+
+    func recordFailure(
+        code: String,
+        message: String,
+        at date: Date = Date(),
+        minimumBackoff: TimeInterval = 30,
+        maximumBackoff: TimeInterval = 600
+    ) {
+        state.version = LocalNetworkSyncState.currentVersion
+        state.lastSyncAt = date
+        state.consecutiveFailureCount += 1
+        let exponent = max(0, state.consecutiveFailureCount - 1)
+        let delay = min(minimumBackoff * pow(2.0, Double(exponent)), maximumBackoff)
+        state.nextAllowedSyncAt = date.addingTimeInterval(delay)
+        state.lastErrorCode = code
+        state.lastErrorMessage = message
+        save()
+    }
+
+    func replace(_ nextState: LocalNetworkSyncState) {
+        state = nextState
+        save()
+    }
+
+    private func load() {
+        do {
+            guard fileManager.fileExists(atPath: storeURL.path) else {
+                state = .empty
+                lastError = nil
+                return
+            }
+
+            let data = try Data(contentsOf: storeURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            state = try decoder.decode(LocalNetworkSyncState.self, from: data)
+            lastError = nil
+        } catch {
+            state = .empty
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func save() {
+        do {
+            try fileManager.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(state)
+            let temporaryURL = storeURL.deletingLastPathComponent()
+                .appendingPathComponent(".local-network-sync-state-\(UUID().uuidString)")
+                .appendingPathExtension("tmp")
+            try data.write(to: temporaryURL, options: .atomic)
+            if fileManager.fileExists(atPath: storeURL.path) {
+                _ = try fileManager.replaceItemAt(storeURL, withItemAt: temporaryURL)
+            } else {
+                try fileManager.moveItem(at: temporaryURL, to: storeURL)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription

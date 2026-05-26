@@ -40,12 +40,47 @@ final class RequestVerifier {
             allowedContentTypePrefixes: ["audio/mp4", "audio/m4a", "application/octet-stream"],
             requiredUploadType: "recording-audio"
         ),
+        "/upload-recording-audio-session/start": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/upload-recording-audio-session/status": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/upload-recording-audio-session/chunk": PathRule(
+            maxBodyBytes: MacRecordingFileStore.resumableChunkMaxBytes,
+            allowedContentTypePrefixes: ["application/octet-stream", "audio/mp4", "audio/m4a"],
+            requiredUploadType: "recording-audio-chunk"
+        ),
+        "/upload-recording-audio-session/finalize": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
         "/device/status": PathRule(
             maxBodyBytes: 256 * 1024,
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
         ),
+        "/connection/heartbeat": PathRule(
+            maxBodyBytes: 16 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/connection/probe": PathRule(
+            maxBodyBytes: 4 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
         "/sync/status": PathRule(
+            maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/device-status": PathRule(
             maxBodyBytes: 256 * 1024,
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
@@ -57,6 +92,21 @@ final class RequestVerifier {
         ),
         "/sync/apply": PathRule(
             maxBodyBytes: 4 * 1024 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/inventory": PathRule(
+            maxBodyBytes: 1 * 1024 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/apply-metadata": PathRule(
+            maxBodyBytes: 4 * 1024 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/sync/artifact-request": PathRule(
+            maxBodyBytes: 256 * 1024,
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
         )

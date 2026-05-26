@@ -219,6 +219,45 @@ final class RecordingManager: ObservableObject {
         refreshLatestRecordingAfterMetadataUpdate(updated)
     }
 
+    func updateUploadProgress(
+        recordingID: String,
+        fraction: Double?,
+        confirmedBytes: Int64?,
+        totalBytes: Int64?,
+        phase: String?,
+        description: String?
+    ) throws {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingID }) else {
+            reloadRecordings()
+            guard let reloadedIndex = recordings.firstIndex(where: { $0.id == recordingID }) else {
+                return
+            }
+
+            let updated = recordings[reloadedIndex].updatingUploadProgress(
+                fraction: fraction,
+                confirmedBytes: confirmedBytes,
+                totalBytes: totalBytes,
+                phase: phase,
+                description: description
+            )
+            try fileStore.updateMetadata(updated)
+            recordings[reloadedIndex] = updated
+            refreshLatestRecordingAfterMetadataUpdate(updated)
+            return
+        }
+
+        let updated = recordings[index].updatingUploadProgress(
+            fraction: fraction,
+            confirmedBytes: confirmedBytes,
+            totalBytes: totalBytes,
+            phase: phase,
+            description: description
+        )
+        try fileStore.updateMetadata(updated)
+        recordings[index] = updated
+        refreshLatestRecordingAfterMetadataUpdate(updated)
+    }
+
     func renameRecording(recordingID: String, rawTitle: String) throws {
         guard let existing = recordings.first(where: { $0.id == recordingID }) ?? (try? fileStore.loadMetadata(id: recordingID)) else {
             throw AudioFileStoreError.recordingNotFound(recordingID)
@@ -596,6 +635,10 @@ final class RecordingManager: ObservableObject {
     private func loadExistingRecordings() {
         do {
             try fileStore.ensureStorageDirectories()
+            let uploadJobStore = RecordingUploadJobStore(audioFileStore: fileStore)
+            let recoveredJobs = try uploadJobStore.recoverStaleInProgressJobs(now: Date())
+            try fileStore.applyRecoveredUploadJobs(recoveredJobs)
+            try fileStore.recoverStaleUploadingMetadata()
             let loadedRecordings = try fileStore.loadAllMetadata()
             let loadedTrashedRecordings = try fileStore.loadTrashedMetadata()
             recordings = loadedRecordings

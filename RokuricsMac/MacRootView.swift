@@ -11,7 +11,8 @@ struct MacRootView: View {
     @State private var selection: MacSidebarItem? = .studyLibrary
     @State private var isSettingsSelected = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
-    @StateObject private var secureReceiverService = SecureReceiverService()
+    @State private var didRecordAppLaunch = false
+    @StateObject private var secureReceiverService: SecureReceiverService
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
@@ -21,6 +22,21 @@ struct MacRootView: View {
     @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
     @StateObject private var userProfileStore = MacUserProfileStore()
     @Environment(\.colorScheme) private var colorScheme
+
+    init() {
+        if let uiTestHost = MacAppStorageProfile.uiTestPreferredHost {
+            _secureReceiverService = StateObject(
+                wrappedValue: SecureReceiverService(
+                    port: MacAppStorageProfile.receiverPort,
+                    preferredIPAddressProvider: { uiTestHost }
+                )
+            )
+        } else {
+            _secureReceiverService = StateObject(
+                wrappedValue: SecureReceiverService(port: MacAppStorageProfile.receiverPort)
+            )
+        }
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -47,6 +63,13 @@ struct MacRootView: View {
         .toolbar(removing: .title)
         .background(MacTheme.pageGradient(for: colorScheme))
         .frame(minWidth: 1040, minHeight: 690)
+        .onAppear {
+            guard !didRecordAppLaunch else {
+                return
+            }
+            didRecordAppLaunch = true
+            secureReceiverService.recordAppLaunch()
+        }
     }
 
     @ViewBuilder

@@ -26,6 +26,21 @@ enum DeviceConnectionLifecycleState: String, Codable, Equatable {
     case connected
 }
 
+enum ConnectionPresenceState: String, Codable, Equatable {
+    case unknown
+    case connecting
+    case online
+    case stale
+    case disconnected
+    case securityError
+}
+
+enum ConnectionMonitoringMode: String, Codable, Equatable {
+    case foregroundActive
+    case suspended
+    case disabled
+}
+
 struct DeviceConnectionStatus: Codable, Equatable, Identifiable {
     var id: String { deviceID }
 
@@ -37,6 +52,17 @@ struct DeviceConnectionStatus: Codable, Equatable, Identifiable {
     var lastSyncAt: Date?
     var lastSyncStatus: String?
     var lastError: String?
+    var presenceState: ConnectionPresenceState?
+    var monitoringMode: ConnectionMonitoringMode?
+    var lastHeartbeatSentAt: Date?
+    var lastHeartbeatReceivedAt: Date?
+    var lastSuccessfulHeartbeatAt: Date?
+    var lastSignedRequestSucceededAt: Date?
+    var missedHeartbeatCount: Int?
+    var consecutiveFailureCount: Int?
+    var latencyMilliseconds: Double?
+    var lastErrorCode: String?
+    var connectionStatusRevision: Int?
 
     static func unpaired(displayName: String = "Mac") -> DeviceConnectionStatus {
         DeviceConnectionStatus(
@@ -47,7 +73,18 @@ struct DeviceConnectionStatus: Codable, Equatable, Identifiable {
             lastHeartbeatAt: nil,
             lastSyncAt: nil,
             lastSyncStatus: nil,
-            lastError: nil
+            lastError: nil,
+            presenceState: .unknown,
+            monitoringMode: .disabled,
+            lastHeartbeatSentAt: nil,
+            lastHeartbeatReceivedAt: nil,
+            lastSuccessfulHeartbeatAt: nil,
+            lastSignedRequestSucceededAt: nil,
+            missedHeartbeatCount: 0,
+            consecutiveFailureCount: 0,
+            latencyMilliseconds: nil,
+            lastErrorCode: nil,
+            connectionStatusRevision: 0
         )
     }
 }
@@ -462,6 +499,28 @@ struct DeviceStatusResponse: Codable, Equatable {
     var error: String?
 }
 
+struct ConnectionHeartbeatRequest: Codable, Equatable {
+    var deviceID: String
+    var deviceName: String
+    var platform: LocalNetworkSyncPlatform
+    var appInstanceID: String?
+    var sequenceNumber: UInt64
+    var sentAt: Date
+    var lastKnownPeerStatusRevision: Int?
+}
+
+struct ConnectionHeartbeatResponse: Codable, Equatable {
+    var ok: Bool
+    var disposition: String
+    var peerDeviceID: String
+    var serverTime: Date
+    var receivedSequenceNumber: UInt64
+    var connectionStatusRevision: Int
+    var minimumSuggestedInterval: TimeInterval?
+    var status: DeviceConnectionStatus?
+    var error: String?
+}
+
 struct StudyLibrarySyncManifestRequest: Codable, Equatable {
     var manifest: StudyLibrarySyncManifest
 }
@@ -564,4 +623,558 @@ enum StudyLibrarySyncSanitizer {
                 && !normalized.contains("raw_json")
         }
     }
+}
+
+enum LocalNetworkSyncPlatform: String, Codable, Equatable, Sendable {
+    case iPhone
+    case Mac
+}
+
+enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
+    case transcriptMarkdown
+    case transcriptJSON
+    case noteMarkdown
+    case noteJSON
+    case audio
+
+    var isAutoDownloadAllowed: Bool {
+        switch self {
+        case .transcriptMarkdown, .transcriptJSON, .noteMarkdown, .noteJSON:
+            return true
+        case .audio:
+            return false
+        }
+    }
+}
+
+enum LocalNetworkSyncArtifactAvailability: String, Codable, Equatable, Sendable {
+    case local
+    case availableOnPeer
+    case missing
+}
+
+struct LocalNetworkSyncInventory: Codable, Equatable {
+    static let appSchemaVersion = 1
+
+    var device: LocalNetworkSyncDeviceSection
+    var recordings: [LocalNetworkSyncRecordingEntry]
+    var folders: [LocalNetworkSyncFolderEntry]
+    var studyItems: [LocalNetworkSyncStudyItemEntry]
+    var artifacts: [LocalNetworkSyncArtifactEntry]
+    var studyManifest: StudyLibrarySyncManifest?
+
+    var inventoryHash: String {
+        let payload = LocalNetworkSyncInventoryChecksumPayload(
+            device: device,
+            recordings: recordings,
+            folders: folders,
+            studyItems: studyItems,
+            artifacts: artifacts
+        )
+        let data = (try? Self.encoder.encode(payload)) ?? Data()
+        return Data(SHA256.hash(data: data)).hexString
+    }
+
+    static func make(
+        device: LocalNetworkSyncDeviceSection,
+        recordings: [LocalNetworkSyncRecordingEntry] = [],
+        folders: [LocalNetworkSyncFolderEntry] = [],
+        studyItems: [LocalNetworkSyncStudyItemEntry] = [],
+        artifacts: [LocalNetworkSyncArtifactEntry] = [],
+        studyManifest: StudyLibrarySyncManifest? = nil
+    ) -> LocalNetworkSyncInventory {
+        LocalNetworkSyncInventory(
+            device: device,
+            recordings: recordings.sorted { $0.recordingID.localizedStandardCompare($1.recordingID) == .orderedAscending },
+            folders: folders.sorted { $0.folderID.localizedStandardCompare($1.folderID) == .orderedAscending },
+            studyItems: studyItems.sorted { $0.itemID.localizedStandardCompare($1.itemID) == .orderedAscending },
+            artifacts: artifacts.sorted { $0.artifactID.localizedStandardCompare($1.artifactID) == .orderedAscending },
+            studyManifest: studyManifest
+        )
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+}
+
+private struct LocalNetworkSyncInventoryChecksumPayload: Encodable {
+    var device: LocalNetworkSyncDeviceSection
+    var recordings: [LocalNetworkSyncRecordingEntry]
+    var folders: [LocalNetworkSyncFolderEntry]
+    var studyItems: [LocalNetworkSyncStudyItemEntry]
+    var artifacts: [LocalNetworkSyncArtifactEntry]
+}
+
+struct LocalNetworkSyncDeviceSection: Codable, Equatable {
+    var deviceID: String
+    var deviceName: String
+    var platform: LocalNetworkSyncPlatform
+    var generatedAt: Date
+    var lastKnownPeerRevision: String?
+    var appSchemaVersion: Int
+}
+
+struct LocalNetworkSyncRecordingEntry: Codable, Equatable, Identifiable {
+    var id: String { recordingID }
+
+    var recordingID: String
+    var metadataHash: String?
+    var audioAvailable: Bool
+    var audioChecksum: String?
+    var audioSize: Int64?
+    var uploadLedgerState: String?
+    var receiveStatus: String?
+    var processingStatus: String?
+    var updatedAt: Date
+    var deleted: Bool
+}
+
+struct LocalNetworkSyncFolderEntry: Codable, Equatable, Identifiable {
+    var id: String { folderID }
+
+    var folderID: String
+    var parentID: String?
+    var path: String?
+    var name: String
+    var colorToken: String?
+    var updatedAt: Date
+    var revisionHash: String
+    var deleted: Bool
+}
+
+struct LocalNetworkSyncStudyItemEntry: Codable, Equatable, Identifiable {
+    var id: String { itemID }
+
+    var itemID: String
+    var kind: StudyItemKind
+    var title: String
+    var folderIDs: [StudyFolderID]
+    var recordingID: String?
+    var updatedAt: Date
+    var revisionHash: String
+    var deleted: Bool
+}
+
+struct LocalNetworkSyncArtifactEntry: Codable, Equatable, Identifiable {
+    var id: String { artifactID }
+
+    var artifactID: String
+    var kind: LocalNetworkSyncArtifactKind
+    var ownerID: String
+    var checksum: String?
+    var size: Int64?
+    var updatedAt: Date
+    var availability: LocalNetworkSyncArtifactAvailability
+    var logicalPathToken: String
+}
+
+struct LocalNetworkSyncInventoryRequest: Codable, Equatable {
+    var deviceID: String
+    var generatedAt: Date
+    var localInventoryHash: String?
+}
+
+struct LocalNetworkSyncInventoryResponse: Codable, Equatable {
+    var ok: Bool
+    var inventory: LocalNetworkSyncInventory?
+    var error: String?
+}
+
+struct LocalNetworkSyncArtifactRequest: Codable, Equatable {
+    var artifactID: String
+}
+
+struct LocalNetworkSyncArtifactResponse: Codable, Equatable {
+    var ok: Bool
+    var artifactID: String?
+    var kind: LocalNetworkSyncArtifactKind?
+    var checksum: String?
+    var size: Int64?
+    var logicalPathToken: String?
+    var dataBase64: String?
+    var error: String?
+}
+
+enum LocalNetworkSyncDiffActionKind: String, Codable, Equatable {
+    case uploadMetadata
+    case uploadArtifact
+    case downloadMetadata
+    case downloadArtifact
+    case uploadRecordingAudio
+    case conflict
+    case noOp
+}
+
+struct LocalNetworkSyncDiffAction: Codable, Equatable, Identifiable {
+    var id: String
+    var kind: LocalNetworkSyncDiffActionKind
+    var entityKind: String
+    var entityID: String
+    var reason: String
+}
+
+struct LocalNetworkSyncDiffPlan: Codable, Equatable {
+    var uploadMetadataActions: [LocalNetworkSyncDiffAction] = []
+    var uploadArtifactActions: [LocalNetworkSyncDiffAction] = []
+    var downloadMetadataActions: [LocalNetworkSyncDiffAction] = []
+    var downloadArtifactActions: [LocalNetworkSyncDiffAction] = []
+    var uploadRecordingAudioActions: [LocalNetworkSyncDiffAction] = []
+    var conflictActions: [LocalNetworkSyncDiffAction] = []
+    var noOps: [LocalNetworkSyncDiffAction] = []
+}
+
+struct LocalNetworkSyncDiffPlanner {
+    func plan(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        lastSuccessfulSyncAt: Date?
+    ) -> LocalNetworkSyncDiffPlan {
+        var plan = LocalNetworkSyncDiffPlan()
+        compareRecordings(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
+        compareFolders(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
+        compareStudyItems(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
+        compareArtifacts(local: local, peer: peer, plan: &plan)
+        return plan
+    }
+
+    private func compareRecordings(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        lastSuccessfulSyncAt: Date?,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        let localByID = Dictionary(uniqueKeysWithValues: local.recordings.map { ($0.recordingID, $0) })
+        let peerByID = Dictionary(uniqueKeysWithValues: peer.recordings.map { ($0.recordingID, $0) })
+        for recordingID in Set(localByID.keys).union(peerByID.keys).sorted() {
+            let localRecording = localByID[recordingID]
+            let peerRecording = peerByID[recordingID]
+            switch (localRecording, peerRecording) {
+            case let (.some(localRecording), .some(peerRecording)):
+                if localRecording.metadataHash == peerRecording.metadataHash {
+                    plan.noOps.append(action(.noOp, entityKind: "recording", entityID: recordingID, reason: "metadata_equal"))
+                } else if lastSuccessfulSyncAt.map({ localRecording.updatedAt > $0 && peerRecording.updatedAt > $0 }) == true {
+                    plan.conflictActions.append(action(.conflict, entityKind: "recording", entityID: recordingID, reason: "both_changed_after_last_sync"))
+                } else if peerRecording.deleted, peerRecording.updatedAt >= localRecording.updatedAt {
+                    plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: "recording", entityID: recordingID, reason: "peer_tombstone_wins"))
+                } else if localRecording.deleted, localRecording.updatedAt >= peerRecording.updatedAt {
+                    plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: "recording", entityID: recordingID, reason: "local_tombstone_wins"))
+                } else if localRecording.updatedAt > peerRecording.updatedAt {
+                    plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: "recording", entityID: recordingID, reason: "local_recording_newer"))
+                } else {
+                    plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: "recording", entityID: recordingID, reason: "peer_recording_newer"))
+                }
+
+                if localRecording.audioAvailable, !peerRecording.audioAvailable {
+                    plan.uploadRecordingAudioActions.append(action(.uploadRecordingAudio, entityKind: "recording", entityID: recordingID, reason: "peer_missing_audio_use_existing_upload"))
+                }
+            case (.some, .none):
+                plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: "recording", entityID: recordingID, reason: "peer_missing_recording"))
+            case (.none, .some):
+                plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: "recording", entityID: recordingID, reason: "local_missing_recording_metadata"))
+            case (.none, .none):
+                break
+            }
+        }
+    }
+
+    private func compareFolders(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        lastSuccessfulSyncAt: Date?,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        let localByID = Dictionary(uniqueKeysWithValues: local.folders.map { ($0.folderID, $0) })
+        let peerByID = Dictionary(uniqueKeysWithValues: peer.folders.map { ($0.folderID, $0) })
+        for folderID in Set(localByID.keys).union(peerByID.keys).sorted() {
+            compareMetadataEntity(
+                entityKind: "folder",
+                entityID: folderID,
+                localHash: localByID[folderID]?.revisionHash,
+                peerHash: peerByID[folderID]?.revisionHash,
+                localUpdatedAt: localByID[folderID]?.updatedAt,
+                peerUpdatedAt: peerByID[folderID]?.updatedAt,
+                localDeleted: localByID[folderID]?.deleted ?? false,
+                peerDeleted: peerByID[folderID]?.deleted ?? false,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
+                plan: &plan
+            )
+        }
+    }
+
+    private func compareStudyItems(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        lastSuccessfulSyncAt: Date?,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        let localByID = Dictionary(uniqueKeysWithValues: local.studyItems.map { ($0.itemID, $0) })
+        let peerByID = Dictionary(uniqueKeysWithValues: peer.studyItems.map { ($0.itemID, $0) })
+        for itemID in Set(localByID.keys).union(peerByID.keys).sorted() {
+            compareMetadataEntity(
+                entityKind: "studyItem",
+                entityID: itemID,
+                localHash: localByID[itemID]?.revisionHash,
+                peerHash: peerByID[itemID]?.revisionHash,
+                localUpdatedAt: localByID[itemID]?.updatedAt,
+                peerUpdatedAt: peerByID[itemID]?.updatedAt,
+                localDeleted: localByID[itemID]?.deleted ?? false,
+                peerDeleted: peerByID[itemID]?.deleted ?? false,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
+                plan: &plan
+            )
+        }
+    }
+
+    private func compareMetadataEntity(
+        entityKind: String,
+        entityID: String,
+        localHash: String?,
+        peerHash: String?,
+        localUpdatedAt: Date?,
+        peerUpdatedAt: Date?,
+        localDeleted: Bool,
+        peerDeleted: Bool,
+        lastSuccessfulSyncAt: Date?,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        switch (localHash, peerHash) {
+        case let (.some(localHash), .some(peerHash)) where localHash == peerHash:
+            plan.noOps.append(action(.noOp, entityKind: entityKind, entityID: entityID, reason: "checksum_equal"))
+        case (.some, .none):
+            plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: entityKind, entityID: entityID, reason: "peer_missing"))
+        case (.none, .some):
+            plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: entityKind, entityID: entityID, reason: "local_missing"))
+        case (.some, .some):
+            let localDate = localUpdatedAt ?? .distantPast
+            let peerDate = peerUpdatedAt ?? .distantPast
+            let localChangedAfterSync = lastSuccessfulSyncAt.map { localDate > $0 } ?? false
+            let peerChangedAfterSync = lastSuccessfulSyncAt.map { peerDate > $0 } ?? false
+
+            if localChangedAfterSync, peerChangedAfterSync {
+                plan.conflictActions.append(action(.conflict, entityKind: entityKind, entityID: entityID, reason: "both_changed_after_last_sync"))
+            } else if peerDeleted, peerDate >= localDate {
+                plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: entityKind, entityID: entityID, reason: "peer_tombstone_wins"))
+            } else if localDeleted, localDate >= peerDate {
+                plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: entityKind, entityID: entityID, reason: "local_tombstone_wins"))
+            } else if peerDate > localDate {
+                plan.downloadMetadataActions.append(action(.downloadMetadata, entityKind: entityKind, entityID: entityID, reason: "peer_newer"))
+            } else {
+                plan.uploadMetadataActions.append(action(.uploadMetadata, entityKind: entityKind, entityID: entityID, reason: "local_newer"))
+            }
+        case (.none, .none):
+            break
+        }
+    }
+
+    private func compareArtifacts(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        let localByID = Dictionary(uniqueKeysWithValues: local.artifacts.map { ($0.artifactID, $0) })
+        let peerByID = Dictionary(uniqueKeysWithValues: peer.artifacts.map { ($0.artifactID, $0) })
+        for artifactID in Set(localByID.keys).union(peerByID.keys).sorted() {
+            let localArtifact = localByID[artifactID]
+            let peerArtifact = peerByID[artifactID]
+            switch (localArtifact, peerArtifact) {
+            case let (.some(localArtifact), .some(peerArtifact)):
+                if localArtifact.checksum == peerArtifact.checksum {
+                    plan.noOps.append(action(.noOp, entityKind: "artifact", entityID: artifactID, reason: "checksum_equal"))
+                } else if peerArtifact.updatedAt > localArtifact.updatedAt, peerArtifact.kind.isAutoDownloadAllowed {
+                    plan.downloadArtifactActions.append(action(.downloadArtifact, entityKind: "artifact", entityID: artifactID, reason: "peer_artifact_newer"))
+                } else if localArtifact.updatedAt > peerArtifact.updatedAt, localArtifact.kind != .audio {
+                    plan.uploadArtifactActions.append(action(.uploadArtifact, entityKind: "artifact", entityID: artifactID, reason: "local_artifact_newer"))
+                } else if localArtifact.kind == .audio || peerArtifact.kind == .audio {
+                    plan.noOps.append(action(.noOp, entityKind: "artifact", entityID: artifactID, reason: "audio_uses_recording_upload"))
+                } else {
+                    plan.conflictActions.append(action(.conflict, entityKind: "artifact", entityID: artifactID, reason: "artifact_checksum_conflict"))
+                }
+            case let (.some(localArtifact), .none):
+                if localArtifact.kind == .audio {
+                    plan.noOps.append(action(.noOp, entityKind: "artifact", entityID: artifactID, reason: "audio_uses_recording_upload"))
+                } else {
+                    plan.uploadArtifactActions.append(action(.uploadArtifact, entityKind: "artifact", entityID: artifactID, reason: "peer_missing_artifact"))
+                }
+            case let (.none, .some(peerArtifact)):
+                if peerArtifact.kind.isAutoDownloadAllowed {
+                    plan.downloadArtifactActions.append(action(.downloadArtifact, entityKind: "artifact", entityID: artifactID, reason: "local_missing_artifact"))
+                } else {
+                    plan.noOps.append(action(.noOp, entityKind: "artifact", entityID: artifactID, reason: "audio_auto_download_disabled"))
+                }
+            case (.none, .none):
+                break
+            }
+        }
+    }
+
+    private func action(
+        _ kind: LocalNetworkSyncDiffActionKind,
+        entityKind: String,
+        entityID: String,
+        reason: String
+    ) -> LocalNetworkSyncDiffAction {
+        LocalNetworkSyncDiffAction(
+            id: "\(kind.rawValue):\(entityKind):\(entityID):\(reason)",
+            kind: kind,
+            entityKind: entityKind,
+            entityID: entityID,
+            reason: reason
+        )
+    }
+}
+
+struct LocalNetworkSyncState: Codable, Equatable {
+    static let currentVersion = 1
+
+    var version: Int
+    var lastSyncAt: Date?
+    var lastSuccessfulSyncAt: Date?
+    var lastPeerDeviceID: String?
+    var lastLocalInventoryHash: String?
+    var lastPeerInventoryHash: String?
+    var lastAppliedPeerRevision: String?
+    var consecutiveFailureCount: Int
+    var nextAllowedSyncAt: Date?
+    var lastErrorCode: String?
+    var lastErrorMessage: String?
+    var pendingUploadCount: Int
+    var pendingDownloadCount: Int
+
+    static var empty: LocalNetworkSyncState {
+        LocalNetworkSyncState(
+            version: currentVersion,
+            lastSyncAt: nil,
+            lastSuccessfulSyncAt: nil,
+            lastPeerDeviceID: nil,
+            lastLocalInventoryHash: nil,
+            lastPeerInventoryHash: nil,
+            lastAppliedPeerRevision: nil,
+            consecutiveFailureCount: 0,
+            nextAllowedSyncAt: nil,
+            lastErrorCode: nil,
+            lastErrorMessage: nil,
+            pendingUploadCount: 0,
+            pendingDownloadCount: 0
+        )
+    }
+}
+
+enum LocalNetworkSyncArtifactValidationError: LocalizedError, Equatable {
+    case invalidArtifactID
+    case pathTraversal
+    case absolutePath
+    case unsafeResolvedPath
+    case unsupportedArtifactKind
+    case artifactNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidArtifactID:
+            return "invalid_artifact_id"
+        case .pathTraversal:
+            return "artifact_path_traversal"
+        case .absolutePath:
+            return "artifact_absolute_path"
+        case .unsafeResolvedPath:
+            return "artifact_path_escape"
+        case .unsupportedArtifactKind:
+            return "unsupported_artifact_kind"
+        case .artifactNotFound:
+            return "artifact_not_found"
+        }
+    }
+}
+
+enum LocalNetworkSyncArtifactID {
+    static func make(kind: LocalNetworkSyncArtifactKind, ownerID: String, logicalPathToken: String) -> String {
+        let payload = "\(kind.rawValue)|\(ownerID)|\(logicalPathToken)"
+        return "artifact_\(Data(SHA256.hash(data: Data(payload.utf8))).hexString)"
+    }
+
+    static func validate(_ artifactID: String) throws {
+        guard artifactID.count == 73,
+              artifactID.hasPrefix("artifact_"),
+              artifactID.dropFirst("artifact_".count).allSatisfy(\.isHexDigit) else {
+            throw LocalNetworkSyncArtifactValidationError.invalidArtifactID
+        }
+    }
+
+    static func validateLogicalPathToken(_ token: String) throws {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw LocalNetworkSyncArtifactValidationError.artifactNotFound
+        }
+        guard !trimmed.hasPrefix("/") else {
+            throw LocalNetworkSyncArtifactValidationError.absolutePath
+        }
+        let components = trimmed.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains("..") else {
+            throw LocalNetworkSyncArtifactValidationError.pathTraversal
+        }
+    }
+}
+
+enum LocalNetworkSyncArtifactFileService {
+    static func safeFileURL(rootURL: URL, logicalPathToken: String, fileManager: FileManager = .default) throws -> URL {
+        try LocalNetworkSyncArtifactID.validateLogicalPathToken(logicalPathToken)
+        let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
+        let standardizedCandidate = root
+            .appendingPathComponent(logicalPathToken, isDirectory: false)
+            .standardizedFileURL
+        let resolvedParent = standardizedCandidate
+            .deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+        let candidate = resolvedParent
+            .appendingPathComponent(standardizedCandidate.lastPathComponent, isDirectory: false)
+            .standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : "\(root.path)/"
+        guard candidate.path.hasPrefix(rootPath), resolvedParent.path.hasPrefix(rootPath) else {
+            throw LocalNetworkSyncArtifactValidationError.unsafeResolvedPath
+        }
+        return candidate
+    }
+
+    static func metadata(for url: URL, fileManager: FileManager = .default) -> (size: Int64, updatedAt: Date)? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path) else {
+            return nil
+        }
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let updatedAt = attributes[.modificationDate] as? Date ?? Date(timeIntervalSince1970: 0)
+        return (size, updatedAt)
+    }
+
+    static func sha256Hex(fileURL: URL, chunkByteCount: Int = 1024 * 1024) throws -> String {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer {
+            try? handle.close()
+        }
+
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: chunkByteCount) ?? Data()
+            if chunk.isEmpty {
+                break
+            }
+            hasher.update(data: chunk)
+        }
+        return Data(hasher.finalize()).hexString
+    }
+}
+
+enum LocalNetworkSyncMetadataHash {
+    static func hash<Value: Encodable>(_ value: Value) -> String {
+        let data = (try? encoder.encode(value)) ?? Data()
+        return Data(SHA256.hash(data: data)).hexString
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
 }

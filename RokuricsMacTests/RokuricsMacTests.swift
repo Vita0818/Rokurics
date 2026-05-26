@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Security
 import Testing
 @testable import RokuricsMac
 
@@ -1811,7 +1812,7 @@ struct RokuricsMacTests {
     @Test func macSettingsStorageLocationUsesRokuricsApplicationSupportRoot() throws {
         let rootURL = MacSettingsStorageLocation.rootURL()
 
-        #expect(rootURL.lastPathComponent == "Rokurics")
+        #expect(rootURL.lastPathComponent == MacAppStorageProfile.applicationSupportFolderName)
         #expect(rootURL.path.contains("Application Support"))
         #expect(!rootURL.path.contains("/Desktop/"))
         #expect(!rootURL.path.contains("/Downloads/"))
@@ -2008,6 +2009,1942 @@ struct RokuricsMacTests {
 
         #expect(record.originalTitle == "上传标题")
         #expect(record.normalizedTitle == "Mac 标题")
+    }
+
+    @Test func metadataFirstUploadCreatesMetadataOnlyReceiveState() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-01")
+
+        let result = try store.saveMetadata(metadata, sourceDevice: device)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+
+        #expect(result.disposition == .acceptedNew)
+        #expect(record.status == "metadataReceived")
+        #expect(record.processingStatus == "awaitingAudio")
+        #expect(record.audioRelativePath == nil)
+        #expect(record.checksum == nil)
+        #expect(record.lastUploadError == nil)
+        #expect(record.lastUploadAttemptAt != nil)
+    }
+
+    @Test func repeatedIdenticalMetadataIsIdempotentSuccess() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-02", title: "原始标题")
+        let compatibleUpdate = makeIncomingUploadMetadata(id: "idempotent-02", title: "不应覆盖的标题")
+
+        let firstResult = try store.saveMetadata(metadata, sourceDevice: device)
+        let metadataURL = firstResult.directoryURL.appendingPathComponent("metadata.json", isDirectory: false)
+        let storedBeforeRetry = try readIncomingMetadata(at: metadataURL)
+        let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        Thread.sleep(forTimeInterval: 0.01)
+        let result = try store.saveMetadata(compatibleUpdate, sourceDevice: device)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        let storedAfterRetry = try readIncomingMetadata(at: metadataURL)
+
+        #expect(result.disposition == .acceptedExisting)
+        #expect(record.originalTitle == "原始标题")
+        #expect(record.status == "metadataReceived")
+        #expect(record.processingStatus == "awaitingAudio")
+        #expect(record.lastUploadError == nil)
+        #expect((record.lastUploadAttemptAt?.timeIntervalSince(firstRecord.lastUploadAttemptAt ?? .distantPast) ?? -1) > 0)
+        #expect(storedBeforeRetry.title == "原始标题")
+        #expect(storedAfterRetry.title == "原始标题")
+    }
+
+    @Test func repeatedConflictingMetadataIsRejected() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-03", fileSize: 5)
+        let conflicting = makeIncomingUploadMetadata(id: "idempotent-03", fileSize: 6)
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        Thread.sleep(forTimeInterval: 0.01)
+
+        do {
+            _ = try store.saveMetadata(conflicting, sourceDevice: device)
+            Issue.record("Expected conflicting metadata to be rejected")
+        } catch MacRecordingFileStoreError.metadataConflict {
+            let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+            #expect(record.lastUploadError == "metadata_conflict")
+            #expect(record.lastUploadError?.contains(device.sharedSecretBase64URL) == false)
+            #expect((record.lastUploadAttemptAt?.timeIntervalSince(firstRecord.lastUploadAttemptAt ?? .distantPast) ?? -1) > 0)
+        }
+    }
+
+    @Test func audioUploadAfterMetadataOnlyRecordCompletesReceiveState() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-04")
+        let audio = Data("audio".utf8)
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let result = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+
+        #expect(result.disposition == .acceptedNew)
+        #expect(record.status == "completed")
+        #expect(record.processingStatus == "notStarted")
+        #expect(record.audioRelativePath?.hasSuffix("/audio.m4a") == true)
+        #expect(record.checksum == MacSecurityUtilities.sha256Hex(audio))
+        #expect(record.lastUploadError == nil)
+    }
+
+    @Test func repeatedIdenticalAudioIsIdempotentSuccess() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-05")
+        let audio = Data("audio".utf8)
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        _ = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        Thread.sleep(forTimeInterval: 0.01)
+        let result = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: "retry-name.m4a", sourceDevice: device)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        let audioURL = rootURL.appendingPathComponent(record.audioRelativePath ?? "", isDirectory: false)
+
+        #expect(result.disposition == .acceptedExisting)
+        #expect(record.status == "completed")
+        #expect(record.checksum == MacSecurityUtilities.sha256Hex(audio))
+        #expect(record.fileSize == Int64(audio.count))
+        #expect(record.lastUploadError == nil)
+        #expect(record.originalAudioFileName == metadata.originalFileName)
+        #expect((record.lastUploadAttemptAt?.timeIntervalSince(firstRecord.lastUploadAttemptAt ?? .distantPast) ?? -1) > 0)
+        #expect(try Data(contentsOf: audioURL) == audio)
+    }
+
+    @Test func repeatedConflictingAudioIsRejected() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "idempotent-06")
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        Thread.sleep(forTimeInterval: 0.01)
+
+        do {
+            _ = try store.saveAudio(body: Data("different-audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+            Issue.record("Expected conflicting audio to be rejected")
+        } catch MacRecordingFileStoreError.audioConflict {
+            let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+            #expect(record.lastUploadError == "audio_conflict")
+            #expect(record.lastUploadError?.contains(device.sharedSecretBase64URL) == false)
+            #expect((record.lastUploadAttemptAt?.timeIntervalSince(firstRecord.lastUploadAttemptAt ?? .distantPast) ?? -1) > 0)
+        }
+    }
+
+    @MainActor
+    @Test func metadataConflictRouteReturns409JSONWithoutSecret() throws {
+        let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = makeIncomingUploadMetadata(id: "route-metadata-conflict", fileSize: 5)
+        let conflicting = makeIncomingUploadMetadata(id: "route-metadata-conflict", fileSize: 6)
+        let metadataBody = try encodedMetadata(metadata)
+        let conflictingBody = try encodedMetadata(conflicting)
+
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-metadata-first"),
+            body: metadataBody
+        )
+        let response = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: conflictingBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: conflicting.id, fileName: conflicting.originalFileName, nonce: "nonce-route-metadata-conflict"),
+            body: conflictingBody
+        )
+        let json = try routeResponseJSON(response)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+
+        #expect(response.statusCode == 409)
+        #expect(json["ok"] as? Bool == false)
+        #expect(json["error"] as? String == "recording_metadata_conflict")
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.rejectedConflict.rawValue)
+        #expect(json["reason"] as? String == "Conflict")
+        #expect(String(data: response.bodyData, encoding: .utf8)?.contains(device.sharedSecretBase64URL) == false)
+        #expect(record.lastUploadError == "metadata_conflict")
+        #expect(store.loadInboxItems().count == 1)
+    }
+
+    @MainActor
+    @Test func audioConflictRouteReturns409JSONWithoutSecret() throws {
+        let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = makeIncomingUploadMetadata(id: "route-audio-conflict")
+        let metadataBody = try encodedMetadata(metadata)
+        let audio = Data("audio".utf8)
+        let conflictingAudio = Data("different-audio".utf8)
+
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-metadata"),
+            body: metadataBody
+        )
+        _ = handler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-first"),
+            body: audio
+        )
+        let response = handler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: conflictingAudio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-conflict"),
+            body: conflictingAudio
+        )
+        let json = try routeResponseJSON(response)
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+
+        #expect(response.statusCode == 409)
+        #expect(json["ok"] as? Bool == false)
+        #expect(json["error"] as? String == "recording_audio_conflict")
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.rejectedConflict.rawValue)
+        #expect(json["reason"] as? String == "Conflict")
+        #expect(String(data: response.bodyData, encoding: .utf8)?.contains(device.sharedSecretBase64URL) == false)
+        #expect(record.lastUploadError == "audio_conflict")
+    }
+
+    @MainActor
+    @Test func repeatedIdenticalMetadataRouteReturnsAcceptedExisting() throws {
+        let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = makeIncomingUploadMetadata(id: "route-metadata-existing")
+        let body = try encodedMetadata(metadata)
+
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-existing-first"),
+            body: body
+        )
+        let response = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-existing-second"),
+            body: body
+        )
+        let json = try routeResponseJSON(response)
+
+        #expect(response.statusCode == 200)
+        #expect(json["ok"] as? Bool == true)
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect(json["receiveStatus"] as? String == "metadataReceived")
+        #expect(json["processingStatus"] as? String == "awaitingAudio")
+    }
+
+    @MainActor
+    @Test func repeatedIdenticalAudioRouteReturnsAcceptedExisting() throws {
+        let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = makeIncomingUploadMetadata(id: "route-audio-existing")
+        let metadataBody = try encodedMetadata(metadata)
+        let audio = Data("audio".utf8)
+
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-metadata"),
+            body: metadataBody
+        )
+        _ = handler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-first"),
+            body: audio
+        )
+        let response = handler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-second"),
+            body: audio
+        )
+        let json = try routeResponseJSON(response)
+
+        #expect(response.statusCode == 200)
+        #expect(json["ok"] as? Bool == true)
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect(json["receiveStatus"] as? String == "completed")
+        #expect(json["processingStatus"] as? String == "notStarted")
+    }
+
+    @MainActor
+    @Test func badSignatureAndUnpairedUploadRoutesAreRejectedBeforeStoreWrite() throws {
+        let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = makeIncomingUploadMetadata(id: "route-security-rejected")
+        let body = try encodedMetadata(metadata)
+        var badSignatureHeaders = try signedUploadHeaders(
+            device: device,
+            path: "/upload-recording-metadata",
+            body: body,
+            contentType: "application/json",
+            uploadType: "recording-metadata",
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            nonce: "nonce-route-bad-signature"
+        )
+        badSignatureHeaders["X-Rokurics-Signature"] = "bad-signature"
+
+        let badSignatureResponse = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: badSignatureHeaders,
+            body: body
+        )
+        let unpairedDevice = PairedDevice(
+            id: "unknown-device",
+            deviceName: "Unknown",
+            sharedSecretBase64URL: Data("unknown-secret".utf8).base64URLEncodedString(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let unpairedResponse = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-unpaired"),
+            body: body
+        )
+
+        #expect(badSignatureResponse.statusCode == 400)
+        #expect((try routeResponseJSON(badSignatureResponse))["error"] as? String == "signature_mismatch")
+        #expect(unpairedResponse.statusCode == 400)
+        #expect((try routeResponseJSON(unpairedResponse))["error"] as? String == "unknown_device")
+        #expect(store.loadInboxItems().isEmpty)
+    }
+
+    @MainActor
+    @Test func freshPairingBootstrapDoesNotRequireExistingHMACSharedSecret() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = PairedDeviceStore(rootURL: rootURL)
+        let manager = PairingManager(pairedDeviceStore: store)
+        let now = Date(timeIntervalSince1970: 3_000)
+        manager.beginPairing(now: now)
+        let code = try #require(manager.activeChallenge?.code)
+        var pairingChangedCount = 0
+        let handler = PairingBootstrapRouteHandler(
+            pairingManager: manager,
+            macName: "Test Mac",
+            macModel: "Mac",
+            onPairingChanged: { pairingChangedCount += 1 }
+        )
+        let body = Data(#"{"pairingCode":"\#(code)","deviceName":"Vita iPhone","deviceType":"iPhone"}"#.utf8)
+
+        let response = handler.pairingResponse(
+            method: "POST",
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: body,
+            now: now.addingTimeInterval(1)
+        )
+        let json = try routeResponseJSON(response)
+
+        #expect(response.statusCode == 200)
+        #expect(json["ok"] as? Bool == true)
+        #expect(json["deviceID"] as? String != nil)
+        #expect(json["sharedSecret"] as? String != nil)
+        #expect(pairingChangedCount == 1)
+        #expect(store.devices.count == 1)
+    }
+
+    @MainActor
+    @Test func freshPairingBootstrapRejectsInvalidCodeWithoutCreatingSharedSecret() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = PairedDeviceStore(rootURL: rootURL)
+        let manager = PairingManager(pairedDeviceStore: store)
+        let now = Date(timeIntervalSince1970: 3_100)
+        manager.beginPairing(now: now)
+        var pairingChangedCount = 0
+        let handler = PairingBootstrapRouteHandler(
+            pairingManager: manager,
+            macName: "Test Mac",
+            macModel: "Mac",
+            onPairingChanged: { pairingChangedCount += 1 }
+        )
+        let body = Data(#"{"pairingCode":"000000","deviceName":"Vita iPhone","deviceType":"iPhone"}"#.utf8)
+
+        let response = handler.pairingResponse(
+            method: "POST",
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: body,
+            now: now.addingTimeInterval(1)
+        )
+        let json = try routeResponseJSON(response)
+        let rawBody = String(data: response.bodyData, encoding: .utf8) ?? ""
+
+        #expect(response.statusCode == 400)
+        #expect(json["ok"] as? Bool == false)
+        #expect(json["error"] as? String == "invalid_pairing_code")
+        #expect(rawBody.contains("sharedSecret") == false)
+        #expect(pairingChangedCount == 1)
+        #expect(store.devices.isEmpty)
+    }
+
+    @MainActor
+    @Test func realHTTPSListenerFingerprintPairingAndHeartbeatSmoke() async throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("RokuricsRealListener-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? fileManager.removeItem(at: rootURL)
+        }
+
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: rootURL.appendingPathComponent("Security", isDirectory: true),
+            tlsKeyTagNamespace: "real-listener-\(UUID().uuidString)"
+        )
+        identityManager.loadOrCreateIdentity()
+        #expect(identityManager.status.hasTLSIdentity)
+        #expect(identityManager.status.certificateFingerprint.count == 64)
+
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let recordingFileStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let studyLibraryStore = StudyLibraryStore(
+            rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
+            recordingFileStore: recordingFileStore,
+            listenForInboxChanges: false
+        )
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let readySignal = ListenerReadySignal()
+
+        let server = SecureLocalHTTPSServer(
+            port: 0,
+            identityManager: identityManager,
+            pairingManager: pairingManager,
+            requestVerifier: requestVerifier,
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: nil,
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            onReady: {
+                readySignal.markReady()
+            },
+            onFailed: { message in
+                readySignal.markFailed(message)
+            },
+            onPairingChanged: {},
+            onUploadAccepted: { _ in },
+            onRecordingAccepted: { _ in }
+        )
+        defer {
+            server.stop()
+        }
+
+        try server.start()
+        try await waitForListenerReady(readySignal)
+        #expect(readySignal.failureMessage == nil)
+        #expect(server.isReady)
+        let activePort = try #require(server.activePort)
+        #expect(activePort > 0)
+
+        let expectedFingerprint = identityManager.status.certificateFingerprint
+        let client = RealListenerPinnedHTTPSClient(expectedFingerprint: expectedFingerprint)
+        defer {
+            client.invalidate()
+        }
+
+        let fingerprintResponse = try await client.getJSON(port: activePort, path: "/fingerprint")
+        #expect(fingerprintResponse.statusCode == 200)
+        let fingerprint = try #require(fingerprintResponse.json["fingerprint"] as? String)
+        #expect(fingerprint == expectedFingerprint)
+        #expect(fingerprint == identityManager.status.displayFingerprint)
+        #expect(fingerprintResponse.json["type"] as? String == "certificate-sha256")
+
+        let staleFingerprintClient = RealListenerPinnedHTTPSClient(expectedFingerprint: String(repeating: "0", count: 64))
+        defer {
+            staleFingerprintClient.invalidate()
+        }
+        do {
+            _ = try await staleFingerprintClient.getJSON(port: activePort, path: "/fingerprint")
+            Issue.record("Expected stale fingerprint to be reported as a pinning mismatch")
+        } catch RealListenerHTTPSClientError.fingerprintMismatch {
+            #expect(true)
+        }
+
+        let fakeDevice = PairedDevice(
+            id: "iphone-unpaired",
+            deviceName: "Unpaired iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let unpairedHeartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: fakeDevice.id,
+            deviceName: fakeDevice.deviceName,
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 1,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: nil
+        ))
+        let unpairedHeartbeatHeaders = try signedJSONHeaders(
+            device: fakeDevice,
+            path: "/connection/heartbeat",
+            body: unpairedHeartbeatBody,
+            nonce: "real-listener-unpaired-heartbeat"
+        )
+        let unpairedHeartbeatResponse = try await client.postJSON(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: unpairedHeartbeatHeaders,
+            body: unpairedHeartbeatBody
+        )
+        #expect(unpairedHeartbeatResponse.statusCode == 400)
+        #expect(unpairedHeartbeatResponse.json["error"] as? String == "unknown_device")
+        #expect(statusStore.latestStatus == nil)
+        #expect(pairedDeviceStore.deviceCount == 0)
+
+        let unpairedProbeBody = try encodedConnectionProbeRequest(
+            sequenceNumber: 2,
+            clientPayload: "unpaired tiny probe"
+        )
+        let unpairedProbeResponse = try await client.postJSON(
+            port: activePort,
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(
+                device: fakeDevice,
+                path: "/connection/probe",
+                body: unpairedProbeBody,
+                nonce: "real-listener-unpaired-probe"
+            ),
+            body: unpairedProbeBody
+        )
+        #expect(unpairedProbeResponse.statusCode == 400)
+        #expect(unpairedProbeResponse.json["error"] as? String == "unknown_device")
+        #expect(pairedDeviceStore.deviceCount == 0)
+
+        pairingManager.beginPairing()
+        let pairingCode = try #require(pairingManager.activeChallenge?.code)
+        let pairBody = try JSONSerialization.data(withJSONObject: [
+            "pairingCode": pairingCode,
+            "deviceName": "Deviceless iPhone",
+            "deviceType": "iPhone"
+        ], options: [.sortedKeys])
+        let pairResponse = try await client.postJSON(
+            port: activePort,
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: pairBody
+        )
+        #expect(pairResponse.statusCode == 200)
+        #expect(pairResponse.json["ok"] as? Bool == true)
+        let deviceID = try #require(pairResponse.json["deviceID"] as? String)
+        let sharedSecret = try #require(pairResponse.json["sharedSecret"] as? String)
+        let pairedDevice = try #require(pairedDeviceStore.device(for: deviceID))
+        #expect(pairedDevice.sharedSecretBase64URL == sharedSecret)
+
+        let heartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: deviceID,
+            deviceName: "Deviceless iPhone",
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 42,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: nil
+        ))
+        let heartbeatHeaders = try signedJSONHeaders(
+            device: pairedDevice,
+            path: "/connection/heartbeat",
+            body: heartbeatBody,
+            nonce: "real-listener-paired-heartbeat"
+        )
+        let heartbeatRawResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: heartbeatHeaders,
+            body: heartbeatBody
+        )
+        #expect(heartbeatRawResponse.statusCode == 200)
+        let heartbeatResponse = try Self.connectionJSONDecoder.decode(ConnectionHeartbeatResponse.self, from: heartbeatRawResponse.body)
+        #expect(heartbeatResponse.ok)
+        #expect(heartbeatResponse.receivedSequenceNumber == 42)
+        #expect(heartbeatResponse.status?.presenceState == .online)
+        #expect(pairedDeviceStore.device(for: deviceID)?.lastSeenAt != nil)
+
+        let probeBody = try encodedConnectionProbeRequest(
+            sequenceNumber: 99,
+            clientPayload: "tiny probe payload"
+        )
+        let probeResponse = try await client.postJSON(
+            port: activePort,
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/probe",
+                body: probeBody,
+                nonce: "real-listener-paired-probe"
+            ),
+            body: probeBody
+        )
+        #expect(probeResponse.statusCode == 200)
+        #expect(probeResponse.json["ok"] as? Bool == true)
+        #expect(probeResponse.json["disposition"] as? String == "ok")
+        #expect(probeResponse.json["receivedSequenceNumber"] as? Int == 99)
+        #expect(probeResponse.json["echoedClientPayload"] as? String == "tiny probe payload")
+    }
+
+    @MainActor
+    @Test func realConnectionBeginPairingFromStoppedStateProducesUsablePayloadAndPairsThroughTLS() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        _ = harness.statusStore.recordHeartbeatFailure(
+            deviceID: "stale-device",
+            displayName: "Old iPhone",
+            errorCode: "certificate_pinning_failed",
+            errorMessage: "Previous fingerprint mismatch",
+            isSecurityFailure: true
+        )
+
+        harness.service.beginPairing()
+        let payload = try await waitForPairingPayload(harness.service)
+        try assertPairingPayload(payload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.pairingFlowState == .pairingCodeIssued)
+        #expect(harness.service.canCopyPairingInfo)
+        #expect(harness.pairedDeviceStore.deviceCount == 0)
+
+        let client = RealListenerPinnedHTTPSClient(expectedFingerprint: payload.fingerprint)
+        defer {
+            client.invalidate()
+        }
+
+        let fingerprintResponse = try await client.getJSON(host: payload.host, port: payload.port, path: "/fingerprint")
+        #expect(fingerprintResponse.statusCode == 200)
+        #expect(fingerprintResponse.json["fingerprint"] as? String == payload.fingerprint)
+        #expect(fingerprintResponse.json["type"] as? String == payload.fingerprintType)
+
+        let unpairedDevice = PairedDevice(
+            id: "iphone-unpaired-service",
+            deviceName: "Unpaired iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let unpairedHeartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: unpairedDevice, sequenceNumber: 1))
+        let unpairedHeartbeatResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: unpairedDevice,
+                path: "/connection/heartbeat",
+                body: unpairedHeartbeatBody,
+                nonce: "service-unpaired-heartbeat"
+            ),
+            body: unpairedHeartbeatBody
+        )
+        #expect(unpairedHeartbeatResponse.statusCode == 400)
+        #expect(unpairedHeartbeatResponse.json["error"] as? String == "unknown_device")
+        #expect(harness.statusStore.status(for: unpairedDevice.id) == nil)
+
+        let pairResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(withJSONObject: [
+                "pairingCode": payload.pairingCode,
+                "deviceName": "Deviceless iPhone",
+                "deviceType": "iPhone"
+            ], options: [.sortedKeys])
+        )
+        #expect(pairResponse.statusCode == 200)
+        #expect(pairResponse.json["ok"] as? Bool == true)
+        let deviceID = try #require(pairResponse.json["deviceID"] as? String)
+        let sharedSecret = try #require(pairResponse.json["sharedSecret"] as? String)
+        let pairedDevice = try #require(harness.pairedDeviceStore.device(for: deviceID))
+        #expect(pairedDevice.sharedSecretBase64URL == sharedSecret)
+
+        let heartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: pairedDevice.id,
+            deviceName: pairedDevice.deviceName,
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 42,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: nil
+        ))
+        let heartbeatResponse = try await client.postData(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/heartbeat",
+                body: heartbeatBody,
+                nonce: "service-paired-heartbeat"
+            ),
+            body: heartbeatBody
+        )
+        #expect(heartbeatResponse.statusCode == 200)
+        let decodedHeartbeat = try Self.connectionJSONDecoder.decode(ConnectionHeartbeatResponse.self, from: heartbeatResponse.body)
+        #expect(decodedHeartbeat.ok)
+        #expect(decodedHeartbeat.receivedSequenceNumber == 42)
+        #expect(harness.statusStore.status(for: pairedDevice.id)?.presenceState == .online)
+
+        let probeBody = try encodedConnectionProbeRequest(
+            sequenceNumber: 77,
+            clientPayload: "goal-mode tiny probe"
+        )
+        let probeResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/probe",
+                body: probeBody,
+                nonce: "service-paired-probe"
+            ),
+            body: probeBody
+        )
+        #expect(probeResponse.statusCode == 200)
+        #expect(probeResponse.json["disposition"] as? String == "ok")
+        #expect(probeResponse.json["receivedSequenceNumber"] as? Int == 77)
+        #expect(probeResponse.json["echoedClientPayload"] as? String == "goal-mode tiny probe")
+
+        var badProbeHeaders = try signedJSONHeaders(
+            device: pairedDevice,
+            path: "/connection/probe",
+            body: probeBody,
+            nonce: "service-bad-hmac-probe"
+        )
+        badProbeHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badProbeResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/probe",
+            headers: badProbeHeaders,
+            body: probeBody
+        )
+        #expect(badProbeResponse.statusCode == 400)
+        #expect(badProbeResponse.json["error"] as? String == "signature_mismatch")
+
+        try await performRealSocketShortUploadSmoke(
+            client: client,
+            host: payload.host,
+            port: payload.port,
+            device: pairedDevice,
+            recordingStore: harness.recordingFileStore
+        )
+
+        let diagnostics = harness.diagnosticsStore.loadEntries()
+        let phases = Set(diagnostics.map(\.phase))
+        #expect(phases.contains("begin_pairing_requested"))
+        #expect(phases.contains("listener_ready"))
+        #expect(phases.contains("pairing_code_issued"))
+        #expect(phases.contains("fingerprint_endpoint_reached"))
+        #expect(phases.contains("pair_request_reached"))
+        #expect(phases.contains("heartbeat_success"))
+        #expect(phases.contains("probe_success"))
+        let diagnosticsText = try String(contentsOf: harness.diagnosticsStore.logURL, encoding: .utf8)
+        #expect(!diagnosticsText.contains(payload.pairingCode))
+        #expect(!diagnosticsText.contains(sharedSecret))
+        #expect(!diagnosticsText.lowercased().contains("privatekey"))
+        #expect(!diagnosticsText.lowercased().contains("hmac"))
+
+        harness.service.stopSecureReceiving()
+        #expect(!harness.service.isHTTPSRunning)
+        #expect(harness.service.pairingPayload == nil)
+        let disconnectedStatus = try #require(harness.statusStore.status(for: pairedDevice.id, now: Date().addingTimeInterval(20)))
+        #expect(disconnectedStatus.presenceState == .disconnected)
+
+        harness.service.startSecureReceiving()
+        try await waitForHTTPSReady(harness.service)
+        let reopenedPort = try #require(harness.service.activeHTTPSPort)
+        let reopenedClient = RealListenerPinnedHTTPSClient(expectedFingerprint: harness.identityManager.status.certificateFingerprint)
+        defer {
+            reopenedClient.invalidate()
+        }
+        let reconnectHeartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: pairedDevice.id,
+            deviceName: pairedDevice.deviceName,
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 43,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: disconnectedStatus.connectionStatusRevision
+        ))
+        let reconnectResponse = try await reopenedClient.postData(
+            host: payload.host,
+            port: reopenedPort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/heartbeat",
+                body: reconnectHeartbeatBody,
+                nonce: "service-reconnect-heartbeat"
+            ),
+            body: reconnectHeartbeatBody
+        )
+        #expect(reconnectResponse.statusCode == 200)
+        #expect(harness.statusStore.status(for: pairedDevice.id)?.presenceState == .online)
+    }
+
+    @MainActor
+    @Test func realConnectionBeginPairingFromReadyStateProducesUsablePayloadImmediately() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        harness.service.startSecureReceiving()
+        try await waitForHTTPSReady(harness.service)
+        #expect(harness.service.pairingFlowState == .readyForPairing)
+
+        harness.service.beginPairing()
+
+        let payload = try #require(harness.service.pairingPayload)
+        try assertPairingPayload(payload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.pairingFlowState == .pairingCodeIssued)
+        #expect(harness.service.pairingCode == payload.pairingCode)
+        #expect(harness.service.canCopyPairingInfo)
+    }
+
+    @MainActor
+    @Test func realMacConnectionPageEntryActionPublishesCodeAndEnablesCopyFromSameService() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        #expect(harness.service.canBeginPairingFromUI)
+        harness.service.recordAppLaunch()
+        harness.service.recordConnectionPageLoaded(
+            beginPairingButtonEnabled: harness.service.canBeginPairingFromUI,
+            copyEnabled: harness.service.canCopyPairingInfo
+        )
+        harness.service.recordBeginPairingButtonTapped(
+            beginPairingButtonEnabled: harness.service.canBeginPairingFromUI,
+            copyEnabled: harness.service.canCopyPairingInfo
+        )
+
+        harness.service.beginPairing()
+
+        let payload = try await waitForPairingPayload(harness.service)
+        try assertPairingPayload(payload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.pairingCode == payload.pairingCode)
+        #expect(harness.service.pairingPayload == payload)
+        #expect(harness.service.canCopyPairingInfo)
+
+        let diagnostics = harness.diagnosticsStore.loadEntries()
+        let phases = Set(diagnostics.map(\.phase))
+        #expect(phases.contains("appLaunch"))
+        #expect(phases.contains("connectionPageLoaded"))
+        #expect(phases.contains("beginPairingButtonTapped"))
+        #expect(phases.contains("beginPairingRequested"))
+        #expect(phases.contains("listenerStarting"))
+        #expect(phases.contains("listenerReady"))
+        #expect(phases.contains("payloadPublished"))
+        #expect(phases.contains("codeIssued"))
+        #expect(diagnostics.contains { $0.beginPairingButtonEnabled == true })
+        #expect(diagnostics.contains { $0.payloadPublished == true })
+        #expect(diagnostics.contains { $0.copyEnabled == true })
+
+        let diagnosticsText = try String(contentsOf: harness.diagnosticsStore.logURL, encoding: .utf8)
+        #expect(!diagnosticsText.contains(payload.pairingCode))
+        #expect(!diagnosticsText.lowercased().contains("sharedsecret"))
+        #expect(!diagnosticsText.lowercased().contains("privatekey"))
+        #expect(!diagnosticsText.lowercased().contains("hmac"))
+    }
+
+    @MainActor
+    @Test func disconnectedOrSecurityErrorDoesNotBlockFreshBeginPairing() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        let pairedDevice = PairedDevice(
+            id: "iphone-\(UUID().uuidString)",
+            deviceName: "iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date()
+        )
+        harness.pairedDeviceStore.upsert(pairedDevice)
+
+        let disconnectedStatus = harness.statusStore.markOffline(
+            deviceID: pairedDevice.id,
+            displayName: pairedDevice.deviceName,
+            error: "manual_disconnect"
+        )
+        #expect(disconnectedStatus.presenceState == .disconnected)
+        #expect(harness.service.canBeginPairingFromUI)
+
+        harness.service.beginPairing()
+
+        let disconnectedPayload = try await waitForPairingPayload(harness.service)
+        try assertPairingPayload(disconnectedPayload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.canCopyPairingInfo)
+
+        let securityStatus = harness.statusStore.recordHeartbeatFailure(
+            deviceID: pairedDevice.id,
+            displayName: pairedDevice.deviceName,
+            errorCode: "fingerprint_mismatch",
+            errorMessage: "fingerprint mismatch",
+            isSecurityFailure: true
+        )
+        #expect(securityStatus.presenceState == .securityError)
+        #expect(harness.service.canBeginPairingFromUI)
+
+        harness.service.beginPairing()
+
+        let securityPayload = try await waitForPairingPayload(harness.service)
+        try assertPairingPayload(securityPayload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.canCopyPairingInfo)
+    }
+
+    @MainActor
+    @Test func realConnectionBeginPairingWhileListenerStartingPublishesPayloadAfterReady() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        harness.service.startSecureReceiving()
+        harness.service.beginPairing()
+
+        let payload = try await waitForPairingPayload(harness.service)
+        try assertPairingPayload(payload, matches: harness.service, identityManager: harness.identityManager)
+        #expect(harness.service.pairingFlowState == .pairingCodeIssued)
+        #expect(harness.service.canCopyPairingInfo)
+    }
+
+    @MainActor
+    @Test func beginPairingFailureReportsErrorInsteadOfSilentNoop() throws {
+        let rootURL = try makeScratchDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: rootURL.appendingPathComponent("Security", isDirectory: true),
+            tlsKeyTagNamespace: "unloaded-\(UUID().uuidString)"
+        )
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let recordingStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let service = SecureReceiverService(
+            port: 0,
+            identityManager: identityManager,
+            pairedDeviceStore: pairedDeviceStore,
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingStore,
+            studyLibraryStore: StudyLibraryStore(
+                rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
+                recordingFileStore: recordingStore,
+                listenForInboxChanges: false
+            ),
+            deviceConnectionStatusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: rootURL),
+            connectionDiagnosticsStore: ConnectionDiagnosticsStore(rootURL: rootURL),
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+
+        service.beginPairing()
+
+        #expect(service.pairingFlowState == .failed)
+        #expect(service.pairingPayload == nil)
+        #expect(service.connectionErrorCode == .tlsHandshakeFailed)
+        #expect(service.lastError != nil)
+    }
+
+    @MainActor
+    @Test func devicelessFreshPairingHeartbeatAndSmallRecordingUploadSmoke() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let securityRootURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let libraryRootURL = rootURL.appendingPathComponent("Library", isDirectory: true)
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityRootURL)
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let pairingNow = Date(timeIntervalSince1970: 4_000)
+        pairingManager.beginPairing(now: pairingNow)
+        let pairingCode = try #require(pairingManager.activeChallenge?.code)
+        var pairingChangedCount = 0
+        let pairingHandler = PairingBootstrapRouteHandler(
+            pairingManager: pairingManager,
+            macName: "Smoke Mac",
+            macModel: "Mac",
+            onPairingChanged: { pairingChangedCount += 1 }
+        )
+        let pairBody = Data(#"{"pairingCode":"\#(pairingCode)","deviceName":"Smoke iPhone","deviceType":"iPhone"}"#.utf8)
+
+        let pairResponse = pairingHandler.pairingResponse(
+            method: "POST",
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: pairBody,
+            now: pairingNow.addingTimeInterval(1)
+        )
+        let pairJSON = try routeResponseJSON(pairResponse)
+        let pairedDevice = try #require(pairedDeviceStore.devices.first)
+
+        #expect(pairResponse.statusCode == 200)
+        #expect(pairJSON["ok"] as? Bool == true)
+        #expect(pairJSON["deviceID"] as? String == pairedDevice.id)
+        #expect(pairJSON["sharedSecret"] as? String == pairedDevice.sharedSecretBase64URL)
+        #expect(pairingChangedCount == 1)
+
+        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL.appendingPathComponent("ConnectionStatus", isDirectory: true))
+        let heartbeatHandler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: requestVerifier,
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-smoke-peer"
+        )
+        let heartbeatRequest = makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 42)
+        let heartbeatBody = try encodedHeartbeatRequest(heartbeatRequest)
+        let heartbeatNow = Date()
+        let heartbeatResponse = heartbeatHandler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: heartbeatBody, nonce: "smoke-heartbeat", now: heartbeatNow),
+            body: heartbeatBody,
+            now: heartbeatNow
+        )
+        let decodedHeartbeat = try decodeHeartbeatResponse(heartbeatResponse)
+
+        #expect(heartbeatResponse.statusCode == 200)
+        #expect(decodedHeartbeat.ok)
+        #expect(decodedHeartbeat.receivedSequenceNumber == 42)
+        #expect(pairedDeviceStore.device(for: pairedDevice.id)?.lastSeenAt != nil)
+
+        let probeHandler = ConnectionProbeRouteHandler(requestVerifier: requestVerifier)
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 43, clientPayload: "route tiny probe")
+        let probeResponse = probeHandler.probeResponse(
+            method: "POST",
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/probe",
+                body: probeBody,
+                nonce: "smoke-probe",
+                now: heartbeatNow.addingTimeInterval(1)
+            ),
+            body: probeBody,
+            now: heartbeatNow.addingTimeInterval(1)
+        )
+        let probeJSON = try routeResponseJSON(probeResponse)
+
+        #expect(probeResponse.statusCode == 200)
+        #expect(probeJSON["ok"] as? Bool == true)
+        #expect(probeJSON["disposition"] as? String == "ok")
+        #expect(probeJSON["receivedSequenceNumber"] as? Int == 43)
+        #expect(probeJSON["echoedClientPayload"] as? String == "route tiny probe")
+
+        let recordingStore = MacRecordingFileStore(rootURL: libraryRootURL)
+        var acceptedRecordingIDs: [String] = []
+        let uploadHandler = RecordingUploadRouteHandler(
+            requestVerifier: requestVerifier,
+            recordingFileStore: recordingStore,
+            onRecordingAccepted: { acceptedRecordingIDs.append($0) }
+        )
+        let audio = Data("fake ten second m4a audio".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "deviceless-smoke-01", fileSize: Int64(audio.count))
+        let metadataBody = try encodedMetadata(metadata)
+
+        let metadataResponse = uploadHandler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-new"),
+            body: metadataBody
+        )
+        let metadataJSON = try routeResponseJSON(metadataResponse)
+
+        #expect(metadataResponse.statusCode == 200)
+        #expect(metadataJSON["ok"] as? Bool == true)
+        #expect(metadataJSON["disposition"] as? String == RecordingUploadDisposition.acceptedNew.rawValue)
+
+        let audioResponse = uploadHandler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-new"),
+            body: audio
+        )
+        let audioJSON = try routeResponseJSON(audioResponse)
+        let receiveRecord = try readReceiveRecord(rootURL: libraryRootURL, recordingID: metadata.id)
+        let recordingDirectoryURL = libraryRootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("1970-01-01", isDirectory: true)
+            .appendingPathComponent(metadata.id, isDirectory: true)
+        let metadataURL = recordingDirectoryURL.appendingPathComponent("metadata.json", isDirectory: false)
+        let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false)
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false)
+
+        #expect(audioResponse.statusCode == 200)
+        #expect(audioJSON["ok"] as? Bool == true)
+        #expect(audioJSON["disposition"] as? String == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(FileManager.default.fileExists(atPath: metadataURL.path))
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(FileManager.default.fileExists(atPath: receiveURL.path))
+        #expect(try Data(contentsOf: audioURL) == audio)
+        #expect(receiveRecord.status == "completed")
+        #expect(receiveRecord.processingStatus == "notStarted")
+        #expect(receiveRecord.checksum == MacSecurityUtilities.sha256Hex(audio))
+        #expect(acceptedRecordingIDs.contains(metadata.id))
+
+        let repeatedMetadataResponse = uploadHandler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-repeat"),
+            body: metadataBody
+        )
+        let repeatedAudioResponse = uploadHandler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-repeat"),
+            body: audio
+        )
+
+        #expect((try routeResponseJSON(repeatedMetadataResponse))["disposition"] as? String == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect((try routeResponseJSON(repeatedAudioResponse))["disposition"] as? String == RecordingUploadDisposition.acceptedExisting.rawValue)
+
+        let conflictingMetadata = makeIncomingUploadMetadata(id: metadata.id, fileSize: Int64(audio.count + 1))
+        let conflictingMetadataBody = try encodedMetadata(conflictingMetadata)
+        let metadataConflictResponse = uploadHandler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: conflictingMetadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-conflict"),
+            body: conflictingMetadataBody
+        )
+        let conflictingAudio = Data("different fake m4a audio".utf8)
+        let audioConflictResponse = uploadHandler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: conflictingAudio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-conflict"),
+            body: conflictingAudio
+        )
+
+        #expect(metadataConflictResponse.statusCode == 409)
+        #expect((try routeResponseJSON(metadataConflictResponse))["error"] as? String == "recording_metadata_conflict")
+        #expect(String(data: metadataConflictResponse.bodyData, encoding: .utf8)?.contains(pairedDevice.sharedSecretBase64URL) == false)
+        #expect(audioConflictResponse.statusCode == 409)
+        #expect((try routeResponseJSON(audioConflictResponse))["error"] as? String == "recording_audio_conflict")
+        #expect(String(data: audioConflictResponse.bodyData, encoding: .utf8)?.contains(pairedDevice.sharedSecretBase64URL) == false)
+    }
+
+    @MainActor
+    @Test func devicelessUnpairedSecureRoutesRejectBeforeMutationSmoke() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL.appendingPathComponent("ConnectionStatus", isDirectory: true))
+        let heartbeatHandler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: requestVerifier,
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-smoke-peer"
+        )
+        let probeHandler = ConnectionProbeRouteHandler(requestVerifier: requestVerifier)
+        let recordingStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let uploadHandler = RecordingUploadRouteHandler(
+            requestVerifier: requestVerifier,
+            recordingFileStore: recordingStore,
+            onRecordingAccepted: { _ in Issue.record("unpaired upload must not be accepted") }
+        )
+        let unpairedDevice = PairedDevice(
+            id: "unpaired-smoke-device",
+            deviceName: "Unpaired iPhone",
+            sharedSecretBase64URL: Data("unpaired-secret".utf8).base64URLEncodedString(),
+            pairedAt: Date(timeIntervalSince1970: 4_000),
+            lastSeenAt: nil
+        )
+        let heartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: unpairedDevice, sequenceNumber: 7))
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 8, clientPayload: "unpaired smoke")
+        let metadata = makeIncomingUploadMetadata(id: "unpaired-smoke-recording")
+        let metadataBody = try encodedMetadata(metadata)
+        let audio = Data("audio".utf8)
+
+        let heartbeatResponse = heartbeatHandler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: unpairedDevice, path: "/connection/heartbeat", body: heartbeatBody, nonce: "unpaired-smoke-heartbeat"),
+            body: heartbeatBody
+        )
+        let probeResponse = probeHandler.probeResponse(
+            method: "POST",
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(device: unpairedDevice, path: "/connection/probe", body: probeBody, nonce: "unpaired-smoke-probe"),
+            body: probeBody
+        )
+        let syncInventoryResult = requestVerifier.verify(
+            method: "POST",
+            path: "/sync/inventory",
+            headers: try signedJSONHeaders(device: unpairedDevice, path: "/sync/inventory", body: Data("{}".utf8), nonce: "unpaired-smoke-sync"),
+            body: Data("{}".utf8)
+        )
+        let metadataResponse = uploadHandler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "unpaired-smoke-metadata"),
+            body: metadataBody
+        )
+        let audioResponse = uploadHandler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "unpaired-smoke-audio"),
+            body: audio
+        )
+
+        #expect(heartbeatResponse.statusCode == 400)
+        #expect((try routeResponseJSON(heartbeatResponse))["error"] as? String == "unknown_device")
+        #expect(probeResponse.statusCode == 400)
+        #expect((try routeResponseJSON(probeResponse))["error"] as? String == "unknown_device")
+        switch syncInventoryResult {
+        case .accepted:
+            Issue.record("unpaired /sync/inventory unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "unknown_device")
+        }
+        #expect(metadataResponse.statusCode == 400)
+        #expect((try routeResponseJSON(metadataResponse))["error"] as? String == "unknown_device")
+        #expect(audioResponse.statusCode == 400)
+        #expect((try routeResponseJSON(audioResponse))["error"] as? String == "unknown_device")
+        #expect(pairedDeviceStore.devices.isEmpty)
+        #expect(statusStore.latestStatus == nil)
+        #expect(recordingStore.loadInboxItems().isEmpty)
+    }
+
+    @MainActor
+    @Test func pairingBootstrapPathIsNotMatchedByPairedHMACRouteRules() throws {
+        let verifier = RequestVerifier(pairedDeviceProvider: { _ in nil })
+        let result = verifier.verify(
+            method: "POST",
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"pairingCode":"123456"}"#.utf8)
+        )
+
+        switch result {
+        case .accepted:
+            Issue.record("/pair must not be accepted by paired HMAC verifier")
+        case .rejected(let reason):
+            #expect(reason == "path_not_allowed")
+        }
+    }
+
+    @MainActor
+    @Test func unpairedHeartbeatSyncAndUploadSecureRoutesRemainRejected() throws {
+        let device = makeHeartbeatDevice()
+        let verifier = RequestVerifier(pairedDeviceProvider: { _ in nil })
+        let now = Date(timeIntervalSince1970: 3_200)
+        let jsonBody = Data("{}".utf8)
+
+        let heartbeat = verifier.verify(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: device, path: "/connection/heartbeat", body: jsonBody, nonce: "unpaired-heartbeat", now: now),
+            body: jsonBody,
+            now: now
+        )
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 1, clientPayload: "unpaired verifier probe", sentAt: now)
+        let probe = verifier.verify(
+            method: "POST",
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(device: device, path: "/connection/probe", body: probeBody, nonce: "unpaired-probe", now: now),
+            body: probeBody,
+            now: now
+        )
+        let sync = verifier.verify(
+            method: "POST",
+            path: "/sync/inventory",
+            headers: try signedJSONHeaders(device: device, path: "/sync/inventory", body: jsonBody, nonce: "unpaired-sync", now: now),
+            body: jsonBody,
+            now: now
+        )
+        let audioBody = Data("audio".utf8)
+        let upload = verifier.verify(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audioBody, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: "unpaired-audio", fileName: "audio.m4a", nonce: "unpaired-upload"),
+            body: audioBody
+        )
+
+        for result in [heartbeat, probe, sync, upload] {
+            switch result {
+            case .accepted:
+                Issue.record("unpaired secure route unexpectedly accepted")
+            case .rejected(let reason):
+                #expect(reason == "unknown_device")
+            }
+        }
+    }
+
+    @MainActor
+    @Test func badHMACSecureRequestDoesNotMutatePairingPresenceState() throws {
+        let device = makeHeartbeatDevice()
+        var didMarkSeen = false
+        let verifier = RequestVerifier(
+            pairedDeviceProvider: { id in id == device.id ? device : nil },
+            markDeviceSeen: { _, _ in didMarkSeen = true }
+        )
+        let now = Date(timeIntervalSince1970: 3_300)
+        let body = Data("{}".utf8)
+        var headers = try signedJSONHeaders(device: device, path: "/connection/heartbeat", body: body, nonce: "bad-hmac-mutation", now: now)
+        headers["X-Rokurics-Signature"] = "bad-signature"
+
+        let result = verifier.verify(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: headers,
+            body: body,
+            now: now
+        )
+
+        switch result {
+        case .accepted:
+            Issue.record("bad HMAC secure request unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "signature_mismatch")
+        }
+        #expect(!didMarkSeen)
+
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 2, clientPayload: "bad hmac probe", sentAt: now)
+        var probeHeaders = try signedJSONHeaders(device: device, path: "/connection/probe", body: probeBody, nonce: "bad-hmac-probe", now: now)
+        probeHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let probeResult = verifier.verify(
+            method: "POST",
+            path: "/connection/probe",
+            headers: probeHeaders,
+            body: probeBody,
+            now: now
+        )
+
+        switch probeResult {
+        case .accepted:
+            Issue.record("bad HMAC probe unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "signature_mismatch")
+        }
+        #expect(!didMarkSeen)
+    }
+
+    @Test func macTLSIdentityUsesAppLocalNonInteractiveIdentityWithoutProvisioningEntitlements() throws {
+        let source = try sourceText("RokuricsMac/MacIdentityManager.swift")
+        let profileSource = try sourceText("RokuricsMac/MacAppStorageProfile.swift")
+
+        #expect(source.contains("tls-private-key.json"))
+        #expect(source.contains("SecKeyCreateWithData"))
+        #expect(source.contains("SecIdentityCreate(nil, certificate, privateKey)"))
+        #expect(source.contains("certificate(existingCertificate, matches: key)"))
+        #expect(!source.contains("kSecUseDataProtectionKeychain"))
+        #expect(!source.contains("SecItemAdd"))
+        #expect(!source.contains("SecItemCopyMatching"))
+        #expect(!source.contains("SecAccessControlCreateWithFlags"))
+        #expect(!source.contains(".privateKeyUsage"))
+        #expect(!source.contains("kSecAttrAccessControl"))
+        #expect(!source.contains("Apple Development"))
+        #expect(!profileSource.contains(".tls.private-key.dp.noninteractive.v2"))
+        #expect(!profileSource.contains("TLS Private Key DP v2"))
+    }
+
+    @Test func macHTTPSServerStartupSourceUsesNonInteractiveTLSIdentity() throws {
+        let serverSource = try sourceText("RokuricsMac/SecureLocalHTTPSServer.swift")
+        let identitySource = try sourceText("RokuricsMac/MacIdentityManager.swift")
+
+        #expect(serverSource.contains("identityManager.tlsOptions()"))
+        #expect(serverSource.contains("NWParameters(tls: tlsOptions"))
+        #expect(identitySource.contains("sec_protocol_options_set_local_identity"))
+        #expect(identitySource.contains("SecIdentityCreate(nil, certificate, privateKey)"))
+        #expect(!identitySource.contains("kSecUseDataProtectionKeychain"))
+        #expect(!identitySource.contains("SecAccessControlCreateWithFlags"))
+        #expect(!identitySource.contains(".privateKeyUsage"))
+        #expect(!identitySource.contains("kSecAttrAccessControl"))
+        #expect(!identitySource.contains("Apple Development"))
+    }
+
+    @Test func secureReceiverServiceDefersPairingPayloadUntilHTTPSListenerReady() throws {
+        let source = try sourceText("RokuricsMac/SecureReceiverService.swift")
+
+        #expect(source.contains("pendingPairingStartAfterHTTPSReady"))
+        #expect(source.contains("completePendingPairingIfPossible(trigger: \"listener_ready\")"))
+        #expect(source.contains("completePendingPairingIfPossible(trigger: \"begin_pairing_already_ready\")"))
+        #expect(source.contains("pairing deferred until HTTPS listener ready"))
+        #expect(source.contains("guard let httpsServer, httpsServer.isReady else"))
+        #expect(source.contains("pairing_waiting_for_listener_ready"))
+    }
+
+    @Test func macTLSIdentityProviderDoesNotLogPrivateKeyMaterial() throws {
+        let source = try sourceText("RokuricsMac/MacIdentityManager.swift")
+
+        #expect(!source.contains("print(\"[RokuricsIdentity] privateKey"))
+        #expect(!source.contains("print(\"[RokuricsIdentity] keyData"))
+        #expect(!source.contains("print(\"[RokuricsIdentity] tlsPrivateKey"))
+        #expect(!source.contains("print(\"[RokuricsSecurity] sharedSecret"))
+    }
+
+    @MainActor
+    @Test func heartbeatRouteRejectsUnpairedAndBadSignatureBeforeLastSeenMutation() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeHeartbeatDevice()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let request = makeHeartbeatRequest(device: device, sequenceNumber: 1)
+        let body = try encodedHeartbeatRequest(request)
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil }),
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-local"
+        )
+        let badSignatureNow = Date(timeIntervalSince1970: 2_000)
+        var badHeaders = try signedJSONHeaders(
+            device: device,
+            path: "/connection/heartbeat",
+            body: body,
+            nonce: "heartbeat-bad-signature",
+            now: badSignatureNow
+        )
+        badHeaders["X-Rokurics-Signature"] = "bad-signature"
+
+        let badSignatureResponse = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: badHeaders,
+            body: body,
+            now: badSignatureNow
+        )
+        let unpairedHandler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: RequestVerifier(pairedDeviceProvider: { _ in nil }),
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-local"
+        )
+        let unpairedNow = Date(timeIntervalSince1970: 2_001)
+        let unpairedResponse = unpairedHandler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: body,
+                nonce: "heartbeat-unpaired",
+                now: unpairedNow
+            ),
+            body: body,
+            now: unpairedNow
+        )
+
+        #expect(badSignatureResponse.statusCode == 400)
+        #expect((try routeResponseJSON(badSignatureResponse))["error"] as? String == "signature_mismatch")
+        #expect(unpairedResponse.statusCode == 400)
+        #expect((try routeResponseJSON(unpairedResponse))["error"] as? String == "unknown_device")
+        #expect(statusStore.status(for: device.id) == nil)
+    }
+
+    @MainActor
+    @Test func validHeartbeatReturnsPongAndUpdatesLastSeen() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeHeartbeatDevice()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let request = makeHeartbeatRequest(device: device, sequenceNumber: 42)
+        let body = try encodedHeartbeatRequest(request)
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil }),
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-local"
+        )
+        let now = Date(timeIntervalSince1970: 2_100)
+
+        let response = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: body,
+                nonce: "heartbeat-valid",
+                now: now
+            ),
+            body: body,
+            now: now
+        )
+        let decoded = try decodeHeartbeatResponse(response)
+        let status = try #require(statusStore.status(for: device.id, now: now))
+
+        #expect(response.statusCode == 200)
+        #expect(decoded.ok)
+        #expect(decoded.disposition == "ok")
+        #expect(decoded.receivedSequenceNumber == 42)
+        #expect(decoded.peerDeviceID == "mac-local")
+        #expect(status.presenceState == .online)
+        #expect(status.lastSuccessfulHeartbeatAt == Date(timeIntervalSince1970: 2_100))
+        #expect(String(data: response.bodyData, encoding: .utf8)?.contains(device.sharedSecretBase64URL) == false)
+        #expect(!FileManager.default.fileExists(atPath: rootURL.appendingPathComponent("audio", isDirectory: true).path))
+    }
+
+    @MainActor
+    @Test func pairedDevicePresenceBecomesStaleThenDisconnectedAfterThresholds() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = DeviceConnectionStatusStore(rootURL: rootURL, staleAfter: 6, disconnectedAfter: 10)
+        let device = makeHeartbeatDevice()
+
+        _ = store.recordHeartbeatSuccess(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            sentAt: Date(timeIntervalSince1970: 0),
+            receivedAt: Date(timeIntervalSince1970: 0),
+            latencyMilliseconds: 1
+        )
+        let stale = try #require(store.status(for: device.id, now: Date(timeIntervalSince1970: 7)))
+        let disconnected = try #require(store.status(for: device.id, now: Date(timeIntervalSince1970: 11)))
+
+        #expect(stale.presenceState == .stale)
+        #expect(stale.state == .offline)
+        #expect(disconnected.presenceState == .disconnected)
+        #expect(disconnected.state == .offline)
+    }
+
+    @MainActor
+    @Test func heartbeatPayloadAndResponseContainNoSecretsOrFileData() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeHeartbeatDevice()
+        let request = makeHeartbeatRequest(device: device, sequenceNumber: 9)
+        let body = try encodedHeartbeatRequest(request)
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil }),
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            localPeerDeviceID: "mac-local"
+        )
+        let now = Date(timeIntervalSince1970: 2_200)
+        let response = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: body,
+                nonce: "heartbeat-no-secret",
+                now: now
+            ),
+            body: body,
+            now: now
+        )
+        let combined = [
+            String(data: body, encoding: .utf8) ?? "",
+            String(data: response.bodyData, encoding: .utf8) ?? ""
+        ].joined(separator: "\n").lowercased()
+
+        #expect(!combined.contains(device.sharedSecretBase64URL.lowercased()))
+        #expect(!combined.contains("sharedsecret"))
+        #expect(!combined.contains("hmac"))
+        #expect(!combined.contains("manifest"))
+        #expect(!combined.contains("transcript"))
+        #expect(!combined.contains("audio"))
+        #expect(!combined.contains("note"))
+    }
+
+    @Test func resumableStartCreatesSessionAndRepeatedStartIsIdempotent() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let audio = Data("abcdef".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "resumable-start-01", fileSize: Int64(audio.count))
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+
+        let first = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let second = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let sessionID = try #require(first.sessionID)
+        let sessionURL = rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("upload-sessions", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
+            .appendingPathComponent("session.json", isDirectory: false)
+        let partURL = sessionURL.deletingLastPathComponent().appendingPathComponent("audio.part", isDirectory: false)
+
+        #expect(first.disposition == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(second.disposition == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect(second.confirmedBytes == 0)
+        #expect(FileManager.default.fileExists(atPath: sessionURL.path))
+        #expect(FileManager.default.fileExists(atPath: partURL.path))
+        #expect((try String(contentsOf: sessionURL)).contains(device.sharedSecretBase64URL) == false)
+    }
+
+    @Test func resumableConflictingStartIsRejected() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let audio = Data("abcdef".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "resumable-start-conflict", fileSize: Int64(audio.count))
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+        _ = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let conflicting = ResumableAudioUploadStartRequest(
+            recordingID: request.recordingID,
+            fileName: request.fileName,
+            totalBytes: request.totalBytes,
+            totalSHA256: MacSecurityUtilities.sha256Hex(Data("xxxxxx".utf8)),
+            chunkSize: request.chunkSize,
+            metadataHash: nil,
+            uploadJobID: nil
+        )
+
+        do {
+            _ = try store.startResumableAudioUpload(conflicting, sourceDevice: device)
+            Issue.record("Expected conflicting resumable start to be rejected")
+        } catch MacRecordingFileStoreError.sessionConflict {
+            let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+            #expect(record.lastUploadError == "upload_session_conflict")
+            #expect(record.lastUploadError?.contains(device.sharedSecretBase64URL) == false)
+        }
+    }
+
+    @Test func resumableChunkStatusFinalizeAndRepeatedFinalizeAreIdempotent() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let audio = Data("abcdef".utf8)
+        let firstChunk = Data("abc".utf8)
+        let secondChunk = Data("def".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "resumable-finalize-01", fileSize: Int64(audio.count))
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+        let start = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let sessionID = try #require(start.sessionID)
+
+        let chunk1 = try store.appendResumableAudioChunk(
+            recordingID: metadata.id,
+            sessionID: sessionID,
+            offset: 0,
+            length: firstChunk.count,
+            chunkSHA256: MacSecurityUtilities.sha256Hex(firstChunk),
+            totalSHA256: request.totalSHA256,
+            body: firstChunk,
+            sourceDevice: device
+        )
+        let duplicateChunk1 = try store.appendResumableAudioChunk(
+            recordingID: metadata.id,
+            sessionID: sessionID,
+            offset: 0,
+            length: firstChunk.count,
+            chunkSHA256: MacSecurityUtilities.sha256Hex(firstChunk),
+            totalSHA256: request.totalSHA256,
+            body: firstChunk,
+            sourceDevice: device
+        )
+        let status = try store.resumableAudioUploadStatus(
+            ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: sessionID, totalSHA256: request.totalSHA256),
+            sourceDevice: device
+        )
+
+        #expect(chunk1.disposition == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(chunk1.confirmedBytes == 3)
+        #expect(duplicateChunk1.disposition == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect(status.confirmedBytes == 3)
+        #expect(status.nextOffset == 3)
+
+        do {
+            _ = try store.appendResumableAudioChunk(
+                recordingID: metadata.id,
+                sessionID: sessionID,
+                offset: 5,
+                length: secondChunk.count,
+                chunkSHA256: MacSecurityUtilities.sha256Hex(secondChunk),
+                totalSHA256: request.totalSHA256,
+                body: secondChunk,
+                sourceDevice: device
+            )
+            Issue.record("Expected offset gap to be rejected")
+        } catch MacRecordingFileStoreError.chunkOffsetMismatch {
+            #expect(true)
+        }
+
+        _ = try store.appendResumableAudioChunk(
+            recordingID: metadata.id,
+            sessionID: sessionID,
+            offset: 3,
+            length: secondChunk.count,
+            chunkSHA256: MacSecurityUtilities.sha256Hex(secondChunk),
+            totalSHA256: request.totalSHA256,
+            body: secondChunk,
+            sourceDevice: device
+        )
+        let finalized = try store.finalizeResumableAudioUpload(
+            ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
+            sourceDevice: device
+        )
+        let repeatedFinalize = try store.finalizeResumableAudioUpload(
+            ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
+            sourceDevice: device
+        )
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        let finalAudioURL = rootURL.appendingPathComponent(record.audioRelativePath ?? "", isDirectory: false)
+
+        #expect(finalized.disposition == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(repeatedFinalize.disposition == RecordingUploadDisposition.acceptedExisting.rawValue)
+        #expect(record.status == "completed")
+        #expect(record.processingStatus == "notStarted")
+        #expect(record.checksum == request.totalSHA256)
+        #expect(try Data(contentsOf: finalAudioURL) == audio)
+    }
+
+    @Test func resumableDuplicateConflictingChunkMarksSessionFatal() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let audio = Data("abcdef".utf8)
+        let firstChunk = Data("abc".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "resumable-conflict-chunk", fileSize: Int64(audio.count))
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+        let sessionID = try #require(try store.startResumableAudioUpload(request, sourceDevice: device).sessionID)
+
+        _ = try store.appendResumableAudioChunk(
+            recordingID: metadata.id,
+            sessionID: sessionID,
+            offset: 0,
+            length: firstChunk.count,
+            chunkSHA256: MacSecurityUtilities.sha256Hex(firstChunk),
+            totalSHA256: request.totalSHA256,
+            body: firstChunk,
+            sourceDevice: device
+        )
+
+        do {
+            let conflictingChunk = Data("zzz".utf8)
+            _ = try store.appendResumableAudioChunk(
+                recordingID: metadata.id,
+                sessionID: sessionID,
+                offset: 0,
+                length: conflictingChunk.count,
+                chunkSHA256: MacSecurityUtilities.sha256Hex(conflictingChunk),
+                totalSHA256: request.totalSHA256,
+                body: conflictingChunk,
+                sourceDevice: device
+            )
+            Issue.record("Expected duplicate conflicting chunk to be rejected")
+        } catch MacRecordingFileStoreError.audioConflict {
+            #expect(true)
+        }
+
+        do {
+            let secondChunk = Data("def".utf8)
+            _ = try store.appendResumableAudioChunk(
+                recordingID: metadata.id,
+                sessionID: sessionID,
+                offset: 3,
+                length: secondChunk.count,
+                chunkSHA256: MacSecurityUtilities.sha256Hex(secondChunk),
+                totalSHA256: request.totalSHA256,
+                body: secondChunk,
+                sourceDevice: device
+            )
+            Issue.record("Expected conflicted session to reject later chunks")
+        } catch MacRecordingFileStoreError.sessionConflict {
+            #expect(true)
+        }
+
+        do {
+            _ = try store.finalizeResumableAudioUpload(
+                ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
+                sourceDevice: device
+            )
+            Issue.record("Expected conflicted session to reject finalize")
+        } catch MacRecordingFileStoreError.sessionConflict {
+            #expect(true)
+        }
+    }
+
+    @Test func resumableInvalidSessionIDIsRejected() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "resumable-invalid-session", fileSize: 6)
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+
+        do {
+            _ = try store.resumableAudioUploadStatus(
+                ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: "../escape", totalSHA256: String(repeating: "a", count: 64)),
+                sourceDevice: device
+            )
+            Issue.record("Expected path traversal sessionID to be rejected")
+        } catch MacRecordingFileStoreError.invalidSession {
+            #expect(true)
+        }
+    }
+
+    @Test func resumableSessionSymlinkEscapeIsRejected() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "resumable-symlink-session", fileSize: 6)
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let uploadSessionsURL = rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("upload-sessions", isDirectory: true)
+        let outsideURL = rootURL.appendingPathComponent("outside-sessions", isDirectory: true)
+        let symlinkURL = uploadSessionsURL.appendingPathComponent("session-escape", isDirectory: true)
+        try FileManager.default.createDirectory(at: uploadSessionsURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: outsideURL)
+
+        do {
+            _ = try store.resumableAudioUploadStatus(
+                ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: "session-escape", totalSHA256: String(repeating: "a", count: 64)),
+                sourceDevice: device
+            )
+            Issue.record("Expected symlink session escape to be rejected")
+        } catch MacRecordingFileStoreError.unsafeDestination {
+            #expect(true)
+        }
+    }
+
+    @MainActor
+    @Test func resumableRouteHappyPathAndResumeStatusUseSignedRequests() throws {
+        let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let audio = Data("abcdef".utf8)
+        let firstChunk = Data("abc".utf8)
+        let secondChunk = Data("def".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "route-resumable-happy", fileSize: Int64(audio.count))
+        let metadataBody = try encodedMetadata(metadata)
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-metadata"),
+            body: metadataBody
+        )
+        let startRequest = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+        let startBody = try encodedResumableRequest(startRequest)
+        let startResponse = handler.resumableAudioStartResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/start",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: startBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-start"),
+            body: startBody
+        )
+        let startJSON = try decodeResumableResponse(startResponse)
+        let sessionID = try #require(startJSON.sessionID)
+
+        let chunk1Response = handler.resumableAudioChunkResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/chunk",
+            headers: try signedChunkHeaders(device: device, recordingID: metadata.id, sessionID: sessionID, offset: 0, chunk: firstChunk, totalSHA256: startRequest.totalSHA256, nonce: "nonce-route-resumable-chunk-1"),
+            body: firstChunk
+        )
+        let statusRequest = ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: sessionID, totalSHA256: startRequest.totalSHA256)
+        let statusBody = try encodedResumableRequest(statusRequest)
+        let statusResponse = handler.resumableAudioStatusResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/status",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/status", body: statusBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-status"),
+            body: statusBody
+        )
+        _ = handler.resumableAudioChunkResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/chunk",
+            headers: try signedChunkHeaders(device: device, recordingID: metadata.id, sessionID: sessionID, offset: 3, chunk: secondChunk, totalSHA256: startRequest.totalSHA256, nonce: "nonce-route-resumable-chunk-2"),
+            body: secondChunk
+        )
+        let finalizeRequest = ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: startRequest.totalSHA256)
+        let finalizeBody = try encodedResumableRequest(finalizeRequest)
+        let finalizeResponse = handler.resumableAudioFinalizeResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/finalize",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/finalize", body: finalizeBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-finalize"),
+            body: finalizeBody
+        )
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+
+        #expect(startResponse.statusCode == 200)
+        #expect(chunk1Response.statusCode == 200)
+        #expect((try decodeResumableResponse(statusResponse)).confirmedBytes == 3)
+        #expect(finalizeResponse.statusCode == 200)
+        #expect((try decodeResumableResponse(finalizeResponse)).completed)
+        #expect(record.status == "completed")
+        #expect(record.processingStatus == "notStarted")
+    }
+
+    @MainActor
+    @Test func resumableRouteConflictAndBadSignatureDoNotLeakSecretOrMutate() throws {
+        let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let audio = Data("abcdef".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "route-resumable-conflict", fileSize: Int64(audio.count))
+        let metadataBody = try encodedMetadata(metadata)
+        _ = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-metadata"),
+            body: metadataBody
+        )
+        let startRequest = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
+        let startBody = try encodedResumableRequest(startRequest)
+        _ = handler.resumableAudioStartResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/start",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: startBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-start"),
+            body: startBody
+        )
+        let conflictingStart = ResumableAudioUploadStartRequest(
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            totalBytes: Int64(audio.count),
+            totalSHA256: MacSecurityUtilities.sha256Hex(Data("xxxxxx".utf8)),
+            chunkSize: 3,
+            metadataHash: nil,
+            uploadJobID: nil
+        )
+        let conflictingBody = try encodedResumableRequest(conflictingStart)
+        let conflictResponse = handler.resumableAudioStartResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/start",
+            headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: conflictingBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-start-2"),
+            body: conflictingBody
+        )
+
+        var badChunkHeaders = try signedChunkHeaders(
+            device: device,
+            recordingID: "bad-signature-resumable",
+            sessionID: "missing-session",
+            offset: 0,
+            chunk: Data("abc".utf8),
+            totalSHA256: startRequest.totalSHA256,
+            nonce: "nonce-route-resumable-bad-signature"
+        )
+        badChunkHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badSignatureResponse = handler.resumableAudioChunkResponse(
+            method: "POST",
+            path: "/upload-recording-audio-session/chunk",
+            headers: badChunkHeaders,
+            body: Data("abc".utf8)
+        )
+        let json = try routeResponseJSON(conflictResponse)
+
+        #expect(conflictResponse.statusCode == 409)
+        #expect(json["error"] as? String == "upload_session_conflict")
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.rejectedConflict.rawValue)
+        #expect(String(data: conflictResponse.bodyData, encoding: .utf8)?.contains(device.sharedSecretBase64URL) == false)
+        #expect(badSignatureResponse.statusCode == 400)
+        #expect((try routeResponseJSON(badSignatureResponse))["error"] as? String == "signature_mismatch")
+        #expect(store.loadInboxItems().count == 1)
     }
 
     @Test func receiveRecordMissingDeletedFieldsDefaultsToActive() throws {
@@ -2310,6 +4247,246 @@ struct RokuricsMacTests {
         return (store, rootURL)
     }
 
+    @MainActor
+    private func makeRecordingUploadRouteHandler() throws -> (RecordingUploadRouteHandler, MacRecordingFileStore, URL, PairedDevice) {
+        let (store, rootURL) = try makeMacStore()
+        let device = PairedDevice(
+            id: "route-device-01",
+            deviceName: "Vita iPhone",
+            sharedSecretBase64URL: Data("route-secret".utf8).base64URLEncodedString(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let verifier = RequestVerifier(pairedDeviceProvider: { id in
+            id == device.id ? device : nil
+        })
+        let handler = RecordingUploadRouteHandler(
+            requestVerifier: verifier,
+            recordingFileStore: store,
+            onRecordingAccepted: { _ in }
+        )
+        return (handler, store, rootURL, device)
+    }
+
+    private func makeUploadDevice() -> PairedDevice {
+        PairedDevice(
+            id: "device-01",
+            deviceName: "Vita iPhone",
+            sharedSecretBase64URL: "secret",
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+    }
+
+    private func makeHeartbeatDevice() -> PairedDevice {
+        PairedDevice(
+            id: "heartbeat-device-01",
+            deviceName: "Vita iPhone",
+            sharedSecretBase64URL: Data("heartbeat-secret".utf8).base64URLEncodedString(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+    }
+
+    private func makeHeartbeatRequest(device: PairedDevice, sequenceNumber: UInt64) -> ConnectionHeartbeatRequest {
+        ConnectionHeartbeatRequest(
+            deviceID: device.id,
+            deviceName: device.deviceName,
+            platform: .iPhone,
+            appInstanceID: "test-instance",
+            sequenceNumber: sequenceNumber,
+            sentAt: Date(timeIntervalSince1970: 2_000),
+            lastKnownPeerStatusRevision: nil
+        )
+    }
+
+    private func makeIncomingUploadMetadata(
+        id: String,
+        title: String = "课堂录音",
+        fileSize: Int64 = 5
+    ) -> IncomingRecordingMetadata {
+        IncomingRecordingMetadata(
+            id: id,
+            title: title,
+            originalFileName: "\(id).m4a",
+            relativeAudioPath: "Recordings/\(id).m4a",
+            createdAt: Date(timeIntervalSince1970: 1_800),
+            endedAt: Date(timeIntervalSince1970: 1_806),
+            duration: 6,
+            format: "m4a",
+            codec: "AAC",
+            sampleRate: 16_000,
+            channels: 1,
+            bitrate: 64_000,
+            fileSize: fileSize,
+            uploadStatus: "uploaded",
+            transcriptionStatus: "notStarted",
+            noteStatus: "notStarted",
+            tags: [],
+            sourceDeviceName: "Vita iPhone",
+            sourceDeviceID: "device-01",
+            uploadedAt: Date(timeIntervalSince1970: 1_807)
+        )
+    }
+
+    private func encodedMetadata(_ metadata: IncomingRecordingMetadata) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(metadata)
+    }
+
+    private func makeResumableStartRequest(
+        metadata: IncomingRecordingMetadata,
+        audio: Data,
+        chunkSize: Int
+    ) -> ResumableAudioUploadStartRequest {
+        ResumableAudioUploadStartRequest(
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            totalBytes: Int64(audio.count),
+            totalSHA256: MacSecurityUtilities.sha256Hex(audio),
+            chunkSize: chunkSize,
+            metadataHash: nil,
+            uploadJobID: metadata.id
+        )
+    }
+
+    private func encodedResumableRequest<Request: Encodable>(_ request: Request) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(request)
+    }
+
+    private func encodedHeartbeatRequest(_ request: ConnectionHeartbeatRequest) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(request)
+    }
+
+    private func encodedConnectionProbeRequest(
+        sequenceNumber: UInt64,
+        clientPayload: String,
+        sentAt: Date = Date()
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(ConnectionProbeSmokeRequest(
+            sequenceNumber: sequenceNumber,
+            clientPayload: clientPayload,
+            sentAt: sentAt
+        ))
+    }
+
+    private func decodeResumableResponse(_ response: SecureLocalHTTPRouteResponse) throws -> ResumableAudioUploadSessionResponse {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ResumableAudioUploadSessionResponse.self, from: response.bodyData)
+    }
+
+    private func decodeHeartbeatResponse(_ response: SecureLocalHTTPRouteResponse) throws -> ConnectionHeartbeatResponse {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ConnectionHeartbeatResponse.self, from: response.bodyData)
+    }
+
+    private func readIncomingMetadata(at url: URL) throws -> IncomingRecordingMetadata {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(IncomingRecordingMetadata.self, from: try Data(contentsOf: url))
+    }
+
+    private func signedUploadHeaders(
+        device: PairedDevice,
+        path: String,
+        body: Data,
+        contentType: String,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        nonce: String
+    ) throws -> [String: String] {
+        let bodyHash = MacSecurityUtilities.sha256Hex(body)
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let payload = ["POST", path, timestamp, nonce, bodyHash].joined(separator: "\n")
+        let signature = try #require(MacSecurityUtilities.hmacSHA256Base64URL(
+            message: payload,
+            secretBase64URL: device.sharedSecretBase64URL
+        ))
+
+        return [
+            "Content-Type": contentType,
+            "X-Rokurics-Upload-Type": uploadType,
+            "X-Rokurics-Device-ID": device.id,
+            "X-Rokurics-Timestamp": timestamp,
+            "X-Rokurics-Nonce": nonce,
+            "X-Rokurics-Body-SHA256": bodyHash,
+            "X-Rokurics-Signature": signature,
+            "X-Rokurics-Recording-ID": recordingID,
+            "X-Rokurics-Filename": fileName
+        ]
+    }
+
+    private func signedJSONHeaders(
+        device: PairedDevice,
+        path: String,
+        body: Data,
+        nonce: String,
+        now: Date = Date()
+    ) throws -> [String: String] {
+        let bodyHash = MacSecurityUtilities.sha256Hex(body)
+        let timestamp = String(Int(now.timeIntervalSince1970))
+        let payload = ["POST", path, timestamp, nonce, bodyHash].joined(separator: "\n")
+        let signature = try #require(MacSecurityUtilities.hmacSHA256Base64URL(
+            message: payload,
+            secretBase64URL: device.sharedSecretBase64URL
+        ))
+
+        return [
+            "Content-Type": "application/json",
+            "X-Rokurics-Device-ID": device.id,
+            "X-Rokurics-Timestamp": timestamp,
+            "X-Rokurics-Nonce": nonce,
+            "X-Rokurics-Body-SHA256": bodyHash,
+            "X-Rokurics-Signature": signature
+        ]
+    }
+
+    private func signedChunkHeaders(
+        device: PairedDevice,
+        recordingID: String,
+        sessionID: String,
+        offset: Int64,
+        chunk: Data,
+        totalSHA256: String,
+        nonce: String
+    ) throws -> [String: String] {
+        var headers = try signedUploadHeaders(
+            device: device,
+            path: "/upload-recording-audio-session/chunk",
+            body: chunk,
+            contentType: "application/octet-stream",
+            uploadType: "recording-audio-chunk",
+            recordingID: recordingID,
+            fileName: "audio.m4a.part",
+            nonce: nonce
+        )
+        let chunkSHA256 = MacSecurityUtilities.sha256Hex(chunk)
+        headers["X-Rokurics-Session-ID"] = sessionID
+        headers["X-Rokurics-Chunk-Offset"] = String(offset)
+        headers["X-Rokurics-Chunk-Length"] = String(chunk.count)
+        headers["X-Rokurics-Chunk-SHA256"] = chunkSHA256
+        headers["X-Rokurics-Total-SHA256"] = totalSHA256
+        return headers
+    }
+
+    private func routeResponseJSON(_ response: SecureLocalHTTPRouteResponse) throws -> [String: Any] {
+        try #require(JSONSerialization.jsonObject(with: response.bodyData) as? [String: Any])
+    }
+
     @discardableResult
     private func saveMacInboxRecording(
         id: String,
@@ -2370,6 +4547,481 @@ struct RokuricsMacTests {
         return try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
     }
 
+    @MainActor
+    private func makeSecureReceiverServiceHarness(
+        preferredHost: String = "127.0.0.1"
+    ) throws -> (
+        rootURL: URL,
+        service: SecureReceiverService,
+        identityManager: MacIdentityManager,
+        pairedDeviceStore: PairedDeviceStore,
+        recordingFileStore: MacRecordingFileStore,
+        statusStore: DeviceConnectionStatusStore,
+        diagnosticsStore: ConnectionDiagnosticsStore
+    ) {
+        let rootURL = try makeScratchDirectory()
+        let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let libraryURL = rootURL.appendingPathComponent("Library", isDirectory: true)
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: securityURL,
+            tlsKeyTagNamespace: "service-\(UUID().uuidString)"
+        )
+        identityManager.loadOrCreateIdentity()
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityURL)
+        let recordingFileStore = MacRecordingFileStore(rootURL: libraryURL)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration(gitBackedSyncEnabled: false),
+            port: 0,
+            identityManager: identityManager,
+            pairedDeviceStore: pairedDeviceStore,
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: StudyLibraryStore(
+                rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
+                recordingFileStore: recordingFileStore,
+                listenForInboxChanges: false
+            ),
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { preferredHost }
+        )
+        return (rootURL, service, identityManager, pairedDeviceStore, recordingFileStore, statusStore, diagnosticsStore)
+    }
+
+    @MainActor
+    private func waitForPairingPayload(
+        _ service: SecureReceiverService,
+        timeout: TimeInterval = 5
+    ) async throws -> SecureReceiverPairingPayload {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let payload = service.pairingPayload {
+                return payload
+            }
+            if service.pairingFlowState == .failed {
+                throw RealListenerSmokeTestError.servicePairingFailed(service.lastError ?? "pairing_failed")
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw RealListenerSmokeTestError.servicePairingTimedOut
+    }
+
+    @MainActor
+    private func waitForHTTPSReady(
+        _ service: SecureReceiverService,
+        timeout: TimeInterval = 5
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if service.isHTTPSListenerReady, service.activeHTTPSPort != nil {
+                return
+            }
+            if service.pairingFlowState == .failed {
+                throw RealListenerSmokeTestError.servicePairingFailed(service.lastError ?? "listener_failed")
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw RealListenerSmokeTestError.listenerTimedOut
+    }
+
+    @MainActor
+    private func assertPairingPayload(
+        _ payload: SecureReceiverPairingPayload,
+        matches service: SecureReceiverService,
+        identityManager: MacIdentityManager
+    ) throws {
+        let activePort = try #require(service.activeHTTPSPort)
+        #expect(payload.host == "127.0.0.1")
+        #expect(payload.port == activePort)
+        #expect(payload.port == service.port)
+        #expect(payload.fingerprint == identityManager.status.certificateFingerprint)
+        #expect(payload.fingerprint == service.fingerprint)
+        #expect(payload.fingerprintType == "certificate-sha256")
+        #expect(payload.pairingCode.count == 6)
+        #expect(payload.pairingCode.allSatisfy { $0.isNumber })
+    }
+
+    @MainActor
+    private func performRealSocketShortUploadSmoke(
+        client: RealListenerPinnedHTTPSClient,
+        host: String,
+        port: Int,
+        device: PairedDevice,
+        recordingStore: MacRecordingFileStore
+    ) async throws {
+        let audio = Data("fake ten second m4a audio".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "real-service-upload-01", fileSize: Int64(audio.count))
+        let metadataBody = try encodedMetadata(metadata)
+
+        let metadataResponse = try await client.postJSON(
+            host: host,
+            port: port,
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(
+                device: device,
+                path: "/upload-recording-metadata",
+                body: metadataBody,
+                contentType: "application/json",
+                uploadType: "recording-metadata",
+                recordingID: metadata.id,
+                fileName: "metadata.json",
+                nonce: "real-service-upload-metadata"
+            ),
+            body: metadataBody
+        )
+        #expect(metadataResponse.statusCode == 200)
+        #expect(metadataResponse.json["disposition"] as? String == "acceptedNew")
+
+        let audioResponse = try await client.postJSON(
+            host: host,
+            port: port,
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(
+                device: device,
+                path: "/upload-recording-audio",
+                body: audio,
+                contentType: "audio/m4a",
+                uploadType: "recording-audio",
+                recordingID: metadata.id,
+                fileName: metadata.originalFileName,
+                nonce: "real-service-upload-audio"
+            ),
+            body: audio
+        )
+        #expect(audioResponse.statusCode == 200)
+        #expect(audioResponse.json["disposition"] as? String == "acceptedNew")
+
+        let recordingDirectory = recordingStore.libraryRootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("1970-01-01", isDirectory: true)
+            .appendingPathComponent(metadata.id, isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: recordingDirectory.appendingPathComponent("metadata.json").path))
+        #expect(FileManager.default.fileExists(atPath: recordingDirectory.appendingPathComponent("audio.m4a").path))
+        #expect(FileManager.default.fileExists(atPath: recordingDirectory.appendingPathComponent("receive.json").path))
+        let receiveRecord = try readReceiveRecord(rootURL: recordingStore.libraryRootURL, recordingID: metadata.id)
+        #expect(receiveRecord.status == "completed")
+        #expect(receiveRecord.processingStatus == "notStarted")
+
+        let repeatedMetadataResponse = try await client.postJSON(
+            host: host,
+            port: port,
+            path: "/upload-recording-metadata",
+            headers: try signedUploadHeaders(
+                device: device,
+                path: "/upload-recording-metadata",
+                body: metadataBody,
+                contentType: "application/json",
+                uploadType: "recording-metadata",
+                recordingID: metadata.id,
+                fileName: "metadata.json",
+                nonce: "real-service-upload-metadata-repeat"
+            ),
+            body: metadataBody
+        )
+        #expect(repeatedMetadataResponse.statusCode == 200)
+        #expect(repeatedMetadataResponse.json["disposition"] as? String == "acceptedExisting")
+
+        let repeatedAudioResponse = try await client.postJSON(
+            host: host,
+            port: port,
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(
+                device: device,
+                path: "/upload-recording-audio",
+                body: audio,
+                contentType: "audio/m4a",
+                uploadType: "recording-audio",
+                recordingID: metadata.id,
+                fileName: metadata.originalFileName,
+                nonce: "real-service-upload-audio-repeat"
+            ),
+            body: audio
+        )
+        #expect(repeatedAudioResponse.statusCode == 200)
+        #expect(repeatedAudioResponse.json["disposition"] as? String == "acceptedExisting")
+
+        let conflictingAudio = Data("different fake audio".utf8)
+        let conflictResponse = try await client.postJSON(
+            host: host,
+            port: port,
+            path: "/upload-recording-audio",
+            headers: try signedUploadHeaders(
+                device: device,
+                path: "/upload-recording-audio",
+                body: conflictingAudio,
+                contentType: "audio/m4a",
+                uploadType: "recording-audio",
+                recordingID: metadata.id,
+                fileName: metadata.originalFileName,
+                nonce: "real-service-upload-audio-conflict"
+            ),
+            body: conflictingAudio
+        )
+        #expect(conflictResponse.statusCode == 409)
+        #expect(conflictResponse.json["error"] as? String == "recording_audio_conflict")
+    }
+
+    private func waitForListenerReady(_ signal: ListenerReadySignal, timeout: TimeInterval = 5) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if signal.isReady {
+                return
+            }
+            if let failureMessage = signal.failureMessage {
+                throw RealListenerSmokeTestError.listenerFailed(failureMessage)
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw RealListenerSmokeTestError.listenerTimedOut
+    }
+
+    private func sourceText(_ relativePath: String) throws -> String {
+        let projectRootURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let url = projectRootURL.appendingPathComponent(relativePath, isDirectory: false)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private static let connectionJSONDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+}
+
+private enum RealListenerSmokeTestError: Error {
+    case listenerFailed(String)
+    case listenerTimedOut
+    case servicePairingFailed(String)
+    case servicePairingTimedOut
+}
+
+private enum RealListenerHTTPSClientError: Error {
+    case fingerprintMismatch
+}
+
+private struct ConnectionProbeSmokeRequest: Encodable {
+    let sequenceNumber: UInt64
+    let clientPayload: String
+    let sentAt: Date
+}
+
+private struct RealListenerHTTPSDataResponse {
+    let statusCode: Int
+    let body: Data
+}
+
+private struct RealListenerHTTPSJSONResponse {
+    let statusCode: Int
+    let body: Data
+    let json: [String: Any]
+}
+
+private final class ListenerReadySignal: @unchecked Sendable {
+    private enum State {
+        case waiting
+        case ready
+        case failed(String)
+    }
+
+    private let lock = NSLock()
+    private var state: State = .waiting
+
+    var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .ready = state {
+            return true
+        }
+        return false
+    }
+
+    var failureMessage: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .failed(let message) = state {
+            return message
+        }
+        return nil
+    }
+
+    func markReady() {
+        lock.lock()
+        state = .ready
+        lock.unlock()
+    }
+
+    func markFailed(_ message: String) {
+        lock.lock()
+        state = .failed(message)
+        lock.unlock()
+    }
+}
+
+private final class RealListenerPinnedHTTPSClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+    private let expectedFingerprint: String
+    private let lock = NSLock()
+    private var pinningError: RealListenerHTTPSClientError?
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    init(expectedFingerprint: String) {
+        self.expectedFingerprint = expectedFingerprint
+        super.init()
+    }
+
+    func invalidate() {
+        session.invalidateAndCancel()
+    }
+
+    func getJSON(host: String = "127.0.0.1", port: Int, path: String) async throws -> RealListenerHTTPSJSONResponse {
+        let response = try await request(method: "GET", host: host, port: port, path: path, headers: [:], body: nil)
+        return try jsonResponse(from: response)
+    }
+
+    func postJSON(
+        host: String = "127.0.0.1",
+        port: Int,
+        path: String,
+        headers: [String: String],
+        body: Data
+    ) async throws -> RealListenerHTTPSJSONResponse {
+        let response = try await postData(host: host, port: port, path: path, headers: headers, body: body)
+        return try jsonResponse(from: response)
+    }
+
+    func postData(
+        host: String = "127.0.0.1",
+        port: Int,
+        path: String,
+        headers: [String: String],
+        body: Data
+    ) async throws -> RealListenerHTTPSDataResponse {
+        try await request(method: "POST", host: host, port: port, path: path, headers: headers, body: body)
+    }
+
+    private func request(
+        method: String,
+        host: String,
+        port: Int,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) async throws -> RealListenerHTTPSDataResponse {
+        clearPinningError()
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.port = port
+        components.path = path
+        let url = try #require(components.url)
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        do {
+            let result: (Data, URLResponse)
+            if let body {
+                result = try await session.upload(for: request, from: body)
+            } else {
+                result = try await session.data(for: request)
+            }
+            let statusCode = (result.1 as? HTTPURLResponse)?.statusCode ?? -1
+            return RealListenerHTTPSDataResponse(statusCode: statusCode, body: result.0)
+        } catch {
+            if let pinningError = currentPinningError() {
+                throw pinningError
+            }
+            throw error
+        }
+    }
+
+    private func jsonResponse(from response: RealListenerHTTPSDataResponse) throws -> RealListenerHTTPSJSONResponse {
+        RealListenerHTTPSJSONResponse(
+            statusCode: response.statusCode,
+            body: response.body,
+            json: try #require(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
+        )
+    }
+
+    private func currentPinningError() -> RealListenerHTTPSClientError? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pinningError
+    }
+
+    private func clearPinningError() {
+        lock.lock()
+        pinningError = nil
+        lock.unlock()
+    }
+
+    private func setPinningError(_ error: RealListenerHTTPSClientError) {
+        lock.lock()
+        pinningError = error
+        lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    private func handleChallenge(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        let certificateChain = (SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate]) ?? []
+        guard let certificate = certificateChain.first else {
+            setPinningError(.fingerprintMismatch)
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        let certificateData = SecCertificateCopyData(certificate) as Data
+        let calculatedFingerprint = MacSecurityUtilities.sha256Hex(certificateData)
+        guard MacSecurityUtilities.constantTimeEquals(calculatedFingerprint, expectedFingerprint) else {
+            setPinningError(.fingerprintMismatch)
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
 }
 
 private final class OpenAICompatibleTransportStub: OpenAICompatibleHTTPTransport {

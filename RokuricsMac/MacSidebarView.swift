@@ -39,6 +39,16 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .aiChat: return "bubble.left.and.bubble.right"
         }
     }
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .dashboard: return "mac-sidebar-dashboard"
+        case .audioInbox: return "mac-sidebar-audio-inbox"
+        case .studyLibrary: return "mac-sidebar-study-library"
+        case .iPhoneConnection: return "mac-sidebar-iphone-connection"
+        case .aiChat: return "mac-sidebar-ai-chat"
+        }
+    }
 }
 
 struct MacSidebarView: View {
@@ -74,6 +84,7 @@ struct MacSidebarView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier(item.accessibilityIdentifier)
                 }
             }
             .padding(.horizontal, 12)

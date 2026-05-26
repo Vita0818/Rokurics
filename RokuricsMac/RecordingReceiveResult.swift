@@ -7,12 +7,123 @@
 
 import Foundation
 
+enum RecordingUploadDisposition: String, Codable, Equatable {
+    case acceptedNew
+    case acceptedExisting
+    case rejectedConflict
+}
+
 struct RecordingReceiveResult {
     let recordingID: String
     let directoryURL: URL
     let metadataFileName: String?
     let audioFileName: String?
     let receiveFileName: String
+    let disposition: RecordingUploadDisposition
+    let receiveStatus: String
+    let processingStatus: String
+}
+
+struct ResumableAudioUploadStartRequest: Codable, Equatable {
+    let recordingID: String
+    let fileName: String
+    let totalBytes: Int64
+    let totalSHA256: String
+    let chunkSize: Int
+    let metadataHash: String?
+    let uploadJobID: String?
+}
+
+struct ResumableAudioUploadStatusRequest: Codable, Equatable {
+    let recordingID: String
+    let sessionID: String
+    let totalSHA256: String
+}
+
+struct ResumableAudioUploadFinalizeRequest: Codable, Equatable {
+    let recordingID: String
+    let sessionID: String
+    let totalBytes: Int64
+    let totalSHA256: String
+}
+
+struct ResumableAudioUploadSessionResponse: Codable, Equatable {
+    let ok: Bool
+    let disposition: String?
+    let status: String?
+    let sessionID: String?
+    let confirmedBytes: Int64
+    let nextOffset: Int64
+    let chunkSize: Int?
+    let completed: Bool
+    let finalAudioExists: Bool?
+    let chunkAccepted: Bool?
+    let finalAudioRelativePath: String?
+    let checksum: String?
+    let fileSize: Int64?
+    let receiveStatus: String?
+    let processingStatus: String?
+    let error: String?
+    let reason: String?
+
+    static func accepted(
+        disposition: RecordingUploadDisposition,
+        status: String,
+        sessionID: String?,
+        confirmedBytes: Int64,
+        nextOffset: Int64,
+        chunkSize: Int?,
+        completed: Bool,
+        finalAudioExists: Bool? = nil,
+        chunkAccepted: Bool? = nil,
+        finalAudioRelativePath: String? = nil,
+        checksum: String? = nil,
+        fileSize: Int64? = nil,
+        receiveStatus: String? = nil,
+        processingStatus: String? = nil
+    ) -> ResumableAudioUploadSessionResponse {
+        ResumableAudioUploadSessionResponse(
+            ok: true,
+            disposition: disposition.rawValue,
+            status: status,
+            sessionID: sessionID,
+            confirmedBytes: confirmedBytes,
+            nextOffset: nextOffset,
+            chunkSize: chunkSize,
+            completed: completed,
+            finalAudioExists: finalAudioExists,
+            chunkAccepted: chunkAccepted,
+            finalAudioRelativePath: finalAudioRelativePath,
+            checksum: checksum,
+            fileSize: fileSize,
+            receiveStatus: receiveStatus,
+            processingStatus: processingStatus,
+            error: nil,
+            reason: nil
+        )
+    }
+
+    static func rejected(error: String, reason: String) -> ResumableAudioUploadSessionResponse {
+        ResumableAudioUploadSessionResponse(
+            ok: false,
+            disposition: error.contains("conflict") ? RecordingUploadDisposition.rejectedConflict.rawValue : nil,
+            status: nil,
+            sessionID: nil,
+            confirmedBytes: 0,
+            nextOffset: 0,
+            chunkSize: nil,
+            completed: false,
+            finalAudioExists: nil,
+            chunkAccepted: nil,
+            finalAudioRelativePath: nil,
+            checksum: nil,
+            fileSize: nil,
+            receiveStatus: nil,
+            processingStatus: nil,
+            error: error,
+            reason: reason
+        )
+    }
 }
 
 struct RecordingReceiveRecord: Codable {
@@ -63,6 +174,8 @@ struct RecordingReceiveRecord: Codable {
     var deletedAt: Date? = nil
     var noteGenerationMode: ProcessingMode? = nil
     var noteSections: [RecordingNoteSectionRecord]? = nil
+    var lastUploadError: String? = nil
+    var lastUploadAttemptAt: Date? = nil
 
     init(
         recordingID: String,
@@ -111,7 +224,9 @@ struct RecordingReceiveRecord: Codable {
         isDeleted: Bool = false,
         deletedAt: Date? = nil,
         noteGenerationMode: ProcessingMode? = nil,
-        noteSections: [RecordingNoteSectionRecord]? = nil
+        noteSections: [RecordingNoteSectionRecord]? = nil,
+        lastUploadError: String? = nil,
+        lastUploadAttemptAt: Date? = nil
     ) {
         self.recordingID = recordingID
         self.sanitizedRecordingID = sanitizedRecordingID
@@ -160,6 +275,8 @@ struct RecordingReceiveRecord: Codable {
         self.deletedAt = deletedAt
         self.noteGenerationMode = noteGenerationMode
         self.noteSections = noteSections
+        self.lastUploadError = lastUploadError
+        self.lastUploadAttemptAt = lastUploadAttemptAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -210,6 +327,8 @@ struct RecordingReceiveRecord: Codable {
         case deletedAt
         case noteGenerationMode
         case noteSections
+        case lastUploadError
+        case lastUploadAttemptAt
     }
 
     init(from decoder: Decoder) throws {
@@ -262,6 +381,8 @@ struct RecordingReceiveRecord: Codable {
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         noteGenerationMode = try container.decodeIfPresent(ProcessingMode.self, forKey: .noteGenerationMode)
         noteSections = try container.decodeIfPresent([RecordingNoteSectionRecord].self, forKey: .noteSections)
+        lastUploadError = try container.decodeIfPresent(String.self, forKey: .lastUploadError)
+        lastUploadAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastUploadAttemptAt)
     }
 
     static func normalizedNoteStatus(_ status: String?) -> String {

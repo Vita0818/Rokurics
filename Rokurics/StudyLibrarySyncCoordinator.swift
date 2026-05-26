@@ -429,3 +429,741 @@ private struct PendingUploadProcessingResult {
     var failedCount = 0
     var remainingCount = 0
 }
+
+protocol LocalNetworkSyncClientProtocol {
+    func sendDeviceStatus(settings: SecureMacConnectionSnapshot, statusRequest: DeviceStatusRequest) async throws -> DeviceStatusResponse
+    func fetchLocalNetworkSyncInventory(settings: SecureMacConnectionSnapshot, localInventory: LocalNetworkSyncInventory) async throws -> LocalNetworkSyncInventoryResponse
+    func applyLocalNetworkSyncMetadata(settings: SecureMacConnectionSnapshot, manifest: StudyLibrarySyncManifest) async throws -> StudyLibrarySyncManifestResponse
+    func requestLocalNetworkSyncArtifact(settings: SecureMacConnectionSnapshot, artifactID: String) async throws -> LocalNetworkSyncArtifactResponse
+}
+
+extension SecureMacUploadClient: LocalNetworkSyncClientProtocol {}
+
+protocol LocalNetworkHeartbeatClientProtocol {
+    func sendConnectionHeartbeat(
+        settings: SecureMacConnectionSnapshot,
+        request: ConnectionHeartbeatRequest,
+        requestTimeout: TimeInterval
+    ) async throws -> ConnectionHeartbeatResponse
+}
+
+extension SecureMacUploadClient: LocalNetworkHeartbeatClientProtocol {}
+
+struct LocalNetworkHeartbeatConfiguration: Equatable {
+    var heartbeatInterval: TimeInterval
+    var requestTimeout: TimeInterval
+    var missedHeartbeatLimit: Int
+    var staleAfter: TimeInterval
+    var disconnectedAfter: TimeInterval
+
+    static let foregroundDefault = LocalNetworkHeartbeatConfiguration(
+        heartbeatInterval: 3,
+        requestTimeout: 2,
+        missedHeartbeatLimit: 3,
+        staleAfter: 6,
+        disconnectedAfter: 10
+    )
+}
+
+@MainActor
+final class LocalNetworkHeartbeatMonitor: ObservableObject {
+    private let connectionStore: any SecureMacConnectionSnapshotProviding
+    private let client: any LocalNetworkHeartbeatClientProtocol
+    private let statusStore: DeviceConnectionStatusStore
+    private let configuration: LocalNetworkHeartbeatConfiguration
+    private var heartbeatTask: Task<Void, Never>?
+    private var sequenceNumber: UInt64 = 0
+    private(set) var isHeartbeatInFlight = false
+
+    init(
+        connectionStore: any SecureMacConnectionSnapshotProviding,
+        client: (any LocalNetworkHeartbeatClientProtocol)? = nil,
+        statusStore: DeviceConnectionStatusStore? = nil,
+        configuration: LocalNetworkHeartbeatConfiguration = .foregroundDefault
+    ) {
+        self.connectionStore = connectionStore
+        self.client = client ?? SecureMacUploadClient()
+        self.statusStore = statusStore ?? DeviceConnectionStatusStore(
+            staleAfter: configuration.staleAfter,
+            disconnectedAfter: configuration.disconnectedAfter,
+            missedHeartbeatLimit: configuration.missedHeartbeatLimit
+        )
+        self.configuration = configuration
+    }
+
+    var isMonitoring: Bool {
+        heartbeatTask != nil
+    }
+
+    @discardableResult
+    func startForegroundMonitoring() -> Bool {
+        guard heartbeatTask == nil else {
+            return true
+        }
+
+        let snapshot = connectionStore.snapshot
+        guard snapshot.isPaired else {
+            _ = statusStore.markUnpaired(displayName: "Mac")
+            return false
+        }
+
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else {
+                    return
+                }
+                _ = await self.performHeartbeat()
+                try? await Task.sleep(nanoseconds: UInt64(self.configuration.heartbeatInterval * 1_000_000_000))
+            }
+        }
+        return true
+    }
+
+    func suspend() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+
+        let snapshot = connectionStore.snapshot
+        guard snapshot.isPaired else {
+            _ = statusStore.markUnpaired(displayName: "Mac")
+            return
+        }
+
+        _ = statusStore.markMonitoringSuspended(
+            deviceID: snapshot.deviceID,
+            displayName: displayName(for: snapshot)
+        )
+    }
+
+    @discardableResult
+    func performHeartbeat(now: Date = Date()) async -> Bool {
+        guard !isHeartbeatInFlight else {
+            return false
+        }
+
+        let snapshot = connectionStore.snapshot
+        guard snapshot.isPaired else {
+            _ = statusStore.markUnpaired(displayName: "Mac")
+            return false
+        }
+
+        isHeartbeatInFlight = true
+        defer { isHeartbeatInFlight = false }
+
+        let displayName = displayName(for: snapshot)
+        sequenceNumber += 1
+        let statusBeforeSend = statusStore.status(for: snapshot.deviceID, now: now)
+        _ = statusStore.markHeartbeatSent(deviceID: snapshot.deviceID, displayName: displayName, now: now)
+        let request = ConnectionHeartbeatRequest(
+            deviceID: snapshot.deviceID,
+            deviceName: UIDevice.current.name,
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: sequenceNumber,
+            sentAt: now,
+            lastKnownPeerStatusRevision: statusBeforeSend?.connectionStatusRevision
+        )
+
+        do {
+            let response = try await client.sendConnectionHeartbeat(
+                settings: snapshot,
+                request: request,
+                requestTimeout: configuration.requestTimeout
+            )
+            guard response.ok, response.receivedSequenceNumber == request.sequenceNumber else {
+                throw SecureMacUploadError.serverRejected(response.error ?? "heartbeat_rejected")
+            }
+            let receivedAt = Date()
+            let latencyMilliseconds = max(0, receivedAt.timeIntervalSince(now) * 1_000)
+            _ = statusStore.recordHeartbeatSuccess(
+                deviceID: snapshot.deviceID,
+                displayName: displayName,
+                sentAt: now,
+                receivedAt: receivedAt,
+                latencyMilliseconds: latencyMilliseconds
+            )
+            return true
+        } catch {
+            let mapped = mapHeartbeatError(error)
+            _ = statusStore.recordHeartbeatFailure(
+                deviceID: snapshot.deviceID,
+                displayName: displayName,
+                errorCode: mapped.code,
+                errorMessage: mapped.message,
+                isSecurityFailure: mapped.isSecurityFailure
+            )
+            return false
+        }
+    }
+
+    func recordSignedRequestSucceeded(settings: SecureMacConnectionSnapshot, now: Date = Date()) {
+        guard settings.isPaired else {
+            return
+        }
+        _ = statusStore.recordSignedRequestSucceeded(
+            deviceID: settings.deviceID,
+            displayName: displayName(for: settings),
+            now: now
+        )
+    }
+
+    private func displayName(for snapshot: SecureMacConnectionSnapshot) -> String {
+        snapshot.macName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Rokurics Mac"
+            : snapshot.macName
+    }
+
+    private func mapHeartbeatError(_ error: Error) -> (code: String, message: String, isSecurityFailure: Bool) {
+        if let secureError = error as? SecureMacUploadError {
+            switch secureError {
+            case .fingerprintMismatch:
+                return ("certificate_pinning_failed", secureError.localizedDescription, true)
+            case .invalidFingerprint, .invalidSecret, .notPaired:
+                return ("heartbeat_security_failed", secureError.localizedDescription, true)
+            case .serverRejected(let reason) where reason.contains("signature") || reason.contains("unknown_device"):
+                return (reason, secureError.localizedDescription, true)
+            case .httpsUnavailable:
+                return ("heartbeat_unreachable", secureError.localizedDescription, false)
+            default:
+                return ("heartbeat_failed", secureError.localizedDescription, false)
+            }
+        }
+
+        if let urlError = error as? URLError {
+            return ("heartbeat_\(urlError.code.rawValue)", urlError.localizedDescription, false)
+        }
+
+        return ("heartbeat_failed", error.localizedDescription, false)
+    }
+}
+
+@MainActor
+struct LocalNetworkSyncInventoryBuilder {
+    let audioFileStore: AudioFileStore
+    let studyLibraryStore: StudyLibraryStore
+    let uploadJobStore: RecordingUploadJobStore
+
+    func build(
+        deviceID: String,
+        deviceName: String,
+        lastKnownPeerRevision: String?,
+        generatedAt: Date = Date()
+    ) -> LocalNetworkSyncInventory {
+        let manifest = studyLibraryStore.makeSyncManifest(deviceID: deviceID, generatedAt: generatedAt)
+        let recordings = (try? audioFileStore.loadAllMetadata(includeDeleted: true)) ?? []
+        let jobsByRecordingID = ((try? uploadJobStore.loadJobs()) ?? []).reduce(into: [String: RecordingUploadJob]()) { result, job in
+            result[job.recordingID] = job
+        }
+        let rootURL = (try? audioFileStore.baseDirectory()) ?? FileManager.default.temporaryDirectory
+        let recordingEntries = recordings.map { metadata in
+            let audioURL = try? audioFileStore.audioURL(for: metadata)
+            let fileSize = audioURL.flatMap { LocalNetworkSyncArtifactFileService.metadata(for: $0)?.size }
+            return LocalNetworkSyncRecordingEntry(
+                recordingID: metadata.id,
+                metadataHash: LocalNetworkSyncMetadataHash.hash(metadata),
+                audioAvailable: audioURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false,
+                audioChecksum: nil,
+                audioSize: fileSize,
+                uploadLedgerState: jobsByRecordingID[metadata.id]?.overallState.rawValue,
+                receiveStatus: nil,
+                processingStatus: nil,
+                updatedAt: metadata.deletedAt ?? metadata.createdAt,
+                deleted: metadata.isDeleted
+            )
+        }
+        let folders = manifest.folders.map { folder in
+            LocalNetworkSyncFolderEntry(
+                folderID: folder.folderID,
+                parentID: folder.parentFolderID,
+                path: folder.path.displaySummary,
+                name: folder.name,
+                colorToken: folder.colorToken?.rawValue,
+                updatedAt: folder.updatedAt,
+                revisionHash: LocalNetworkSyncMetadataHash.hash(folder),
+                deleted: folder.isTrashed
+            )
+        }
+        let studyItems = manifest.items.map { item in
+            LocalNetworkSyncStudyItemEntry(
+                itemID: item.itemID,
+                kind: item.kind,
+                title: item.title,
+                folderIDs: item.folderIDs,
+                recordingID: item.recordingID,
+                updatedAt: item.updatedAt,
+                revisionHash: LocalNetworkSyncMetadataHash.hash(item),
+                deleted: item.isTrashed
+            )
+        }
+        let device = LocalNetworkSyncDeviceSection(
+            deviceID: deviceID,
+            deviceName: deviceName,
+            platform: .iPhone,
+            generatedAt: generatedAt,
+            lastKnownPeerRevision: lastKnownPeerRevision,
+            appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+        )
+
+        return LocalNetworkSyncInventory.make(
+            device: device,
+            recordings: recordingEntries,
+            folders: folders,
+            studyItems: studyItems,
+            artifacts: makeArtifacts(from: manifest, rootURL: rootURL),
+            studyManifest: manifest
+        )
+    }
+
+    private func makeArtifacts(from manifest: StudyLibrarySyncManifest, rootURL: URL) -> [LocalNetworkSyncArtifactEntry] {
+        var artifacts: [LocalNetworkSyncArtifactEntry] = []
+        for item in manifest.items {
+            let ownerID = item.recordingID ?? item.itemID
+            appendArtifact(relativePath: item.transcriptMarkdownRelativePath, kind: .transcriptMarkdown, ownerID: ownerID, rootURL: rootURL, artifacts: &artifacts)
+            appendArtifact(relativePath: item.transcriptRelativePath, kind: .transcriptJSON, ownerID: ownerID, rootURL: rootURL, artifacts: &artifacts)
+            appendArtifact(
+                relativePath: item.noteRelativePath,
+                kind: item.noteRelativePath?.hasSuffix(".json") == true ? .noteJSON : .noteMarkdown,
+                ownerID: ownerID,
+                rootURL: rootURL,
+                artifacts: &artifacts
+            )
+            appendArtifact(relativePath: item.audioRelativePath, kind: .audio, ownerID: ownerID, rootURL: rootURL, includeChecksum: false, artifacts: &artifacts)
+        }
+        return artifacts
+    }
+
+    private func appendArtifact(
+        relativePath: String?,
+        kind: LocalNetworkSyncArtifactKind,
+        ownerID: String,
+        rootURL: URL,
+        includeChecksum: Bool = true,
+        artifacts: inout [LocalNetworkSyncArtifactEntry]
+    ) {
+        guard let relativePath,
+              !relativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let url = try? LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: rootURL, logicalPathToken: relativePath),
+              FileManager.default.fileExists(atPath: url.path),
+              let metadata = LocalNetworkSyncArtifactFileService.metadata(for: url) else {
+            return
+        }
+
+        artifacts.append(
+            LocalNetworkSyncArtifactEntry(
+                artifactID: LocalNetworkSyncArtifactID.make(kind: kind, ownerID: ownerID, logicalPathToken: relativePath),
+                kind: kind,
+                ownerID: ownerID,
+                checksum: includeChecksum ? try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: url) : nil,
+                size: metadata.size,
+                updatedAt: metadata.updatedAt,
+                availability: .local,
+                logicalPathToken: relativePath
+            )
+        )
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncEngine {
+    private let connectionStore: any SecureMacConnectionSnapshotProviding
+    private let inventoryBuilder: LocalNetworkSyncInventoryBuilder
+    private let audioFileStore: AudioFileStore
+    private let studyLibraryStore: StudyLibraryStore
+    private weak var recordingManager: RecordingManager?
+    private let uploadCoordinator: RecordingUploadCoordinator?
+    private let client: any LocalNetworkSyncClientProtocol
+    private let stateStore: LocalNetworkSyncStateStore
+    private let connectionStatusStore: DeviceConnectionStatusStore?
+    private let diffPlanner: LocalNetworkSyncDiffPlanner
+    private(set) var isSyncing = false
+
+    init(
+        connectionStore: any SecureMacConnectionSnapshotProviding,
+        audioFileStore: AudioFileStore,
+        studyLibraryStore: StudyLibraryStore,
+        recordingManager: RecordingManager? = nil,
+        uploadCoordinator: RecordingUploadCoordinator? = nil,
+        uploadJobStore: RecordingUploadJobStore,
+        client: (any LocalNetworkSyncClientProtocol)? = nil,
+        stateStore: LocalNetworkSyncStateStore? = nil,
+        connectionStatusStore: DeviceConnectionStatusStore? = nil,
+        diffPlanner: LocalNetworkSyncDiffPlanner? = nil
+    ) {
+        self.connectionStore = connectionStore
+        self.audioFileStore = audioFileStore
+        self.studyLibraryStore = studyLibraryStore
+        self.recordingManager = recordingManager
+        self.uploadCoordinator = uploadCoordinator
+        self.client = client ?? SecureMacUploadClient()
+        self.stateStore = stateStore ?? LocalNetworkSyncStateStore(rootURL: try? audioFileStore.baseDirectory())
+        self.connectionStatusStore = connectionStatusStore
+        self.diffPlanner = diffPlanner ?? LocalNetworkSyncDiffPlanner()
+        self.inventoryBuilder = LocalNetworkSyncInventoryBuilder(
+            audioFileStore: audioFileStore,
+            studyLibraryStore: studyLibraryStore,
+            uploadJobStore: uploadJobStore
+        )
+    }
+
+    @discardableResult
+    func performTick(trigger: String, now: Date = Date()) async -> LocalNetworkSyncDiffPlan? {
+        guard !isSyncing else {
+            return nil
+        }
+        if let nextAllowedSyncAt = stateStore.state.nextAllowedSyncAt,
+           nextAllowedSyncAt > now {
+            return nil
+        }
+
+        let snapshot = connectionStore.snapshot
+        guard snapshot.isPaired else {
+            stateStore.recordFailure(code: "not_paired", message: "Mac is not paired.", at: now)
+            return nil
+        }
+        if let status = connectionStatusStore?.status(for: snapshot.deviceID, now: now),
+           status.presenceState == .disconnected || status.presenceState == .securityError {
+            stateStore.recordFailure(
+                code: status.presenceState == .securityError ? "connection_security_error" : "connection_disconnected",
+                message: status.lastError ?? "Mac connection is not available for sync.",
+                at: now
+            )
+            return nil
+        }
+
+        isSyncing = true
+        defer { isSyncing = false }
+
+        do {
+            let localInventory = inventoryBuilder.build(
+                deviceID: snapshot.deviceID,
+                deviceName: UIDevice.current.name,
+                lastKnownPeerRevision: stateStore.state.lastPeerInventoryHash,
+                generatedAt: now
+            )
+            let peerResponse = try await client.fetchLocalNetworkSyncInventory(settings: snapshot, localInventory: localInventory)
+            guard peerResponse.ok, let peerInventory = peerResponse.inventory else {
+                throw SecureMacUploadError.serverRejected(peerResponse.error ?? "sync_inventory_missing")
+            }
+
+            let plan = diffPlanner.plan(
+                local: localInventory,
+                peer: peerInventory,
+                lastSuccessfulSyncAt: stateStore.state.lastSuccessfulSyncAt
+            )
+            stateStore.recordAttempt(
+                peerDeviceID: peerInventory.device.deviceID,
+                localInventoryHash: localInventory.inventoryHash,
+                peerInventoryHash: peerInventory.inventoryHash,
+                pendingUploadCount: plan.uploadMetadataActions.count + plan.uploadRecordingAudioActions.count + plan.uploadArtifactActions.count,
+                pendingDownloadCount: plan.downloadMetadataActions.count + plan.downloadArtifactActions.count,
+                at: now
+            )
+
+            try applyPeerRecordingStatuses(peerInventory: peerInventory)
+            try applyPeerMetadataIfNeeded(peerInventory: peerInventory, plan: plan, localDeviceID: snapshot.deviceID)
+            try await uploadLocalMetadataIfNeeded(localInventory: localInventory, plan: plan, settings: snapshot)
+            try await downloadPeerArtifactsIfNeeded(peerInventory: peerInventory, plan: plan, settings: snapshot)
+            await uploadMissingRecordingAudioIfNeeded(plan: plan, settings: snapshot)
+
+            let refreshedInventory = inventoryBuilder.build(
+                deviceID: snapshot.deviceID,
+                deviceName: UIDevice.current.name,
+                lastKnownPeerRevision: peerInventory.inventoryHash
+            )
+            stateStore.recordSuccess(
+                peerDeviceID: peerInventory.device.deviceID,
+                localInventoryHash: refreshedInventory.inventoryHash,
+                peerInventoryHash: peerInventory.inventoryHash,
+                appliedPeerRevision: peerInventory.inventoryHash,
+                pendingUploadCount: 0,
+                pendingDownloadCount: 0
+            )
+            connectionStatusStore?.recordSignedRequestSucceeded(
+                deviceID: snapshot.deviceID,
+                displayName: snapshot.macName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Rokurics Mac" : snapshot.macName,
+                now: Date()
+            )
+            return plan
+        } catch {
+            stateStore.recordFailure(code: "sync_tick_failed", message: error.localizedDescription, at: now)
+            return nil
+        }
+    }
+
+    private func applyPeerRecordingStatuses(peerInventory: LocalNetworkSyncInventory) throws {
+        var didChange = false
+        for peerRecording in peerInventory.recordings where peerRecording.receiveStatus == "completed" {
+            guard let localMetadata = try? audioFileStore.loadMetadata(id: peerRecording.recordingID),
+                  RecordingUploadStatus(rawMetadataValue: localMetadata.uploadStatus) != .uploaded else {
+                continue
+            }
+            try audioFileStore.updateMetadata(localMetadata.updatingUploadStatus(.uploaded))
+            didChange = true
+        }
+        if didChange {
+            recordingManager?.reloadRecordings()
+        }
+    }
+
+    private func applyPeerMetadataIfNeeded(
+        peerInventory: LocalNetworkSyncInventory,
+        plan: LocalNetworkSyncDiffPlan,
+        localDeviceID: String
+    ) throws {
+        guard !plan.downloadMetadataActions.isEmpty,
+              let manifest = peerInventory.studyManifest else {
+            return
+        }
+        _ = try studyLibraryStore.applySyncManifest(manifest, localDeviceID: localDeviceID)
+    }
+
+    private func uploadLocalMetadataIfNeeded(
+        localInventory: LocalNetworkSyncInventory,
+        plan: LocalNetworkSyncDiffPlan,
+        settings: SecureMacConnectionSnapshot
+    ) async throws {
+        guard !plan.uploadMetadataActions.isEmpty,
+              let manifest = localInventory.studyManifest else {
+            return
+        }
+        let response = try await client.applyLocalNetworkSyncMetadata(settings: settings, manifest: manifest)
+        guard response.ok else {
+            throw SecureMacUploadError.serverRejected(response.error ?? "sync_apply_metadata_failed")
+        }
+    }
+
+    private func downloadPeerArtifactsIfNeeded(
+        peerInventory: LocalNetworkSyncInventory,
+        plan: LocalNetworkSyncDiffPlan,
+        settings: SecureMacConnectionSnapshot
+    ) async throws {
+        let artifactsByID = Dictionary(uniqueKeysWithValues: peerInventory.artifacts.map { ($0.artifactID, $0) })
+        for action in plan.downloadArtifactActions {
+            guard let artifact = artifactsByID[action.entityID],
+                  artifact.kind.isAutoDownloadAllowed else {
+                continue
+            }
+            let response = try await client.requestLocalNetworkSyncArtifact(settings: settings, artifactID: artifact.artifactID)
+            try writeArtifactResponse(response)
+        }
+    }
+
+    private func uploadMissingRecordingAudioIfNeeded(
+        plan: LocalNetworkSyncDiffPlan,
+        settings: SecureMacConnectionSnapshot
+    ) async {
+        guard let recordingManager, let uploadCoordinator else {
+            return
+        }
+        recordingManager.reloadRecordings()
+        for action in plan.uploadRecordingAudioActions {
+            guard let metadata = recordingManager.recordings.first(where: { $0.id == action.entityID }) else {
+                continue
+            }
+            _ = await uploadCoordinator.uploadAndWait(
+                metadata: metadata,
+                settings: settings,
+                recordingManager: recordingManager
+            )
+        }
+    }
+
+    private func writeArtifactResponse(_ response: LocalNetworkSyncArtifactResponse) throws {
+        guard response.ok,
+              let kind = response.kind,
+              kind.isAutoDownloadAllowed,
+              let logicalPathToken = response.logicalPathToken,
+              let base64 = response.dataBase64,
+              let data = Data(base64Encoded: base64) else {
+            throw SecureMacUploadError.serverRejected(response.error ?? "sync_artifact_missing")
+        }
+        if let checksum = response.checksum,
+           checksum != SecureUploadUtilities.sha256Hex(data) {
+            throw SecureMacUploadError.serverRejected("sync_artifact_checksum_mismatch")
+        }
+
+        let rootURL = try audioFileStore.baseDirectory()
+        let destinationURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: rootURL, logicalPathToken: logicalPathToken)
+        try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: destinationURL, options: .atomic)
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncScheduler {
+    typealias TickHandler = @MainActor (String) async -> Void
+
+    private let interval: TimeInterval
+    private let tickHandler: TickHandler
+    private var periodicTask: Task<Void, Never>?
+    private(set) var isTickInFlight = false
+
+    init(interval: TimeInterval = 60, tickHandler: @escaping TickHandler) {
+        self.interval = interval
+        self.tickHandler = tickHandler
+    }
+
+    convenience init(engine: LocalNetworkSyncEngine, interval: TimeInterval = 60) {
+        self.init(interval: interval) { trigger in
+            _ = await engine.performTick(trigger: trigger)
+        }
+    }
+
+    @discardableResult
+    func foregroundTick() async -> Bool {
+        await runTickIfPossible(trigger: "foreground")
+    }
+
+    @discardableResult
+    func requestTick(trigger: String = "manual") async -> Bool {
+        await runTickIfPossible(trigger: trigger)
+    }
+
+    func startPeriodicTicks() {
+        guard periodicTask == nil else {
+            return
+        }
+        periodicTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else {
+                    return
+                }
+                _ = await self.runTickIfPossible(trigger: "timer")
+                try? await Task.sleep(nanoseconds: UInt64(self.interval * 1_000_000_000))
+            }
+        }
+    }
+
+    func stop() {
+        periodicTask?.cancel()
+        periodicTask = nil
+    }
+
+    @discardableResult
+    private func runTickIfPossible(trigger: String) async -> Bool {
+        guard !isTickInFlight else {
+            return false
+        }
+        isTickInFlight = true
+        defer { isTickInFlight = false }
+        await tickHandler(trigger)
+        return true
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncAppService: ObservableObject {
+    private let connectionStore: SecureMacConnectionStore
+    private let scheduler: LocalNetworkSyncScheduler
+    private let heartbeatMonitor: LocalNetworkHeartbeatMonitor
+    private var isActive = false
+    private var uploadLedgerObserver: NSObjectProtocol?
+    private var pairingObserver: NSObjectProtocol?
+
+    init(interval: TimeInterval = 60) {
+        let audioFileStore = AudioFileStore()
+        let recordingManager = RecordingManager(fileStore: audioFileStore)
+        let connectionStore = SecureMacConnectionStore()
+        let connectionStatusStore = DeviceConnectionStatusStore()
+        let secureClient = SecureMacUploadClient()
+        let uploadCoordinator = RecordingUploadCoordinator()
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioFileStore)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: connectionStore,
+            audioFileStore: audioFileStore,
+            studyLibraryStore: recordingManager.studyLibraryStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator,
+            uploadJobStore: uploadJobStore,
+            client: secureClient,
+            connectionStatusStore: connectionStatusStore
+        )
+
+        self.connectionStore = connectionStore
+        self.heartbeatMonitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: connectionStore,
+            client: secureClient,
+            statusStore: connectionStatusStore
+        )
+        self.scheduler = LocalNetworkSyncScheduler(engine: engine, interval: interval)
+        self.uploadLedgerObserver = NotificationCenter.default.addObserver(
+            forName: .recordingUploadJobLedgerDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let service = self else {
+                return
+            }
+            Task { @MainActor in
+                service.requestUploadLedgerTick()
+            }
+        }
+        self.pairingObserver = NotificationCenter.default.addObserver(
+            forName: .secureMacPairingDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let service = self else {
+                return
+            }
+            Task { @MainActor in
+                service.handlePairingChanged()
+            }
+        }
+    }
+
+    deinit {
+        if let uploadLedgerObserver {
+            NotificationCenter.default.removeObserver(uploadLedgerObserver)
+        }
+        if let pairingObserver {
+            NotificationCenter.default.removeObserver(pairingObserver)
+        }
+    }
+
+    func activate() {
+        connectionStore.refreshFromStorage()
+        isActive = true
+        startPairedServicesIfPossible()
+    }
+
+    func requestUploadLedgerTick() {
+        connectionStore.refreshFromStorage()
+        guard isActive, connectionStore.snapshot.isPaired else {
+            return
+        }
+        Task {
+            await scheduler.requestTick(trigger: "upload-ledger")
+        }
+    }
+
+    private func handlePairingChanged() {
+        connectionStore.refreshFromStorage()
+        guard isActive else {
+            heartbeatMonitor.suspend()
+            scheduler.stop()
+            return
+        }
+        startPairedServicesIfPossible()
+    }
+
+    private func startPairedServicesIfPossible() {
+        guard connectionStore.snapshot.isPaired else {
+            heartbeatMonitor.suspend()
+            scheduler.stop()
+            return
+        }
+
+        heartbeatMonitor.startForegroundMonitoring()
+        scheduler.startPeriodicTicks()
+        Task {
+            await scheduler.foregroundTick()
+        }
+    }
+
+    func suspend() {
+        isActive = false
+        heartbeatMonitor.suspend()
+        scheduler.stop()
+    }
+}

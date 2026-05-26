@@ -50,8 +50,14 @@ final class MacIdentityManager {
         let createdAt: Date
     }
 
+    private struct StoredTLSPrivateKey: Codable {
+        let privateKeyBase64: String
+        let createdAt: Date
+    }
+
     private let fileManager: FileManager
     private let identityURL: URL
+    private let tlsPrivateKeyURL: URL
     private let certificateURL: URL
     private(set) var signingPrivateKey: P256.Signing.PrivateKey?
     private(set) var publicKeyFingerprint = "未生成"
@@ -61,17 +67,20 @@ final class MacIdentityManager {
     private(set) var tlsIdentity: SecIdentity?
     private(set) var lastError: String?
 
-    private let tlsKeyTag = MacAppStorageProfile.tlsPrivateKeyTag
-    private let tlsPrivateKeyLabel = MacAppStorageProfile.tlsPrivateKeyLabel
-    private let tlsCertificateLabel = MacAppStorageProfile.tlsCertificateLabel
-
-    init(fileManager: FileManager = .default) {
+    init(
+        fileManager: FileManager = .default,
+        securityDirectoryURL: URL? = nil,
+        tlsKeyTagNamespace: String? = nil
+    ) {
         self.fileManager = fileManager
-        let securityDirectoryURL = Self.securityDirectoryURL(fileManager: fileManager)
-        identityURL = securityDirectoryURL
+        let resolvedSecurityDirectoryURL = securityDirectoryURL ?? Self.securityDirectoryURL(fileManager: fileManager)
+        identityURL = resolvedSecurityDirectoryURL
             .appendingPathComponent("mac-identity.json", isDirectory: false)
-        certificateURL = securityDirectoryURL
+        tlsPrivateKeyURL = resolvedSecurityDirectoryURL
+            .appendingPathComponent("tls-private-key.json", isDirectory: false)
+        certificateURL = resolvedSecurityDirectoryURL
             .appendingPathComponent("tls-certificate.der", isDirectory: false)
+        _ = tlsKeyTagNamespace
     }
 
     var status: MacIdentityStatus {
@@ -158,70 +167,89 @@ final class MacIdentityManager {
         let key = try loadOrCreateTLSPrivateKey()
         tlsPrivateKey = key
 
-        let certificate = try loadOrCreateTLSCertificate(privateKey: key)
-        tlsCertificate = certificate
-
-        try addCertificateToKeychain(certificate)
-
-        var identity: SecIdentity?
-        let status = SecIdentityCreateWithCertificate(nil, certificate, &identity)
-        guard status == errSecSuccess, let identity else {
-            throw MacIdentityManagerError.identityCreationFailed(status)
+        if let existingCertificate = try loadTLSCertificateFromDisk(),
+           certificate(existingCertificate, matches: key) {
+            tlsCertificate = existingCertificate
+            tlsIdentity = try makeTLSIdentity(certificate: existingCertificate, privateKey: key)
+            print("[RokuricsIdentity] SecIdentity loaded from app-local TLS identity")
+            return
+        } else if fileManager.fileExists(atPath: certificateURL.path) {
+            print("[RokuricsIdentity] stored certificate is not linked to current app TLS key; regenerating certificate")
         }
 
-        tlsIdentity = identity
-        print("[RokuricsIdentity] SecIdentity created")
+        let certificate = try makeTLSCertificate(privateKey: key)
+        tlsCertificate = certificate
+
+        try writeTLSCertificate(certificate)
+        tlsIdentity = try makeTLSIdentity(certificate: certificate, privateKey: key)
+        print("[RokuricsIdentity] SecIdentity created from app-local TLS identity")
     }
 
     private func loadOrCreateTLSPrivateKey() throws -> SecKey {
         if let key = try loadTLSPrivateKey() {
-            print("[RokuricsIdentity] TLS key exists")
+            print("[RokuricsIdentity] TLS key exists in app storage")
             return key
         }
 
-        print("[RokuricsIdentity] TLS key missing")
+        print("[RokuricsIdentity] TLS key missing in app storage")
         var error: Unmanaged<CFError>?
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256,
-            kSecPrivateKeyAttrs as String: [
-                kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: tlsKeyTag,
-                kSecAttrLabel as String: tlsPrivateKeyLabel
-            ]
+            kSecAttrKeySizeInBits as String: 256
         ]
 
         guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
             throw MacIdentityManagerError.keyGenerationFailed(error?.takeRetainedValue().localizedDescription ?? "unknown")
         }
 
-        print("[RokuricsIdentity] key generated")
+        try writeTLSPrivateKey(key)
+        print("[RokuricsIdentity] TLS key generated in app storage")
         return key
     }
 
     private func loadTLSPrivateKey() throws -> SecKey? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tlsKeyTag,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecReturnRef as String: true
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-
-        if status == errSecItemNotFound {
+        guard fileManager.fileExists(atPath: tlsPrivateKeyURL.path) else {
             return nil
         }
 
-        guard status == errSecSuccess else {
-            throw MacIdentityManagerError.keyLoadFailed(status)
+        let data = try Data(contentsOf: tlsPrivateKeyURL)
+        let storedPrivateKey = try JSONDecoder().decode(StoredTLSPrivateKey.self, from: data)
+        guard let keyData = Data(base64URLEncoded: storedPrivateKey.privateKeyBase64) else {
+            throw CocoaError(.fileReadCorruptFile)
         }
 
-        return (item as! SecKey)
+        var error: Unmanaged<CFError>?
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 256
+        ]
+
+        guard let key = SecKeyCreateWithData(keyData as CFData, attributes as CFDictionary, &error) else {
+            throw MacIdentityManagerError.keyGenerationFailed(error?.takeRetainedValue().localizedDescription ?? "unknown")
+        }
+
+        return key
     }
 
-    private func loadOrCreateTLSCertificate(privateKey: SecKey) throws -> SecCertificate {
+    private func writeTLSPrivateKey(_ key: SecKey) throws {
+        var error: Unmanaged<CFError>?
+        guard let keyData = SecKeyCopyExternalRepresentation(key, &error) as Data? else {
+            throw MacIdentityManagerError.keyGenerationFailed(error?.takeRetainedValue().localizedDescription ?? "external representation unavailable")
+        }
+
+        let storedPrivateKey = StoredTLSPrivateKey(
+            privateKeyBase64: keyData.base64URLEncodedString(),
+            createdAt: Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(storedPrivateKey)
+        try fileManager.createDirectory(at: tlsPrivateKeyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: tlsPrivateKeyURL, options: .atomic)
+    }
+
+    private func loadTLSCertificateFromDisk() throws -> SecCertificate? {
         if fileManager.fileExists(atPath: certificateURL.path) {
             let certificateData = try Data(contentsOf: certificateURL)
             if let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) {
@@ -232,6 +260,10 @@ final class MacIdentityManager {
             }
         }
 
+        return nil
+    }
+
+    private func makeTLSCertificate(privateKey: SecKey) throws -> SecCertificate {
         let localIPAddress = MacLocalNetworkAddressProvider.preferredIPv4Address(logPrefix: "[RokuricsIdentity]")
         let certificateData = try SelfSignedCertificateBuilder.makeCertificateDER(
             privateKey: privateKey,
@@ -243,30 +275,43 @@ final class MacIdentityManager {
             throw MacIdentityManagerError.certificateCreationFailed
         }
 
-        try certificateData.write(to: certificateURL, options: .atomic)
         certificateFingerprint = MacSecurityUtilities.sha256Hex(certificateData)
         print("[RokuricsIdentity] certificate generated")
         print("[RokuricsIdentity] certificate fingerprint: \(certificateFingerprint)")
         return certificate
     }
 
-    private func addCertificateToKeychain(_ certificate: SecCertificate) throws {
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassCertificate,
-            kSecAttrLabel as String: tlsCertificateLabel
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
+    private func writeTLSCertificate(_ certificate: SecCertificate) throws {
+        let certificateData = SecCertificateCopyData(certificate) as Data
+        try certificateData.write(to: certificateURL, options: .atomic)
+        certificateFingerprint = MacSecurityUtilities.sha256Hex(certificateData)
+    }
 
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassCertificate,
-            kSecValueRef as String: certificate,
-            kSecAttrLabel as String: tlsCertificateLabel
-        ]
-
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem else {
-            throw MacIdentityManagerError.identityCreationFailed(status)
+    private func makeTLSIdentity(certificate: SecCertificate, privateKey: SecKey) throws -> SecIdentity {
+        guard let identity = SecIdentityCreate(nil, certificate, privateKey) else {
+            throw MacIdentityManagerError.localIdentityUnavailable
         }
+        return identity
+    }
+
+    private func certificate(_ certificate: SecCertificate, matches privateKey: SecKey) -> Bool {
+        guard let certificatePublicKey = SecCertificateCopyKey(certificate),
+              let privatePublicKey = SecKeyCopyPublicKey(privateKey),
+              let certificatePublicKeyFingerprint = publicKeyFingerprint(for: certificatePublicKey),
+              let privatePublicKeyFingerprint = publicKeyFingerprint(for: privatePublicKey) else {
+            return false
+        }
+
+        return MacSecurityUtilities.constantTimeEquals(certificatePublicKeyFingerprint, privatePublicKeyFingerprint)
+    }
+
+    private func publicKeyFingerprint(for key: SecKey) -> String? {
+        var error: Unmanaged<CFError>?
+        guard let keyData = SecKeyCopyExternalRepresentation(key, &error) as Data? else {
+            return nil
+        }
+
+        return MacSecurityUtilities.sha256Hex(keyData)
     }
 
     private static func fingerprint(for publicKey: P256.Signing.PublicKey) -> String {

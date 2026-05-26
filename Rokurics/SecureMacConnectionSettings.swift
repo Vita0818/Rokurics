@@ -8,6 +8,10 @@
 import Foundation
 import Combine
 
+extension Notification.Name {
+    static let secureMacPairingDidChange = Notification.Name("RokuricsSecureMacPairingDidChange")
+}
+
 struct SecureMacConnectionSnapshot {
     let macHost: String
     let macPort: Int
@@ -173,9 +177,9 @@ final class SecureMacConnectionStore: ObservableObject {
     private let keychainStore: KeychainStore
     private var state = SecureMacConnectionStoreState()
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(userDefaults: UserDefaults = .standard, keychainStore: KeychainStore = KeychainStore()) {
         self.userDefaults = userDefaults
-        self.keychainStore = KeychainStore()
+        self.keychainStore = keychainStore
         refreshFromStorage()
     }
 
@@ -278,6 +282,7 @@ final class SecureMacConnectionStore: ObservableObject {
         ))
         persistConnectionFields()
         SecureMacConnectionSettings.clearPrototypeSharedSecretFromDefaults(userDefaults: userDefaults)
+        NotificationCenter.default.post(name: .secureMacPairingDidChange, object: nil)
     }
 
     func clearPairing() throws {
@@ -312,6 +317,7 @@ final class SecureMacConnectionStore: ObservableObject {
 
         applyState(SecureMacConnectionStoreState(storageError: firstError?.localizedDescription))
         SecureMacConnectionSettings.clearPrototypeSharedSecretFromDefaults(userDefaults: userDefaults)
+        NotificationCenter.default.post(name: .secureMacPairingDidChange, object: nil)
 
         if let firstError {
             throw firstError

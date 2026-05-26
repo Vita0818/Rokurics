@@ -8,6 +8,155 @@
 import Combine
 import Foundation
 
+enum SecureReceiverPairingFlowState: String, Equatable {
+    case idle
+    case startingListener
+    case waitingForListenerReady
+    case readyForPairing
+    case pairingCodeIssued
+    case failed
+}
+
+enum SecureReceiverConnectionErrorCode: String, Equatable {
+    case listenerNotReady
+    case serverUnreachable
+    case tlsHandshakeFailed
+    case fingerprintMismatch
+    case pairingCodeRejected
+    case requestVerifierRejected
+    case heartbeatTimeout
+    case staleHostOrPort
+    case noReachableLANAddress
+    case unknownNetworkError
+}
+
+struct SecureReceiverPairingPayload: Equatable {
+    let host: String
+    let port: Int
+    let pairingCode: String
+    let fingerprint: String
+    let fingerprintType: String
+    let expiresAtText: String
+}
+
+struct ConnectionDiagnosticEntry: Codable, Equatable {
+    let timestamp: Date
+    let phase: String
+    let host: String?
+    let port: Int?
+    let fingerprintPrefix: String?
+    let listenerState: String?
+    let activePort: Int?
+    let beginPairingRequested: Bool?
+    let codeIssued: Bool?
+    let beginPairingButtonEnabled: Bool?
+    let payloadPublished: Bool?
+    let copyEnabled: Bool?
+    let errorCode: String?
+    let errorMessage: String?
+}
+
+@MainActor
+final class ConnectionDiagnosticsStore {
+    private let fileManager: FileManager
+    let logURL: URL
+    private let maxEntries: Int
+
+    init(
+        fileManager: FileManager = .default,
+        rootURL: URL? = nil,
+        maxEntries: Int = 200
+    ) {
+        self.fileManager = fileManager
+        self.maxEntries = maxEntries
+        let root = rootURL ?? MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
+        logURL = root
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent("connection-diagnostics.jsonl", isDirectory: false)
+    }
+
+    func record(
+        phase: String,
+        host: String?,
+        port: Int?,
+        fingerprint: String?,
+        listenerState: String?,
+        activePort: Int?,
+        beginPairingRequested: Bool? = nil,
+        codeIssued: Bool? = nil,
+        beginPairingButtonEnabled: Bool? = nil,
+        payloadPublished: Bool? = nil,
+        copyEnabled: Bool? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        timestamp: Date = Date()
+    ) {
+        let entry = ConnectionDiagnosticEntry(
+            timestamp: timestamp,
+            phase: phase,
+            host: sanitized(host),
+            port: port,
+            fingerprintPrefix: fingerprintPrefix(fingerprint),
+            listenerState: listenerState,
+            activePort: activePort,
+            beginPairingRequested: beginPairingRequested,
+            codeIssued: codeIssued,
+            beginPairingButtonEnabled: beginPairingButtonEnabled,
+            payloadPublished: payloadPublished,
+            copyEnabled: copyEnabled,
+            errorCode: errorCode,
+            errorMessage: sanitized(errorMessage)
+        )
+
+        do {
+            try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let nextEntries = Array((loadEntries() + [entry]).suffix(maxEntries))
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            let lines = try nextEntries
+                .map { try String(data: encoder.encode($0), encoding: .utf8) ?? "{}" }
+                .joined(separator: "\n")
+            try Data((lines + "\n").utf8).write(to: logURL, options: .atomic)
+        } catch {
+            print("[RokuricsConnectionDiagnostics] write failed: \(error.localizedDescription)")
+        }
+    }
+
+    func loadEntries() -> [ConnectionDiagnosticEntry] {
+        guard fileManager.fileExists(atPath: logURL.path),
+              let rawText = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return rawText
+            .split(separator: "\n")
+            .compactMap { line in
+                try? decoder.decode(ConnectionDiagnosticEntry.self, from: Data(line.utf8))
+            }
+    }
+
+    private func fingerprintPrefix(_ fingerprint: String?) -> String? {
+        let normalized = fingerprint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let normalized, !normalized.isEmpty, normalized != "未生成" else {
+            return nil
+        }
+        return String(normalized.prefix(12))
+    }
+
+    private func sanitized(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 @MainActor
 final class SecureReceiverService: ObservableObject {
     @Published private(set) var isHTTPSRunning = false
@@ -24,6 +173,9 @@ final class SecureReceiverService: ObservableObject {
     @Published private(set) var lastAcceptedFileName = "暂无"
     @Published private(set) var lastReceivedRecordingID = "暂无"
     @Published private(set) var lastError: String?
+    @Published private(set) var connectionErrorCode: SecureReceiverConnectionErrorCode?
+    @Published private(set) var pairingFlowState: SecureReceiverPairingFlowState = .idle
+    @Published private(set) var pairingPayload: SecureReceiverPairingPayload?
 
     let identityManager: MacIdentityManager
     let pairedDeviceStore: PairedDeviceStore
@@ -36,8 +188,11 @@ final class SecureReceiverService: ObservableObject {
     let deviceConnectionStatusStore: DeviceConnectionStatusStore
     let syncStateStore: StudyLibrarySyncStateStore
     let syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration
+    let connectionDiagnosticsStore: ConnectionDiagnosticsStore
 
     private var httpsServer: SecureLocalHTTPSServer?
+    private var pendingPairingStartAfterHTTPSReady = false
+    private let preferredIPAddressProvider: () -> String?
     private let expiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
@@ -47,20 +202,34 @@ final class SecureReceiverService: ObservableObject {
 
     init(
         syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration = StudyLibrarySyncRuntimeConfiguration(gitBackedSyncEnabled: false),
-        gitBackedStudyMetadataStore: GitBackedStudyMetadataStore? = nil
+        gitBackedStudyMetadataStore: GitBackedStudyMetadataStore? = nil,
+        port: Int = 8787,
+        identityManager injectedIdentityManager: MacIdentityManager? = nil,
+        pairedDeviceStore injectedPairedDeviceStore: PairedDeviceStore? = nil,
+        receivedFileStore injectedReceivedFileStore: ReceivedFileStore? = nil,
+        recordingFileStore injectedRecordingFileStore: MacRecordingFileStore? = nil,
+        studyLibraryStore injectedStudyLibraryStore: StudyLibraryStore? = nil,
+        deviceConnectionStatusStore injectedDeviceConnectionStatusStore: DeviceConnectionStatusStore? = nil,
+        syncStateStore injectedSyncStateStore: StudyLibrarySyncStateStore? = nil,
+        connectionDiagnosticsStore injectedConnectionDiagnosticsStore: ConnectionDiagnosticsStore? = nil,
+        loadIdentityOnInit: Bool = true,
+        preferredIPAddressProvider: @escaping () -> String? = {
+            MacLocalNetworkAddressProvider.preferredIPv4Address(logPrefix: "[RokuricsSecurity]")
+        }
     ) {
-        let identityManager = MacIdentityManager()
-        let pairedDeviceStore = PairedDeviceStore()
+        let identityManager = injectedIdentityManager ?? MacIdentityManager()
+        let pairedDeviceStore = injectedPairedDeviceStore ?? PairedDeviceStore()
         let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
         let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
-        let receivedFileStore = ReceivedFileStore()
-        let recordingFileStore = MacRecordingFileStore()
-        let studyLibraryStore = StudyLibraryStore(recordingFileStore: recordingFileStore)
+        let receivedFileStore = injectedReceivedFileStore ?? ReceivedFileStore()
+        let recordingFileStore = injectedRecordingFileStore ?? MacRecordingFileStore()
+        let studyLibraryStore = injectedStudyLibraryStore ?? StudyLibraryStore(recordingFileStore: recordingFileStore)
         let resolvedGitBackedStudyMetadataStore = syncRuntimeConfiguration.gitBackedSyncEnabled
             ? (gitBackedStudyMetadataStore ?? GitBackedStudyMetadataStore())
             : gitBackedStudyMetadataStore
-        let deviceConnectionStatusStore = DeviceConnectionStatusStore()
-        let syncStateStore = StudyLibrarySyncStateStore()
+        let deviceConnectionStatusStore = injectedDeviceConnectionStatusStore ?? DeviceConnectionStatusStore()
+        let syncStateStore = injectedSyncStateStore ?? StudyLibrarySyncStateStore()
+        let connectionDiagnosticsStore = injectedConnectionDiagnosticsStore ?? ConnectionDiagnosticsStore()
 
         self.identityManager = identityManager
         self.pairedDeviceStore = pairedDeviceStore
@@ -73,8 +242,13 @@ final class SecureReceiverService: ObservableObject {
         self.deviceConnectionStatusStore = deviceConnectionStatusStore
         self.syncStateStore = syncStateStore
         self.syncRuntimeConfiguration = syncRuntimeConfiguration
+        self.connectionDiagnosticsStore = connectionDiagnosticsStore
+        self.preferredIPAddressProvider = preferredIPAddressProvider
+        self.port = port
 
-        identityManager.loadOrCreateIdentity()
+        if loadIdentityOnInit {
+            identityManager.loadOrCreateIdentity()
+        }
         acceptedUploadCount = receivedFileStore.savedFileCount()
         refreshSecurityState()
     }
@@ -85,6 +259,22 @@ final class SecureReceiverService: ObservableObject {
 
     var canPair: Bool {
         identityManager.status.hasSigningIdentity
+    }
+
+    var isHTTPSListenerReady: Bool {
+        httpsServer?.isReady ?? false
+    }
+
+    var activeHTTPSPort: Int? {
+        httpsServer?.activePort
+    }
+
+    var canCopyPairingInfo: Bool {
+        pairingPayload != nil
+    }
+
+    var canBeginPairingFromUI: Bool {
+        true
     }
 
     var fingerprintShortCode: String {
@@ -110,16 +300,76 @@ final class SecureReceiverService: ObservableObject {
         identityManager.status.tlsBlocker ?? "HTTPS 身份未就绪"
     }
 
+    func recordAppLaunch() {
+        recordConnectionDiagnostic(phase: "appLaunch")
+    }
+
+    func recordConnectionPageLoaded(beginPairingButtonEnabled: Bool, copyEnabled: Bool) {
+        recordConnectionDiagnostic(
+            phase: "connectionPageLoaded",
+            beginPairingButtonEnabled: beginPairingButtonEnabled,
+            payloadPublished: pairingPayload != nil,
+            copyEnabled: copyEnabled
+        )
+    }
+
+    func recordBeginPairingButtonTapped(beginPairingButtonEnabled: Bool, copyEnabled: Bool) {
+        recordConnectionDiagnostic(
+            phase: "beginPairingButtonTapped",
+            beginPairingButtonEnabled: beginPairingButtonEnabled,
+            payloadPublished: pairingPayload != nil,
+            copyEnabled: copyEnabled
+        )
+    }
+
     func startSecureReceiving() {
         print("[RokuricsHTTPS] secure receive button tapped")
         refreshSecurityState()
 
+        if let httpsServer {
+            if httpsServer.isReady {
+                applyHTTPSReadyState(activePort: httpsServer.activePort, listenerState: "ready")
+                completePendingPairingIfPossible(trigger: "already_ready")
+            } else {
+                pairingFlowState = pendingPairingStartAfterHTTPSReady ? .waitingForListenerReady : .startingListener
+                httpsStatusText = "HTTPS 启动中"
+                recordConnectionDiagnostic(
+                    phase: "listener_start_already_in_progress",
+                    listenerState: "starting",
+                    beginPairingRequested: pendingPairingStartAfterHTTPSReady
+                )
+            }
+            return
+        }
+
         guard canStartHTTPS else {
             lastError = tlsBlockerText
+            connectionErrorCode = .tlsHandshakeFailed
             httpsStatusText = "HTTPS 未就绪"
+            pairingFlowState = .failed
+            pairingPayload = nil
+            recordConnectionDiagnostic(
+                phase: "listener_start_blocked",
+                listenerState: "failed",
+                errorCode: SecureReceiverConnectionErrorCode.tlsHandshakeFailed.rawValue,
+                errorMessage: tlsBlockerText
+            )
             print("[RokuricsHTTPS] upload accepted/rejected: rejected; reason=tls_identity_unavailable")
             return
         }
+
+        pairingFlowState = pendingPairingStartAfterHTTPSReady ? .waitingForListenerReady : .startingListener
+        httpsStatusText = "HTTPS 启动中"
+        recordConnectionDiagnostic(
+            phase: "listener_start_requested",
+            listenerState: "starting",
+            beginPairingRequested: pendingPairingStartAfterHTTPSReady
+        )
+        recordConnectionDiagnostic(
+            phase: "listenerStarting",
+            listenerState: "starting",
+            beginPairingRequested: pendingPairingStartAfterHTTPSReady
+        )
 
         let server = SecureLocalHTTPSServer(
             port: port,
@@ -135,17 +385,29 @@ final class SecureReceiverService: ObservableObject {
             syncRuntimeConfiguration: syncRuntimeConfiguration,
             onReady: { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.isHTTPSRunning = true
-                    self?.httpsStatusText = "HTTPS 运行中"
-                    self?.lastError = nil
+                    guard let self else {
+                        return
+                    }
+                    self.applyHTTPSReadyState(activePort: self.httpsServer?.activePort, listenerState: "ready")
+                    self.completePendingPairingIfPossible(trigger: "listener_ready")
                 }
             },
             onFailed: { [weak self] message in
                 Task { @MainActor [weak self] in
                     self?.httpsServer = nil
                     self?.isHTTPSRunning = false
+                    self?.pendingPairingStartAfterHTTPSReady = false
+                    self?.pairingFlowState = .failed
+                    self?.pairingPayload = nil
                     self?.httpsStatusText = "HTTPS 启动失败"
                     self?.lastError = message
+                    self?.connectionErrorCode = .serverUnreachable
+                    self?.recordConnectionDiagnostic(
+                        phase: "listener_failed",
+                        listenerState: "failed",
+                        errorCode: SecureReceiverConnectionErrorCode.serverUnreachable.rawValue,
+                        errorMessage: message
+                    )
                 }
             },
             onPairingChanged: { [weak self] in
@@ -165,40 +427,140 @@ final class SecureReceiverService: ObservableObject {
                     self?.lastReceivedRecordingID = recordingID
                     self?.lastError = nil
                 }
+            },
+            onConnectionDiagnostic: { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.recordConnectionDiagnostic(
+                        phase: event.phase,
+                        listenerState: event.listenerState,
+                        activePort: event.activePort,
+                        errorCode: event.errorCode,
+                        errorMessage: event.errorMessage
+                    )
+                }
             }
         )
 
+        httpsServer = server
+
         do {
             try server.start()
-            httpsServer = server
             httpsStatusText = "HTTPS 身份就绪"
             lastError = nil
+            if server.isReady {
+                applyHTTPSReadyState(activePort: server.activePort, listenerState: "ready_after_start")
+                completePendingPairingIfPossible(trigger: "ready_after_start")
+            }
         } catch {
             httpsServer = nil
             isHTTPSRunning = false
+            pendingPairingStartAfterHTTPSReady = false
+            pairingFlowState = .failed
+            pairingPayload = nil
             httpsStatusText = "HTTPS 启动失败"
             lastError = error.localizedDescription
+            connectionErrorCode = .serverUnreachable
+            recordConnectionDiagnostic(
+                phase: "listener_start_failed",
+                listenerState: "failed",
+                errorCode: SecureReceiverConnectionErrorCode.serverUnreachable.rawValue,
+                errorMessage: error.localizedDescription
+            )
         }
     }
 
     func stopSecureReceiving() {
+        pendingPairingStartAfterHTTPSReady = false
         httpsServer?.stop()
         httpsServer = nil
         isHTTPSRunning = false
+        pairingFlowState = .idle
+        pairingPayload = nil
+        pairingManager.invalidatePairing(reason: "https_stopped")
+        refreshPairingState()
         httpsStatusText = identityManager.status.hasTLSIdentity ? "HTTPS 身份就绪" : "HTTPS 未就绪"
+        recordConnectionDiagnostic(phase: "listener_stopped", listenerState: "cancelled")
     }
 
     func beginPairing() {
         pairingManager.refresh()
+        pendingPairingStartAfterHTTPSReady = true
+        recordConnectionDiagnostic(
+            phase: "begin_pairing_requested",
+            listenerState: httpsServer?.isReady == true ? "ready" : "not_ready",
+            beginPairingRequested: true
+        )
+        recordConnectionDiagnostic(
+            phase: "beginPairingRequested",
+            listenerState: httpsServer?.isReady == true ? "ready" : "not_ready",
+            beginPairingRequested: true
+        )
+
         guard canPair else {
             lastError = "Mac 身份未就绪，无法生成配对码。"
+            connectionErrorCode = .tlsHandshakeFailed
+            pairingFlowState = .failed
+            pairingPayload = nil
+            pendingPairingStartAfterHTTPSReady = false
+            recordConnectionDiagnostic(
+                phase: "begin_pairing_failed",
+                listenerState: "identity_not_ready",
+                beginPairingRequested: true,
+                codeIssued: false,
+                errorCode: SecureReceiverConnectionErrorCode.tlsHandshakeFailed.rawValue,
+                errorMessage: lastError
+            )
             print("[RokuricsPairing] pairing failure: identity_not_ready")
             return
         }
 
-        pairingManager.beginPairing()
-        refreshPairingState()
-        lastError = nil
+        guard canStartHTTPS else {
+            lastError = tlsBlockerText
+            connectionErrorCode = .tlsHandshakeFailed
+            pairingFlowState = .failed
+            pairingPayload = nil
+            pendingPairingStartAfterHTTPSReady = false
+            httpsStatusText = "HTTPS 未就绪"
+            recordConnectionDiagnostic(
+                phase: "begin_pairing_deferred_tls_unavailable",
+                listenerState: "failed",
+                beginPairingRequested: true,
+                codeIssued: false,
+                errorCode: SecureReceiverConnectionErrorCode.tlsHandshakeFailed.rawValue,
+                errorMessage: tlsBlockerText
+            )
+            print("[RokuricsPairing] pairing deferred: tls_identity_unavailable")
+            return
+        }
+
+        if let httpsServer, httpsServer.isReady {
+            applyHTTPSReadyState(activePort: httpsServer.activePort, listenerState: "ready")
+            completePendingPairingIfPossible(trigger: "begin_pairing_already_ready")
+            return
+        }
+
+        guard isHTTPSRunning else {
+            pairingFlowState = httpsServer == nil ? .startingListener : .waitingForListenerReady
+            httpsStatusText = "HTTPS 启动中"
+            if httpsServer == nil {
+                startSecureReceiving()
+            } else {
+                recordConnectionDiagnostic(
+                    phase: "begin_pairing_waiting_for_listener_ready",
+                    listenerState: "starting",
+                    beginPairingRequested: true,
+                    codeIssued: false
+                )
+            }
+            if let httpsServer, httpsServer.isReady {
+                applyHTTPSReadyState(activePort: httpsServer.activePort, listenerState: "ready")
+                completePendingPairingIfPossible(trigger: "begin_pairing_ready_after_start")
+            }
+            print("[RokuricsPairing] pairing deferred until HTTPS listener ready")
+            return
+        }
+
+        completePendingPairingIfPossible(trigger: "begin_pairing_running")
     }
 
     func disconnectPairedDevices() {
@@ -255,7 +617,7 @@ final class SecureReceiverService: ObservableObject {
     }
 
     func refreshSecurityState() {
-        localIPAddress = MacLocalNetworkAddressProvider.preferredIPv4Address(logPrefix: "[RokuricsSecurity]") ?? "未知"
+        localIPAddress = preferredIPAddressProvider() ?? "未知"
         fingerprint = identityManager.status.displayFingerprint
         fingerprintType = identityManager.status.fingerprintType
         pairedDeviceCount = pairedDeviceStore.deviceCount
@@ -276,10 +638,184 @@ final class SecureReceiverService: ObservableObject {
             pairingExpiresAtText = "未开始"
         }
 
+        updatePairingPayload()
+
         if let storeError = pairedDeviceStore.lastError {
             lastError = storeError
         } else if let identityError = identityManager.lastError {
             lastError = identityError
         }
+    }
+
+    private func applyHTTPSReadyState(activePort: Int?, listenerState: String) {
+        isHTTPSRunning = true
+        if let activePort, activePort > 0 {
+            port = activePort
+        }
+        refreshSecurityState()
+        pairingFlowState = pendingPairingStartAfterHTTPSReady ? .waitingForListenerReady : .readyForPairing
+        httpsStatusText = "HTTPS 运行中"
+        lastError = nil
+        connectionErrorCode = nil
+        recordConnectionDiagnostic(
+            phase: "listener_ready",
+            listenerState: listenerState,
+            activePort: activePort ?? httpsServer?.activePort
+        )
+        recordConnectionDiagnostic(
+            phase: "listenerReady",
+            listenerState: listenerState,
+            activePort: activePort ?? httpsServer?.activePort
+        )
+    }
+
+    private func completePendingPairingIfPossible(trigger: String) {
+        guard pendingPairingStartAfterHTTPSReady else {
+            if httpsServer?.isReady == true, pairingFlowState != .pairingCodeIssued {
+                pairingFlowState = .readyForPairing
+            }
+            return
+        }
+
+        guard canPair, canStartHTTPS else {
+            pairingFlowState = .failed
+            pendingPairingStartAfterHTTPSReady = false
+            pairingPayload = nil
+            connectionErrorCode = .tlsHandshakeFailed
+            recordConnectionDiagnostic(
+                phase: "pairing_code_not_issued",
+                listenerState: "identity_not_ready",
+                beginPairingRequested: true,
+                codeIssued: false,
+                errorCode: SecureReceiverConnectionErrorCode.tlsHandshakeFailed.rawValue,
+                errorMessage: lastError ?? tlsBlockerText
+            )
+            return
+        }
+
+        guard let httpsServer, httpsServer.isReady else {
+            pairingFlowState = .waitingForListenerReady
+            httpsStatusText = "HTTPS 启动中"
+            recordConnectionDiagnostic(
+                phase: "pairing_waiting_for_listener_ready",
+                listenerState: "not_ready",
+                beginPairingRequested: true,
+                codeIssued: false,
+                errorCode: SecureReceiverConnectionErrorCode.listenerNotReady.rawValue
+            )
+            return
+        }
+
+        if let activePort = httpsServer.activePort, activePort > 0 {
+            port = activePort
+        }
+        refreshSecurityState()
+        pairingManager.beginPairing()
+        pendingPairingStartAfterHTTPSReady = false
+        refreshPairingState()
+        pairingFlowState = .pairingCodeIssued
+        lastError = nil
+        connectionErrorCode = nil
+        recordConnectionDiagnostic(
+            phase: "pairing_code_issued",
+            listenerState: "ready",
+            activePort: httpsServer.activePort,
+            beginPairingRequested: true,
+            codeIssued: true,
+            payloadPublished: pairingPayload != nil,
+            copyEnabled: canCopyPairingInfo
+        )
+        recordConnectionDiagnostic(
+            phase: "codeIssued",
+            listenerState: "ready",
+            activePort: httpsServer.activePort,
+            beginPairingRequested: true,
+            codeIssued: true,
+            payloadPublished: pairingPayload != nil,
+            copyEnabled: canCopyPairingInfo
+        )
+        print("[RokuricsPairing] pairing code issued from \(trigger)")
+    }
+
+    private func updatePairingPayload() {
+        let previousPayload = pairingPayload
+        if pairingManager.activeChallenge != nil,
+           let httpsServer,
+           httpsServer.isReady,
+           localIPAddress == "未知" {
+            pairingPayload = nil
+            connectionErrorCode = .noReachableLANAddress
+            recordConnectionDiagnostic(
+                phase: "payload_not_published",
+                listenerState: "ready",
+                activePort: httpsServer.activePort,
+                payloadPublished: false,
+                copyEnabled: false,
+                errorCode: SecureReceiverConnectionErrorCode.noReachableLANAddress.rawValue,
+                errorMessage: "noReachableLANAddress"
+            )
+            return
+        }
+
+        guard let challenge = pairingManager.activeChallenge,
+              let httpsServer,
+              httpsServer.isReady,
+              let activePort = httpsServer.activePort,
+              activePort > 0,
+              localIPAddress != "未知",
+              identityManager.status.hasTLSIdentity,
+              identityManager.status.certificateFingerprint.count == 64 else {
+            pairingPayload = nil
+            return
+        }
+
+        port = activePort
+        pairingPayload = SecureReceiverPairingPayload(
+            host: localIPAddress,
+            port: activePort,
+            pairingCode: challenge.code,
+            fingerprint: identityManager.status.certificateFingerprint,
+            fingerprintType: "certificate-sha256",
+            expiresAtText: expiryFormatter.string(from: challenge.expiresAt)
+        )
+
+        if previousPayload != pairingPayload {
+            recordConnectionDiagnostic(
+                phase: "payloadPublished",
+                listenerState: "ready",
+                activePort: activePort,
+                payloadPublished: true,
+                copyEnabled: canCopyPairingInfo
+            )
+        }
+    }
+
+    private func recordConnectionDiagnostic(
+        phase: String,
+        listenerState: String? = nil,
+        activePort: Int? = nil,
+        beginPairingRequested: Bool? = nil,
+        codeIssued: Bool? = nil,
+        beginPairingButtonEnabled: Bool? = nil,
+        payloadPublished: Bool? = nil,
+        copyEnabled: Bool? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil
+    ) {
+        connectionDiagnosticsStore.record(
+            phase: phase,
+            host: localIPAddress == "未知" ? nil : localIPAddress,
+            port: port > 0 ? port : nil,
+            fingerprint: fingerprint == "未生成" ? nil : fingerprint,
+            listenerState: listenerState,
+            activePort: activePort ?? httpsServer?.activePort,
+            beginPairingRequested: beginPairingRequested,
+            codeIssued: codeIssued,
+            beginPairingButtonEnabled: beginPairingButtonEnabled,
+            payloadPublished: payloadPublished,
+            copyEnabled: copyEnabled,
+            errorCode: errorCode,
+            errorMessage: errorMessage
+        )
     }
 }

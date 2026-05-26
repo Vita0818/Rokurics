@@ -13,9 +13,17 @@ enum MacRecordingFileStoreError: LocalizedError {
     case unsafeDestination
     case metadataAlreadyExists
     case metadataMissing
+    case metadataConflict
     case audioAlreadyExists
     case audioMissing
+    case audioConflict
     case fileTooLarge
+    case invalidSession
+    case sessionMissing
+    case sessionConflict
+    case chunkOffsetMismatch
+    case chunkChecksumMismatch
+    case sessionIncomplete
     case storageFailed(String)
 
     var errorDescription: String? {
@@ -30,12 +38,28 @@ enum MacRecordingFileStoreError: LocalizedError {
             return "recording_metadata_exists"
         case .metadataMissing:
             return "recording_metadata_missing"
+        case .metadataConflict:
+            return "recording_metadata_conflict"
         case .audioAlreadyExists:
             return "recording_audio_exists"
         case .audioMissing:
             return "recording_audio_missing"
+        case .audioConflict:
+            return "recording_audio_conflict"
         case .fileTooLarge:
             return "file_too_large"
+        case .invalidSession:
+            return "invalid_upload_session"
+        case .sessionMissing:
+            return "upload_session_missing"
+        case .sessionConflict:
+            return "upload_session_conflict"
+        case .chunkOffsetMismatch:
+            return "upload_chunk_offset_mismatch"
+        case .chunkChecksumMismatch:
+            return "upload_chunk_checksum_mismatch"
+        case .sessionIncomplete:
+            return "upload_session_incomplete"
         case .storageFailed(let reason):
             return reason
         }
@@ -45,9 +69,13 @@ enum MacRecordingFileStoreError: LocalizedError {
         switch self {
         case .fileTooLarge:
             return 413
-        case .metadataAlreadyExists, .audioAlreadyExists:
+        case .metadataAlreadyExists, .metadataConflict, .audioAlreadyExists, .audioConflict, .sessionConflict, .chunkChecksumMismatch:
             return 409
-        case .invalidRecordingID, .unsafeDestination, .metadataMissing, .audioMissing:
+        case .sessionIncomplete, .chunkOffsetMismatch:
+            return 422
+        case .sessionMissing:
+            return 404
+        case .invalidRecordingID, .unsafeDestination, .metadataMissing, .audioMissing, .invalidSession:
             return 400
         case .unableToCreateDirectory, .storageFailed:
             return 500
@@ -62,6 +90,10 @@ enum MacRecordingFileStoreError: LocalizedError {
             return "Conflict"
         case 413:
             return "Payload Too Large"
+        case 422:
+            return "Unprocessable Entity"
+        case 404:
+            return "Not Found"
         default:
             return "Internal Server Error"
         }
@@ -97,15 +129,44 @@ final class MacRecordingFileStore {
     // First real-audio upload version keeps whole-file uploads capped.
     // Future chunked upload can raise this limit without changing the library layout.
     static let audioMaxBytes = 512 * 1024 * 1024
+    static let resumableChunkMaxBytes = 8 * 1024 * 1024
+    static let resumableAudioMaxBytes: Int64 = 16 * 1024 * 1024 * 1024
     static let inboxDidChangeNotification = Notification.Name("RokuricsMacRecordingInboxDidChange")
 
     private struct RecordingIndex: Codable {
         var directoriesByRecordingID: [String: String] = [:]
     }
 
+    private struct ResumableAudioChunkRecord: Codable, Equatable {
+        var offset: Int64
+        var length: Int
+        var sha256: String
+    }
+
+    private struct ResumableAudioSessionManifest: Codable, Equatable {
+        static let currentVersion = 1
+
+        var version: Int = Self.currentVersion
+        var sessionID: String
+        var recordingID: String
+        var sourceDeviceID: String
+        var expectedTotalBytes: Int64
+        var expectedTotalSHA256: String
+        var chunkSize: Int
+        var tempRelativePath: String
+        var receivedBytes: Int64
+        var receivedChunks: [ResumableAudioChunkRecord]
+        var createdAt: Date
+        var updatedAt: Date
+        var finalizedAt: Date?
+        var status: String
+        var lastError: String?
+    }
+
     private let fileManager: FileManager
     private let rootURL: URL
     private let audioInboxURL: URL
+    private let uploadSessionsURL: URL
     private let transcriptsURL: URL
     private let metadataIndexURL: URL
     private let receiveLogURL: URL
@@ -120,6 +181,10 @@ final class MacRecordingFileStore {
         audioInboxURL = self.rootURL
             .appendingPathComponent("audio", isDirectory: true)
             .appendingPathComponent("inbox", isDirectory: true)
+            .standardizedFileURL
+        uploadSessionsURL = self.rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("upload-sessions", isDirectory: true)
             .standardizedFileURL
         transcriptsURL = self.rootURL
             .appendingPathComponent("transcripts", isDirectory: true)
@@ -155,9 +220,12 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.invalidRecordingID
         }
 
-        var index = loadIndex()
-        guard index.directoriesByRecordingID[metadata.id] == nil else {
-            throw MacRecordingFileStoreError.metadataAlreadyExists
+        if let existingDirectoryURL = recordingDirectoryURL(for: metadata.id) {
+            return try handleExistingMetadataUpload(
+                metadata,
+                sourceDevice: sourceDevice,
+                recordingDirectoryURL: existingDirectoryURL
+            )
         }
 
         let day = Self.dayFormatter.string(from: metadata.createdAt)
@@ -194,7 +262,7 @@ final class MacRecordingFileStore {
                 status: "metadataReceived",
                 transcriptionStatus: metadata.transcriptionStatus,
                 noteStatus: RecordingReceiveRecord.normalizedNoteStatus(metadata.noteStatus),
-                processingStatus: "notStarted",
+                processingStatus: "awaitingAudio",
                 suggestedCategory: nil,
                 course: nil,
                 category: nil,
@@ -207,10 +275,13 @@ final class MacRecordingFileStore {
                 userConfirmedFolder: nil,
                 checksum: nil,
                 audioRelativePath: nil,
-                metadataRelativePath: try relativePath(for: metadataURL)
+                metadataRelativePath: try relativePath(for: metadataURL),
+                lastUploadError: nil,
+                lastUploadAttemptAt: nextUploadAttemptDate(after: nil)
             )
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
 
+            var index = loadIndex()
             index.directoriesByRecordingID[metadata.id] = try relativePath(for: recordingDirectoryURL)
             try saveIndex(index)
             try appendReceiveLog(recordingID: metadata.id, event: "metadata_received", sourceDeviceID: sourceDevice.id, status: record.status)
@@ -221,7 +292,10 @@ final class MacRecordingFileStore {
                 directoryURL: recordingDirectoryURL,
                 metadataFileName: "metadata.json",
                 audioFileName: nil,
-                receiveFileName: "receive.json"
+                receiveFileName: "receive.json",
+                disposition: .acceptedNew,
+                receiveStatus: record.status,
+                processingStatus: record.processingStatus
             )
         } catch let error as MacRecordingFileStoreError {
             throw error
@@ -257,9 +331,27 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.metadataMissing
         }
 
-        guard !fileManager.fileExists(atPath: audioURL.path) else {
-            throw MacRecordingFileStoreError.audioAlreadyExists
+        let incomingChecksum = MacSecurityUtilities.sha256Hex(body)
+        if fileManager.fileExists(atPath: audioURL.path) {
+            return try handleExistingAudioUpload(
+                recordingID: recordingID,
+                recordingDirectoryURL: recordingDirectoryURL,
+                audioURL: audioURL,
+                receiveURL: receiveURL,
+                requestedFileName: requestedFileName,
+                sourceDevice: sourceDevice,
+                incomingChecksum: incomingChecksum,
+                incomingFileSize: Int64(body.count)
+            )
         }
+
+        try validateNewAudioUpload(
+            recordingID: recordingID,
+            metadataURL: metadataURL,
+            receiveURL: receiveURL,
+            sourceDevice: sourceDevice,
+            incomingFileSize: Int64(body.count)
+        )
 
         do {
             let sanitizedOriginalName = sanitizedFileName(requestedFileName)
@@ -272,11 +364,13 @@ final class MacRecordingFileStore {
             }
             record.audioFileName = "audio.m4a"
             record.originalAudioFileName = sanitizedOriginalName.isEmpty ? nil : sanitizedOriginalName
-            record.status = "received"
+            record.status = "completed"
             record.processingStatus = "notStarted"
-            record.checksum = MacSecurityUtilities.sha256Hex(body)
+            record.checksum = incomingChecksum
             record.audioRelativePath = try relativePath(for: audioURL)
             record.fileSize = Int64(body.count)
+            record.lastUploadError = nil
+            record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
             try appendReceiveLog(recordingID: recordingID, event: "audio_received", sourceDeviceID: sourceDevice.id, status: record.status)
             postInboxChanged()
@@ -286,7 +380,10 @@ final class MacRecordingFileStore {
                 directoryURL: recordingDirectoryURL,
                 metadataFileName: "metadata.json",
                 audioFileName: "audio.m4a",
-                receiveFileName: "receive.json"
+                receiveFileName: "receive.json",
+                disposition: .acceptedNew,
+                receiveStatus: record.status,
+                processingStatus: record.processingStatus
             )
         } catch let error as MacRecordingFileStoreError {
             throw error
@@ -365,9 +462,28 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.metadataMissing
         }
 
-        guard !fileManager.fileExists(atPath: audioURL.path) else {
-            throw MacRecordingFileStoreError.audioAlreadyExists
+        if fileManager.fileExists(atPath: audioURL.path) {
+            let result = try handleExistingAudioUpload(
+                recordingID: recordingID,
+                recordingDirectoryURL: recordingDirectoryURL,
+                audioURL: audioURL,
+                receiveURL: receiveURL,
+                requestedFileName: requestedFileName,
+                sourceDevice: sourceDevice,
+                incomingChecksum: checksum,
+                incomingFileSize: fileSize
+            )
+            discardTemporaryUpload(at: tempURL)
+            return result
         }
+
+        try validateNewAudioUpload(
+            recordingID: recordingID,
+            metadataURL: metadataURL,
+            receiveURL: receiveURL,
+            sourceDevice: sourceDevice,
+            incomingFileSize: fileSize
+        )
 
         do {
             let sanitizedOriginalName = sanitizedFileName(requestedFileName)
@@ -380,11 +496,13 @@ final class MacRecordingFileStore {
             }
             record.audioFileName = "audio.m4a"
             record.originalAudioFileName = sanitizedOriginalName.isEmpty ? nil : sanitizedOriginalName
-            record.status = "received"
+            record.status = "completed"
             record.processingStatus = "notStarted"
             record.checksum = checksum
             record.audioRelativePath = try relativePath(for: audioURL)
             record.fileSize = fileSize
+            record.lastUploadError = nil
+            record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
             try appendReceiveLog(recordingID: recordingID, event: "audio_received", sourceDeviceID: sourceDevice.id, status: record.status)
             postInboxChanged()
@@ -394,13 +512,429 @@ final class MacRecordingFileStore {
                 directoryURL: recordingDirectoryURL,
                 metadataFileName: "metadata.json",
                 audioFileName: "audio.m4a",
-                receiveFileName: "receive.json"
+                receiveFileName: "receive.json",
+                disposition: .acceptedNew,
+                receiveStatus: record.status,
+                processingStatus: record.processingStatus
             )
         } catch let error as MacRecordingFileStoreError {
             throw error
         } catch {
             print("[RokuricsRecordingStore][ERROR] audio save failed: \(error)")
             throw MacRecordingFileStoreError.storageFailed("audio_storage_failed")
+        }
+    }
+
+    func startResumableAudioUpload(
+        _ request: ResumableAudioUploadStartRequest,
+        sourceDevice: PairedDevice
+    ) throws -> ResumableAudioUploadSessionResponse {
+        try ensureLibraryDirectories()
+        try validateResumableRequest(recordingID: request.recordingID, totalBytes: request.totalBytes, chunkSize: request.chunkSize)
+
+        let recordingResources = try recordingResources(for: request.recordingID)
+        if let completed = try completedAudioResponseIfPresent(
+            recordingID: request.recordingID,
+            audioURL: recordingResources.audioURL,
+            receiveURL: recordingResources.receiveURL,
+            expectedChecksum: request.totalSHA256,
+            expectedFileSize: request.totalBytes
+        ) {
+            return completed
+        }
+
+        try validateNewAudioUpload(
+            recordingID: request.recordingID,
+            metadataURL: recordingResources.metadataURL,
+            receiveURL: recordingResources.receiveURL,
+            sourceDevice: sourceDevice,
+            incomingFileSize: request.totalBytes
+        )
+
+        if let existingSession = try existingResumableSession(recordingID: request.recordingID, sourceDeviceID: sourceDevice.id) {
+            guard sessionMatchesStart(existingSession, request: request, sourceDevice: sourceDevice) else {
+                try? markUploadConflict(
+                    receiveURL: recordingResources.receiveURL,
+                    recordingID: request.recordingID,
+                    sourceDeviceID: sourceDevice.id,
+                    error: "upload_session_conflict"
+                )
+                throw MacRecordingFileStoreError.sessionConflict
+            }
+
+            return resumableResponse(
+                disposition: .acceptedExisting,
+                session: existingSession,
+                completed: existingSession.status == "completed",
+                finalAudioExists: false
+            )
+        }
+
+        let sessionID = try generatedResumableSessionID(
+            recordingID: request.recordingID,
+            sourceDeviceID: sourceDevice.id,
+            totalSHA256: request.totalSHA256
+        )
+        let sessionDirectoryURL = try resumableSessionDirectoryURL(sessionID: sessionID)
+        let partURL = sessionDirectoryURL.appendingPathComponent("audio.part", isDirectory: false).standardizedFileURL
+        let sessionURL = sessionDirectoryURL.appendingPathComponent("session.json", isDirectory: false).standardizedFileURL
+
+        guard isInsideUploadSessionsDirectory(sessionDirectoryURL),
+              isInsideUploadSessionsDirectory(partURL),
+              isInsideUploadSessionsDirectory(sessionURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        if fileManager.fileExists(atPath: sessionURL.path) {
+            let session = try loadResumableSession(at: sessionURL)
+            guard sessionMatchesStart(session, request: request, sourceDevice: sourceDevice) else {
+                try? markUploadConflict(
+                    receiveURL: recordingResources.receiveURL,
+                    recordingID: request.recordingID,
+                    sourceDeviceID: sourceDevice.id,
+                    error: "upload_session_conflict"
+                )
+                throw MacRecordingFileStoreError.sessionConflict
+            }
+
+            return resumableResponse(
+                disposition: .acceptedExisting,
+                session: session,
+                completed: session.status == "completed",
+                finalAudioExists: false
+            )
+        }
+
+        try fileManager.createDirectory(at: sessionDirectoryURL, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: partURL.path) {
+            fileManager.createFile(atPath: partURL.path, contents: nil)
+        }
+
+        let now = Date()
+        let session = ResumableAudioSessionManifest(
+            sessionID: sessionID,
+            recordingID: request.recordingID,
+            sourceDeviceID: sourceDevice.id,
+            expectedTotalBytes: request.totalBytes,
+            expectedTotalSHA256: request.totalSHA256,
+            chunkSize: request.chunkSize,
+            tempRelativePath: try relativePath(for: partURL),
+            receivedBytes: 0,
+            receivedChunks: [],
+            createdAt: now,
+            updatedAt: now,
+            finalizedAt: nil,
+            status: "active",
+            lastError: nil
+        )
+        try saveResumableSession(session)
+        try appendReceiveLog(recordingID: request.recordingID, event: "audio_session_started", sourceDeviceID: sourceDevice.id, status: "active")
+
+        return resumableResponse(
+            disposition: .acceptedNew,
+            session: session,
+            completed: false,
+            finalAudioExists: false
+        )
+    }
+
+    func resumableAudioUploadStatus(
+        _ request: ResumableAudioUploadStatusRequest,
+        sourceDevice: PairedDevice
+    ) throws -> ResumableAudioUploadSessionResponse {
+        try ensureLibraryDirectories()
+        let sessionID = try safeResumableSessionID(request.sessionID)
+        let recordingResources = try recordingResources(for: request.recordingID)
+        if let completed = try completedAudioResponseIfPresent(
+            recordingID: request.recordingID,
+            audioURL: recordingResources.audioURL,
+            receiveURL: recordingResources.receiveURL,
+            expectedChecksum: request.totalSHA256,
+            expectedFileSize: nil
+        ) {
+            return completed
+        }
+
+        let sessionURL = try resumableSessionJSONURL(sessionID: sessionID)
+        guard fileManager.fileExists(atPath: sessionURL.path) else {
+            return ResumableAudioUploadSessionResponse(
+                ok: false,
+                disposition: nil,
+                status: "missingSession",
+                sessionID: sessionID,
+                confirmedBytes: 0,
+                nextOffset: 0,
+                chunkSize: nil,
+                completed: false,
+                finalAudioExists: false,
+                chunkAccepted: nil,
+                finalAudioRelativePath: nil,
+                checksum: nil,
+                fileSize: nil,
+                receiveStatus: nil,
+                processingStatus: nil,
+                error: "upload_session_missing",
+                reason: "Not Found"
+            )
+        }
+
+        let session = try loadResumableSession(at: sessionURL)
+        guard session.recordingID == request.recordingID,
+              session.sourceDeviceID == sourceDevice.id,
+              MacSecurityUtilities.constantTimeEquals(session.expectedTotalSHA256, request.totalSHA256) else {
+            try? markUploadConflict(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: request.recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "upload_session_conflict"
+            )
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+        guard session.status != "conflict" else {
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+
+        return resumableResponse(
+            disposition: .acceptedExisting,
+            session: session,
+            completed: session.status == "completed",
+            finalAudioExists: false
+        )
+    }
+
+    func appendResumableAudioChunk(
+        recordingID: String,
+        sessionID rawSessionID: String,
+        offset: Int64,
+        length: Int,
+        chunkSHA256: String,
+        totalSHA256: String,
+        body: Data,
+        sourceDevice: PairedDevice
+    ) throws -> ResumableAudioUploadSessionResponse {
+        try ensureLibraryDirectories()
+        let sessionID = try safeResumableSessionID(rawSessionID)
+        guard length == body.count,
+              length > 0,
+              length <= Self.resumableChunkMaxBytes,
+              offset >= 0 else {
+            throw MacRecordingFileStoreError.chunkOffsetMismatch
+        }
+
+        let bodyChecksum = MacSecurityUtilities.sha256Hex(body)
+        guard MacSecurityUtilities.constantTimeEquals(bodyChecksum, chunkSHA256) else {
+            throw MacRecordingFileStoreError.chunkChecksumMismatch
+        }
+
+        let recordingResources = try recordingResources(for: recordingID)
+        if let completed = try completedAudioResponseIfPresent(
+            recordingID: recordingID,
+            audioURL: recordingResources.audioURL,
+            receiveURL: recordingResources.receiveURL,
+            expectedChecksum: totalSHA256,
+            expectedFileSize: nil
+        ) {
+            return completed
+        }
+
+        let sessionURL = try resumableSessionJSONURL(sessionID: sessionID)
+        guard fileManager.fileExists(atPath: sessionURL.path) else {
+            throw MacRecordingFileStoreError.sessionMissing
+        }
+
+        var session = try loadResumableSession(at: sessionURL)
+        guard session.recordingID == recordingID,
+              session.sourceDeviceID == sourceDevice.id,
+              MacSecurityUtilities.constantTimeEquals(session.expectedTotalSHA256, totalSHA256) else {
+            try? markUploadConflict(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "upload_session_conflict"
+            )
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+        guard session.status == "active" else {
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+
+        if let existingChunk = session.receivedChunks.first(where: { $0.offset == offset }) {
+            guard existingChunk.length == length,
+                  MacSecurityUtilities.constantTimeEquals(existingChunk.sha256, chunkSHA256) else {
+                try markResumableSessionError(&session, error: "recording_audio_conflict")
+                try? markUploadConflict(
+                    receiveURL: recordingResources.receiveURL,
+                    recordingID: recordingID,
+                    sourceDeviceID: sourceDevice.id,
+                    error: "audio_conflict"
+                )
+                throw MacRecordingFileStoreError.audioConflict
+            }
+
+            return resumableResponse(
+                disposition: .acceptedExisting,
+                session: session,
+                completed: session.status == "completed",
+                finalAudioExists: false,
+                chunkAccepted: true
+            )
+        }
+
+        guard offset == session.receivedBytes else {
+            try markResumableSessionError(&session, error: "upload_chunk_offset_mismatch")
+            throw MacRecordingFileStoreError.chunkOffsetMismatch
+        }
+
+        let partURL = try resolvedResumablePartURL(for: session)
+        guard fileSize(at: partURL) == offset else {
+            try markResumableSessionError(&session, error: "upload_session_conflict")
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+
+        let handle = try FileHandle(forWritingTo: partURL)
+        defer {
+            try? handle.close()
+        }
+        try handle.seekToEnd()
+        handle.write(body)
+
+        session.receivedChunks.append(ResumableAudioChunkRecord(offset: offset, length: length, sha256: chunkSHA256))
+        session.receivedBytes += Int64(length)
+        session.updatedAt = Date()
+        session.lastError = nil
+        try saveResumableSession(session)
+
+        return resumableResponse(
+            disposition: .acceptedNew,
+            session: session,
+            completed: false,
+            finalAudioExists: false,
+            chunkAccepted: true
+        )
+    }
+
+    func finalizeResumableAudioUpload(
+        _ request: ResumableAudioUploadFinalizeRequest,
+        sourceDevice: PairedDevice
+    ) throws -> ResumableAudioUploadSessionResponse {
+        try ensureLibraryDirectories()
+        let sessionID = try safeResumableSessionID(request.sessionID)
+        try validateResumableRequest(recordingID: request.recordingID, totalBytes: request.totalBytes, chunkSize: 1)
+        let recordingResources = try recordingResources(for: request.recordingID)
+
+        if let completed = try completedAudioResponseIfPresent(
+            recordingID: request.recordingID,
+            audioURL: recordingResources.audioURL,
+            receiveURL: recordingResources.receiveURL,
+            expectedChecksum: request.totalSHA256,
+            expectedFileSize: request.totalBytes
+        ) {
+            return completed
+        }
+
+        let sessionURL = try resumableSessionJSONURL(sessionID: sessionID)
+        guard fileManager.fileExists(atPath: sessionURL.path) else {
+            throw MacRecordingFileStoreError.sessionMissing
+        }
+
+        var session = try loadResumableSession(at: sessionURL)
+        guard session.recordingID == request.recordingID,
+              session.sourceDeviceID == sourceDevice.id,
+              session.expectedTotalBytes == request.totalBytes,
+              MacSecurityUtilities.constantTimeEquals(session.expectedTotalSHA256, request.totalSHA256) else {
+            try? markUploadConflict(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: request.recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "upload_session_conflict"
+            )
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+        guard session.status == "active" else {
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+
+        guard session.receivedBytes == request.totalBytes else {
+            try markResumableSessionError(&session, error: "upload_session_incomplete")
+            throw MacRecordingFileStoreError.sessionIncomplete
+        }
+
+        let partURL = try resolvedResumablePartURL(for: session)
+        guard fileSize(at: partURL) == request.totalBytes else {
+            try markResumableSessionError(&session, error: "upload_session_conflict")
+            throw MacRecordingFileStoreError.sessionConflict
+        }
+
+        let checksum = try MacSecurityUtilities.sha256Hex(fileURL: partURL)
+        guard MacSecurityUtilities.constantTimeEquals(checksum, request.totalSHA256) else {
+            try markResumableSessionError(&session, error: "recording_audio_conflict")
+            try? markUploadConflict(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: request.recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "audio_conflict"
+            )
+            throw MacRecordingFileStoreError.audioConflict
+        }
+
+        try validateNewAudioUpload(
+            recordingID: request.recordingID,
+            metadataURL: recordingResources.metadataURL,
+            receiveURL: recordingResources.receiveURL,
+            sourceDevice: sourceDevice,
+            incomingFileSize: request.totalBytes
+        )
+
+        let sanitizedOriginalName = sanitizedFileName("audio.m4a")
+        do {
+            guard isInsideAudioInboxDirectory(recordingResources.audioURL) else {
+                throw MacRecordingFileStoreError.unsafeDestination
+            }
+            try fileManager.moveItem(at: partURL, to: recordingResources.audioURL)
+            var record = try loadReceiveRecord(at: recordingResources.receiveURL)
+            record.updatedAt = Date()
+            record.sourceDeviceID = sourceDevice.id
+            if record.sourceDeviceName.isEmpty {
+                record.sourceDeviceName = sourceDevice.deviceName
+            }
+            record.audioFileName = "audio.m4a"
+            record.originalAudioFileName = sanitizedOriginalName.isEmpty ? nil : sanitizedOriginalName
+            record.status = "completed"
+            record.processingStatus = "notStarted"
+            record.checksum = checksum
+            record.audioRelativePath = try relativePath(for: recordingResources.audioURL)
+            record.fileSize = request.totalBytes
+            record.lastUploadError = nil
+            record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+            try Self.jsonEncoder.encode(record).write(to: recordingResources.receiveURL, options: .atomic)
+
+            session.updatedAt = Date()
+            session.finalizedAt = Date()
+            session.status = "completed"
+            session.lastError = nil
+            try saveResumableSession(session)
+            try appendReceiveLog(recordingID: request.recordingID, event: "audio_resumable_finalized", sourceDeviceID: sourceDevice.id, status: record.status)
+            postInboxChanged()
+
+            return ResumableAudioUploadSessionResponse.accepted(
+                disposition: .acceptedNew,
+                status: session.status,
+                sessionID: session.sessionID,
+                confirmedBytes: request.totalBytes,
+                nextOffset: request.totalBytes,
+                chunkSize: session.chunkSize,
+                completed: true,
+                finalAudioExists: true,
+                finalAudioRelativePath: record.audioRelativePath,
+                checksum: checksum,
+                fileSize: request.totalBytes,
+                receiveStatus: record.status,
+                processingStatus: record.processingStatus
+            )
+        } catch let error as MacRecordingFileStoreError {
+            throw error
+        } catch {
+            throw MacRecordingFileStoreError.storageFailed("audio_resumable_finalize_failed")
         }
     }
 
@@ -823,11 +1357,457 @@ final class MacRecordingFileStore {
         }
     }
 
+    private func handleExistingMetadataUpload(
+        _ metadata: IncomingRecordingMetadata,
+        sourceDevice: PairedDevice,
+        recordingDirectoryURL: URL
+    ) throws -> RecordingReceiveResult {
+        let metadataURL = recordingDirectoryURL.appendingPathComponent("metadata.json", isDirectory: false).standardizedFileURL
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
+
+        guard isInsideRoot(recordingDirectoryURL),
+              isInsideRoot(metadataURL),
+              isInsideRoot(receiveURL),
+              isInsideRoot(audioURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        guard fileManager.fileExists(atPath: metadataURL.path),
+              fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let existingMetadata = try loadIncomingMetadata(at: metadataURL)
+        guard metadataMatchesCoreIdentity(existingMetadata, metadata) else {
+            try? markUploadConflict(
+                receiveURL: receiveURL,
+                recordingID: metadata.id,
+                sourceDeviceID: sourceDevice.id,
+                error: "metadata_conflict"
+            )
+            throw MacRecordingFileStoreError.metadataConflict
+        }
+
+        var record = try loadReceiveRecord(at: receiveURL)
+        record.updatedAt = Date()
+        record.sourceDeviceID = sourceDevice.id
+        if record.sourceDeviceName.isEmpty {
+            record.sourceDeviceName = sourceDevice.deviceName
+        }
+        normalizeUploadState(&record, hasAudio: fileManager.fileExists(atPath: audioURL.path))
+        record.lastUploadError = nil
+        record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        try appendReceiveLog(recordingID: metadata.id, event: "metadata_idempotent", sourceDeviceID: sourceDevice.id, status: record.status)
+        postInboxChanged()
+
+        return RecordingReceiveResult(
+            recordingID: metadata.id,
+            directoryURL: recordingDirectoryURL,
+            metadataFileName: "metadata.json",
+            audioFileName: record.audioFileName,
+            receiveFileName: "receive.json",
+            disposition: .acceptedExisting,
+            receiveStatus: record.status,
+            processingStatus: record.processingStatus
+        )
+    }
+
+    private func handleExistingAudioUpload(
+        recordingID: String,
+        recordingDirectoryURL: URL,
+        audioURL: URL,
+        receiveURL: URL,
+        requestedFileName: String?,
+        sourceDevice: PairedDevice,
+        incomingChecksum: String,
+        incomingFileSize: Int64
+    ) throws -> RecordingReceiveResult {
+        guard isInsideRoot(recordingDirectoryURL),
+              isInsideRoot(audioURL),
+              isInsideRoot(receiveURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        guard fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        var record = try loadReceiveRecord(at: receiveURL)
+        let existingFileSize = fileSize(at: audioURL)
+        let existingChecksum = try MacSecurityUtilities.sha256Hex(fileURL: audioURL)
+        guard existingFileSize == incomingFileSize,
+              MacSecurityUtilities.constantTimeEquals(existingChecksum, incomingChecksum) else {
+            try? markUploadConflict(
+                receiveURL: receiveURL,
+                recordingID: recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "audio_conflict"
+            )
+            throw MacRecordingFileStoreError.audioConflict
+        }
+
+        record.updatedAt = Date()
+        record.sourceDeviceID = sourceDevice.id
+        if record.sourceDeviceName.isEmpty {
+            record.sourceDeviceName = sourceDevice.deviceName
+        }
+        record.audioFileName = "audio.m4a"
+        if record.originalAudioFileName == nil {
+            let sanitizedOriginalName = sanitizedFileName(requestedFileName)
+            record.originalAudioFileName = sanitizedOriginalName.isEmpty ? nil : sanitizedOriginalName
+        }
+        record.checksum = existingChecksum
+        record.audioRelativePath = try relativePath(for: audioURL)
+        record.fileSize = existingFileSize
+        normalizeUploadState(&record, hasAudio: true)
+        record.lastUploadError = nil
+        record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        try appendReceiveLog(recordingID: recordingID, event: "audio_idempotent", sourceDeviceID: sourceDevice.id, status: record.status)
+        postInboxChanged()
+
+        return RecordingReceiveResult(
+            recordingID: recordingID,
+            directoryURL: recordingDirectoryURL,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            receiveFileName: "receive.json",
+            disposition: .acceptedExisting,
+            receiveStatus: record.status,
+            processingStatus: record.processingStatus
+        )
+    }
+
+    private func validateNewAudioUpload(
+        recordingID: String,
+        metadataURL: URL,
+        receiveURL: URL,
+        sourceDevice: PairedDevice,
+        incomingFileSize: Int64
+    ) throws {
+        let metadata = try loadIncomingMetadata(at: metadataURL)
+        guard metadata.fileSize == incomingFileSize else {
+            try? markUploadConflict(
+                receiveURL: receiveURL,
+                recordingID: recordingID,
+                sourceDeviceID: sourceDevice.id,
+                error: "audio_conflict"
+            )
+            throw MacRecordingFileStoreError.audioConflict
+        }
+    }
+
+    private struct RecordingStorageResources {
+        let directoryURL: URL
+        let audioURL: URL
+        let receiveURL: URL
+        let metadataURL: URL
+    }
+
+    private func recordingResources(for recordingID: String) throws -> RecordingStorageResources {
+        guard !sanitizedPathComponent(recordingID).isEmpty else {
+            throw MacRecordingFileStoreError.invalidRecordingID
+        }
+
+        guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
+        let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
+        let metadataURL = recordingDirectoryURL.appendingPathComponent("metadata.json", isDirectory: false).standardizedFileURL
+
+        guard isInsideRoot(recordingDirectoryURL),
+              isInsideAudioInboxDirectory(audioURL),
+              isInsideRoot(receiveURL),
+              isInsideRoot(metadataURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        guard fileManager.fileExists(atPath: metadataURL.path),
+              fileManager.fileExists(atPath: receiveURL.path) else {
+            throw MacRecordingFileStoreError.metadataMissing
+        }
+
+        return RecordingStorageResources(
+            directoryURL: recordingDirectoryURL,
+            audioURL: audioURL,
+            receiveURL: receiveURL,
+            metadataURL: metadataURL
+        )
+    }
+
+    private func validateResumableRequest(recordingID: String, totalBytes: Int64, chunkSize: Int) throws {
+        guard !sanitizedPathComponent(recordingID).isEmpty else {
+            throw MacRecordingFileStoreError.invalidRecordingID
+        }
+        guard totalBytes > 0,
+              totalBytes <= Self.resumableAudioMaxBytes,
+              chunkSize > 0,
+              chunkSize <= Self.resumableChunkMaxBytes else {
+            throw MacRecordingFileStoreError.fileTooLarge
+        }
+    }
+
+    private func completedAudioResponseIfPresent(
+        recordingID: String,
+        audioURL: URL,
+        receiveURL: URL,
+        expectedChecksum: String,
+        expectedFileSize: Int64?
+    ) throws -> ResumableAudioUploadSessionResponse? {
+        guard fileManager.fileExists(atPath: audioURL.path) else {
+            return nil
+        }
+
+        let existingFileSize = fileSize(at: audioURL)
+        if let expectedFileSize, existingFileSize != expectedFileSize {
+            throw MacRecordingFileStoreError.audioConflict
+        }
+
+        let existingChecksum = try MacSecurityUtilities.sha256Hex(fileURL: audioURL)
+        guard MacSecurityUtilities.constantTimeEquals(existingChecksum, expectedChecksum) else {
+            throw MacRecordingFileStoreError.audioConflict
+        }
+
+        var record = try loadReceiveRecord(at: receiveURL)
+        record.audioFileName = "audio.m4a"
+        record.checksum = existingChecksum
+        record.audioRelativePath = try relativePath(for: audioURL)
+        record.fileSize = existingFileSize
+        normalizeUploadState(&record, hasAudio: true)
+        record.lastUploadError = nil
+        record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+
+        return ResumableAudioUploadSessionResponse.accepted(
+            disposition: .acceptedExisting,
+            status: "completed",
+            sessionID: nil,
+            confirmedBytes: existingFileSize,
+            nextOffset: existingFileSize,
+            chunkSize: nil,
+            completed: true,
+            finalAudioExists: true,
+            finalAudioRelativePath: record.audioRelativePath,
+            checksum: existingChecksum,
+            fileSize: existingFileSize,
+            receiveStatus: record.status,
+            processingStatus: record.processingStatus
+        )
+    }
+
+    private func generatedResumableSessionID(
+        recordingID: String,
+        sourceDeviceID: String,
+        totalSHA256: String
+    ) throws -> String {
+        let sanitizedID = sanitizedPathComponent(recordingID)
+        guard !sanitizedID.isEmpty else {
+            throw MacRecordingFileStoreError.invalidRecordingID
+        }
+
+        let raw = "\(recordingID)|\(sourceDeviceID)|\(totalSHA256)"
+        let digest = MacSecurityUtilities.sha256Hex(Data(raw.utf8))
+        return try safeResumableSessionID("\(sanitizedID)-\(String(digest.prefix(16)))")
+    }
+
+    private func safeResumableSessionID(_ rawSessionID: String) throws -> String {
+        let sessionID = rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sessionID.isEmpty,
+              !sessionID.contains(".."),
+              !sessionID.contains("/"),
+              !sessionID.contains("\\"),
+              !sessionID.hasPrefix("."),
+              sanitizedPathComponent(sessionID) == sessionID else {
+            throw MacRecordingFileStoreError.invalidSession
+        }
+
+        return sessionID
+    }
+
+    private func resumableSessionDirectoryURL(sessionID rawSessionID: String) throws -> URL {
+        let sessionID = try safeResumableSessionID(rawSessionID)
+        let url = uploadSessionsURL.appendingPathComponent(sessionID, isDirectory: true).standardizedFileURL
+        guard isInsideUploadSessionsDirectory(url) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+        return url
+    }
+
+    private func resumableSessionJSONURL(sessionID rawSessionID: String) throws -> URL {
+        let url = try resumableSessionDirectoryURL(sessionID: rawSessionID)
+            .appendingPathComponent("session.json", isDirectory: false)
+            .standardizedFileURL
+        guard isInsideUploadSessionsDirectory(url) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+        return url
+    }
+
+    private func loadResumableSession(at url: URL) throws -> ResumableAudioSessionManifest {
+        guard isInsideUploadSessionsDirectory(url) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        let data = try Data(contentsOf: url)
+        return try Self.jsonDecoder.decode(ResumableAudioSessionManifest.self, from: data)
+    }
+
+    private func saveResumableSession(_ session: ResumableAudioSessionManifest) throws {
+        let sessionURL = try resumableSessionJSONURL(sessionID: session.sessionID)
+        let directoryURL = sessionURL.deletingLastPathComponent().standardizedFileURL
+        guard isInsideUploadSessionsDirectory(directoryURL),
+              isInsideUploadSessionsDirectory(sessionURL) else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try Self.jsonEncoder.encode(session).write(to: sessionURL, options: .atomic)
+    }
+
+    private func resolvedResumablePartURL(for session: ResumableAudioSessionManifest) throws -> URL {
+        guard let partURL = resolvedRootFileURL(relativePath: session.tempRelativePath),
+              isInsideUploadSessionsDirectory(partURL),
+              partURL.lastPathComponent == "audio.part" else {
+            throw MacRecordingFileStoreError.unsafeDestination
+        }
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: partURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw MacRecordingFileStoreError.sessionMissing
+        }
+
+        return partURL
+    }
+
+    private func sessionMatchesStart(
+        _ session: ResumableAudioSessionManifest,
+        request: ResumableAudioUploadStartRequest,
+        sourceDevice: PairedDevice
+    ) -> Bool {
+        session.recordingID == request.recordingID
+            && session.sourceDeviceID == sourceDevice.id
+            && session.expectedTotalBytes == request.totalBytes
+            && MacSecurityUtilities.constantTimeEquals(session.expectedTotalSHA256, request.totalSHA256)
+            && session.chunkSize == request.chunkSize
+    }
+
+    private func existingResumableSession(recordingID: String, sourceDeviceID: String) throws -> ResumableAudioSessionManifest? {
+        guard fileManager.fileExists(atPath: uploadSessionsURL.path) else {
+            return nil
+        }
+
+        let sessionDirectories = try fileManager.contentsOfDirectory(
+            at: uploadSessionsURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        for sessionDirectory in sessionDirectories {
+            guard isInsideUploadSessionsDirectory(sessionDirectory),
+                  (try? sessionDirectory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                continue
+            }
+
+            let sessionURL = sessionDirectory.appendingPathComponent("session.json", isDirectory: false).standardizedFileURL
+            guard isInsideUploadSessionsDirectory(sessionURL),
+                  let session = try? loadResumableSession(at: sessionURL),
+                  session.recordingID == recordingID,
+                  session.sourceDeviceID == sourceDeviceID,
+                  session.status != "expired" else {
+                continue
+            }
+
+            return session
+        }
+
+        return nil
+    }
+
+    private func resumableResponse(
+        disposition: RecordingUploadDisposition,
+        session: ResumableAudioSessionManifest,
+        completed: Bool,
+        finalAudioExists: Bool,
+        chunkAccepted: Bool? = nil
+    ) -> ResumableAudioUploadSessionResponse {
+        ResumableAudioUploadSessionResponse.accepted(
+            disposition: disposition,
+            status: session.status,
+            sessionID: session.sessionID,
+            confirmedBytes: session.receivedBytes,
+            nextOffset: session.receivedBytes,
+            chunkSize: session.chunkSize,
+            completed: completed,
+            finalAudioExists: finalAudioExists,
+            chunkAccepted: chunkAccepted
+        )
+    }
+
+    private func markResumableSessionError(
+        _ session: inout ResumableAudioSessionManifest,
+        error: String
+    ) throws {
+        session.updatedAt = Date()
+        session.lastError = error
+        if error.contains("conflict") {
+            session.status = "conflict"
+        }
+        try saveResumableSession(session)
+    }
+
+    private func normalizeUploadState(_ record: inout RecordingReceiveRecord, hasAudio: Bool) {
+        if hasAudio {
+            record.status = "completed"
+            if record.processingStatus == "awaitingAudio" {
+                record.processingStatus = "notStarted"
+            }
+        } else {
+            record.status = "metadataReceived"
+            record.processingStatus = "awaitingAudio"
+            record.audioFileName = nil
+            record.audioRelativePath = nil
+            record.checksum = nil
+        }
+    }
+
+    private func markUploadConflict(
+        receiveURL: URL,
+        recordingID: String,
+        sourceDeviceID: String,
+        error: String
+    ) throws {
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            return
+        }
+
+        var record = try loadReceiveRecord(at: receiveURL)
+        record.updatedAt = Date()
+        record.lastUploadError = error
+        record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        try appendReceiveLog(recordingID: recordingID, event: error, sourceDeviceID: sourceDeviceID, status: record.status)
+        postInboxChanged()
+    }
+
+    private func nextUploadAttemptDate(after previous: Date?) -> Date {
+        let now = Date()
+        guard let previous else {
+            return now
+        }
+
+        return now.timeIntervalSince(previous) >= 1 ? now : previous.addingTimeInterval(1)
+    }
+
     private func ensureLibraryDirectories() throws {
         let directories = [
             rootURL,
             rootURL.appendingPathComponent("audio", isDirectory: true),
             audioInboxURL,
+            uploadSessionsURL,
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("processing", isDirectory: true),
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("processed", isDirectory: true),
             rootURL.appendingPathComponent("audio", isDirectory: true).appendingPathComponent("archived", isDirectory: true),
@@ -885,6 +1865,42 @@ final class MacRecordingFileStore {
     private func loadReceiveRecord(at url: URL) throws -> RecordingReceiveRecord {
         let data = try Data(contentsOf: url)
         return try Self.jsonDecoder.decode(RecordingReceiveRecord.self, from: data)
+    }
+
+    private func loadIncomingMetadata(at url: URL) throws -> IncomingRecordingMetadata {
+        let data = try Data(contentsOf: url)
+        return try Self.jsonDecoder.decode(IncomingRecordingMetadata.self, from: data)
+    }
+
+    private func metadataMatchesCoreIdentity(
+        _ existing: IncomingRecordingMetadata,
+        _ incoming: IncomingRecordingMetadata
+    ) -> Bool {
+        existing.id == incoming.id
+            && existing.originalFileName == incoming.originalFileName
+            && existing.relativeAudioPath == incoming.relativeAudioPath
+            && timestampsMatch(existing.createdAt, incoming.createdAt)
+            && timestampsMatch(existing.endedAt, incoming.endedAt)
+            && abs(existing.duration - incoming.duration) < 0.001
+            && existing.format == incoming.format
+            && existing.codec == incoming.codec
+            && abs(existing.sampleRate - incoming.sampleRate) < 0.001
+            && existing.channels == incoming.channels
+            && existing.bitrate == incoming.bitrate
+            && existing.fileSize == incoming.fileSize
+    }
+
+    private func timestampsMatch(_ lhs: Date, _ rhs: Date) -> Bool {
+        abs(lhs.timeIntervalSince(rhs)) < 0.001
+    }
+
+    private func fileSize(at url: URL) -> Int64 {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return -1
+        }
+
+        return size.int64Value
     }
 
     private func inboxItem(
@@ -1022,6 +2038,10 @@ final class MacRecordingFileStore {
 
     private func isInsideAudioInboxDirectory(_ url: URL) -> Bool {
         isInside(url, requiredRoot: audioInboxURL)
+    }
+
+    private func isInsideUploadSessionsDirectory(_ url: URL) -> Bool {
+        isInside(url.resolvingSymlinksInPath(), requiredRoot: uploadSessionsURL.resolvingSymlinksInPath())
     }
 
     private func isInsideTranscriptsDirectory(_ url: URL) -> Bool {

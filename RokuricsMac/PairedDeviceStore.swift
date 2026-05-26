@@ -28,9 +28,9 @@ final class PairedDeviceStore: ObservableObject {
     private let fileManager: FileManager
     private let storeURL: URL
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
         self.fileManager = fileManager
-        storeURL = Self.securityDirectoryURL(fileManager: fileManager)
+        storeURL = (rootURL ?? Self.securityDirectoryURL(fileManager: fileManager))
             .appendingPathComponent("paired-devices.json", isDirectory: false)
         load()
     }

@@ -16,6 +16,7 @@ struct MacIPhoneConnectionView: View {
     @State private var didCopyPairingInfo = false
     @State private var activeSheet: MacIPhoneConnectionSheet?
     @State private var manualSyncStatus: DeviceConnectionStatus?
+    @State private var didRecordConnectionPageLoaded = false
 
     var body: some View {
         ZStack {
@@ -45,6 +46,12 @@ struct MacIPhoneConnectionView: View {
             case .secureUploads:
                 MacSecureUploadTestSheet(secureReceiverService: secureReceiverService)
             }
+        }
+        .onAppear {
+            recordConnectionPageLoadedIfNeeded()
+        }
+        .onChange(of: secureReceiverService.pairingPayload) { _, _ in
+            recordConnectionPageState()
         }
     }
 
@@ -125,6 +132,7 @@ struct MacIPhoneConnectionView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(MacConnectionPrimaryButtonStyle())
+            .accessibilityIdentifier("mac-iphone-copy-pairing-info-button")
             .disabled(!canCopyPairingInfo)
             .opacity(canCopyPairingInfo ? 1 : 0.52)
         }
@@ -135,22 +143,24 @@ struct MacIPhoneConnectionView: View {
 
     private var pairingCodeRow: some View {
         Group {
-            if hasActivePairingCode {
+            if let payload = activePairingPayload {
                 HStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("配对码")
                             .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
                             .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
 
-                        Text(secureReceiverService.pairingCode)
+                        Text(payload.pairingCode)
                             .font(MacTypography.technical(size: 30, weight: .bold))
                             .foregroundStyle(MacTheme.deepText(for: colorScheme))
                             .textSelection(.enabled)
+                            .accessibilityIdentifier("mac-iphone-pairing-code")
+                            .accessibilityLabel(payload.pairingCode)
                     }
 
                     Spacer(minLength: 16)
 
-                    Text(secureReceiverService.pairingExpiresAtText)
+                    Text(payload.expiresAtText)
                         .font(MacTypography.chineseCaption(size: 13, weight: .semibold))
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                         .textSelection(.enabled)
@@ -166,7 +176,8 @@ struct MacIPhoneConnectionView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(MacConnectionPrimaryButtonStyle())
-                .disabled(!secureReceiverService.canPair)
+                .accessibilityIdentifier("mac-iphone-start-pairing-button")
+                .disabled(!isBeginPairingButtonEnabled)
             }
         }
     }
@@ -191,16 +202,16 @@ struct MacIPhoneConnectionView: View {
         )
     }
 
-    private var hasActivePairingCode: Bool {
-        secureReceiverService.pairingCode.count == 6
-            && secureReceiverService.pairingCode.allSatisfy { $0.isNumber }
+    private var activePairingPayload: SecureReceiverPairingPayload? {
+        secureReceiverService.pairingPayload
     }
 
     private var canCopyPairingInfo: Bool {
-        hasActivePairingCode
-            && isFingerprintReady
-            && secureReceiverService.localIPAddress != "未知"
-            && secureReceiverService.port > 0
+        secureReceiverService.canCopyPairingInfo
+    }
+
+    private var isBeginPairingButtonEnabled: Bool {
+        secureReceiverService.canBeginPairingFromUI
     }
 
     private var isFingerprintReady: Bool {
@@ -209,6 +220,10 @@ struct MacIPhoneConnectionView: View {
     }
 
     private func startPairingFlow() {
+        secureReceiverService.recordBeginPairingButtonTapped(
+            beginPairingButtonEnabled: isBeginPairingButtonEnabled,
+            copyEnabled: canCopyPairingInfo
+        )
         if !secureReceiverService.isHTTPSRunning, secureReceiverService.canStartHTTPS {
             secureReceiverService.startSecureReceiving()
         }
@@ -217,16 +232,16 @@ struct MacIPhoneConnectionView: View {
     }
 
     private func copyPairingInfo() {
-        guard canCopyPairingInfo else {
+        guard let payload = activePairingPayload else {
             return
         }
 
         let pairingInfo = """
         Rokurics Pairing
-        Host: \(secureReceiverService.localIPAddress)
-        Port: \(secureReceiverService.port)
-        Code: \(secureReceiverService.pairingCode)
-        Fingerprint: \(secureReceiverService.fingerprint.uppercased())
+        Host: \(payload.host)
+        Port: \(payload.port)
+        Code: \(payload.pairingCode)
+        Fingerprint: \(payload.fingerprint.uppercased())
         """
 
         NSPasteboard.general.clearContents()
@@ -241,6 +256,23 @@ struct MacIPhoneConnectionView: View {
 
     private var connectionAddress: String {
         secureReceiverService.localIPAddress == "未知" ? "IP 未知" : secureReceiverService.localIPAddress
+    }
+
+    private func recordConnectionPageLoadedIfNeeded() {
+        guard !didRecordConnectionPageLoaded else {
+            recordConnectionPageState()
+            return
+        }
+
+        didRecordConnectionPageLoaded = true
+        recordConnectionPageState()
+    }
+
+    private func recordConnectionPageState() {
+        secureReceiverService.recordConnectionPageLoaded(
+            beginPairingButtonEnabled: isBeginPairingButtonEnabled,
+            copyEnabled: canCopyPairingInfo
+        )
     }
 }
 

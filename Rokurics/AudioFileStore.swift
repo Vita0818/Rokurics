@@ -211,6 +211,36 @@ struct AudioFileStore {
         try saveMetadata(metadata)
     }
 
+    @discardableResult
+    func recoverStaleUploadingMetadata() throws -> Int {
+        let metadataList = try loadAllMetadata(includeDeleted: true)
+        var recoveredCount = 0
+
+        for metadata in metadataList where RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) == .uploading {
+            try saveMetadata(metadata.recoveringStaleUploadingStatus())
+            recoveredCount += 1
+        }
+
+        return recoveredCount
+    }
+
+    @discardableResult
+    func applyRecoveredUploadJobs(_ jobs: [RecordingUploadJob]) throws -> Int {
+        var updatedCount = 0
+
+        for job in jobs where job.overallState == .retryableFailed || job.overallState == .fatalFailed {
+            guard let metadata = try? loadMetadata(id: job.recordingID),
+                  RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) != .uploaded else {
+                continue
+            }
+
+            try saveMetadata(metadata.updatingUploadStatus(.failed))
+            updatedCount += 1
+        }
+
+        return updatedCount
+    }
+
     func loadMetadata(id: String) throws -> RecordingMetadata {
         let metadataURL = try makeMetadataURL(id: id)
         guard fileExists(at: metadataURL) else {

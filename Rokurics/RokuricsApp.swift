@@ -9,9 +9,22 @@ import SwiftUI
 
 @main
 struct RokuricsApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var localNetworkSyncService = LocalNetworkSyncAppService()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .task {
+                    localNetworkSyncService.activate()
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active {
+                        localNetworkSyncService.activate()
+                    } else {
+                        localNetworkSyncService.suspend()
+                    }
+                }
         }
     }
 }

@@ -96,6 +96,9 @@ sign_file() {
     fi
 
     sign_identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
+    if [ "${CONFIGURATION:-}" = "Debug" ]; then
+        sign_identity="-"
+    fi
     if [ -z "$sign_identity" ] || [ "$sign_identity" = "-" ]; then
         sign_identity="-"
     fi

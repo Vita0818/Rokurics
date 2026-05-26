@@ -674,6 +674,663 @@ struct RokuricsTests {
         #expect(!RecordingUploadCapsulePresentation.resolve(status: .localOnly, isMacPaired: false).isEnabled)
     }
 
+    @Test func staleUploadingStatusRecoversToFailedOnRecordingManagerLoad() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        _ = try saveRecording(id: "stale-uploading-01", title: "卡住上传", store: store, uploadStatus: "uploading")
+
+        let manager = RecordingManager(fileStore: store)
+
+        #expect(manager.recordings.map(\.id) == ["stale-uploading-01"])
+        #expect(manager.recordings.first?.uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(try store.loadMetadata(id: "stale-uploading-01").uploadStatus == RecordingUploadStatus.failed.rawValue)
+    }
+
+    @Test func uploadJobStoreCreatesSavesAndLoadsJobWithVersion() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "upload-job-01", title: "任务账本", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 100)
+
+        let job = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        let loadedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let ledgerData = try Data(contentsOf: jobStore.ledgerURL())
+        let ledgerJSON = try #require(JSONSerialization.jsonObject(with: ledgerData) as? [String: Any])
+
+        #expect(job.recordingID == metadata.id)
+        #expect(loadedJob.recordingID == metadata.id)
+        #expect(loadedJob.metadataStage == .pending)
+        #expect(loadedJob.audioStage == .pending)
+        #expect(ledgerJSON["version"] as? Int == RecordingUploadJobLedger.currentVersion)
+    }
+
+    @Test func uploadJobStoreAtomicUpdatePreservesSingleActiveJob() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "upload-job-single", title: "唯一任务", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 100)
+
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        _ = try jobStore.markAttemptStarted(recordingID: metadata.id, now: now.addingTimeInterval(1))
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now.addingTimeInterval(2))
+        let jobs = try jobStore.loadJobs()
+        let loadedJob = try #require(jobs.first)
+
+        #expect(jobs.count == 1)
+        #expect(loadedJob.recordingID == metadata.id)
+        #expect(loadedJob.attemptCount == 1)
+        #expect(loadedJob.lastAttemptAt == now.addingTimeInterval(1))
+    }
+
+    @Test func corruptedUploadLedgerDoesNotCrashOrDeleteRecordings() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "upload-job-corrupt", title: "损坏账本", store: store)
+        let audioURL = try store.audioURL(for: metadata)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        try "not-json".data(using: .utf8)?.write(to: jobStore.ledgerURL(), options: .atomic)
+
+        let jobs = try jobStore.loadJobs()
+
+        #expect(jobs.isEmpty)
+        #expect(jobStore.lastReadError?.contains("upload ledger read failed") == true)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(try store.loadMetadata(id: metadata.id).id == metadata.id)
+    }
+
+    @Test func uploadJobLedgerDoesNotPersistSharedSecret() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "upload-job-secret", title: "敏感信息", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let snapshot = makePairedMacSnapshot()
+
+        _ = try jobStore.ensureJob(for: metadata, settings: snapshot, now: Date(timeIntervalSince1970: 100))
+        let ledgerText = try String(contentsOf: jobStore.ledgerURL(), encoding: .utf8)
+
+        #expect(!ledgerText.contains(snapshot.sharedSecretBase64URL))
+        #expect(!ledgerText.contains("sharedSecret"))
+        #expect(!ledgerText.contains("HMAC"))
+        #expect(!ledgerText.contains("certificate"))
+    }
+
+    @Test func retryPolicyBackoffGrowsAndCaps() {
+        let policy = RecordingUploadRetryPolicy.standard
+
+        #expect(policy.delay(forAttemptCount: 1) == 5)
+        #expect(policy.delay(forAttemptCount: 2) == 30)
+        #expect(policy.delay(forAttemptCount: 3) == 120)
+        #expect(policy.delay(forAttemptCount: 10) == 600)
+    }
+
+    @Test func retryQueueEligibilityAndDrainOnlyProcessesEligibleRetryableJobs() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 1_000)
+        let eligibleMetadata = try saveRecording(id: "retry-eligible", title: "可重试", store: store)
+        let futureMetadata = try saveRecording(id: "retry-future", title: "稍后重试", store: store)
+        let fatalMetadata = try saveRecording(id: "retry-fatal", title: "致命失败", store: store)
+        let succeededMetadata = try saveRecording(id: "retry-succeeded", title: "已成功", store: store)
+
+        var eligibleJob = RecordingUploadJob.make(metadata: eligibleMetadata, settings: makePairedMacSnapshot(), now: now)
+        eligibleJob.overallState = .retryableFailed
+        eligibleJob.audioStage = .failed
+        eligibleJob.nextRetryAfter = now
+        try jobStore.saveJob(eligibleJob)
+
+        var futureJob = RecordingUploadJob.make(metadata: futureMetadata, settings: makePairedMacSnapshot(), now: now)
+        futureJob.overallState = .retryableFailed
+        futureJob.audioStage = .failed
+        futureJob.nextRetryAfter = now.addingTimeInterval(30)
+        try jobStore.saveJob(futureJob)
+
+        var fatalJob = RecordingUploadJob.make(metadata: fatalMetadata, settings: makePairedMacSnapshot(), now: now)
+        fatalJob.overallState = .fatalFailed
+        fatalJob.isFatal = true
+        fatalJob.metadataStage = .failed
+        try jobStore.saveJob(fatalJob)
+
+        var succeededJob = RecordingUploadJob.make(metadata: succeededMetadata, settings: makePairedMacSnapshot(), now: now)
+        succeededJob.overallState = .succeeded
+        succeededJob.metadataStage = .succeeded
+        succeededJob.audioStage = .succeeded
+        try jobStore.saveJob(succeededJob)
+
+        let queue = RecordingUploadQueue(jobStore: jobStore, retryPolicy: .standard)
+        var drainedIDs: [String] = []
+        let drainedJobs = try await queue.drainEligibleJobs(now: now) { job in
+            drainedIDs.append(job.recordingID)
+        }
+
+        #expect(try queue.retryableJobs(now: now).map(\.recordingID).sorted() == ["retry-eligible", "retry-future"])
+        #expect(try queue.eligibleRetryableJobs(now: now).map(\.recordingID) == ["retry-eligible"])
+        #expect(drainedJobs.map(\.recordingID) == ["retry-eligible"])
+        #expect(drainedIDs == ["retry-eligible"])
+        #expect(!queue.isEligible(futureJob, now: now))
+        #expect(queue.isEligible(futureJob, now: now.addingTimeInterval(30)))
+        #expect(!queue.isEligible(fatalJob, now: now))
+        #expect(!queue.isEligible(succeededJob, now: now))
+    }
+
+    @Test func newUploadCreatesJobAndMarksSucceededWithMetadataUploaded() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "job-success-new", title: "新上传", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let fakeClient = FakeRecordingUploadClient(
+            result: .success(RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: "metadata.json",
+                audioFileName: "audio.m4a",
+                metadataDisposition: "acceptedNew",
+                audioDisposition: "acceptedNew"
+            )),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedNew"),
+                .audioStarted,
+                .audioSucceeded(disposition: "acceptedNew")
+            ]
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(job.overallState == .succeeded)
+        #expect(job.metadataStage == .succeeded)
+        #expect(job.audioStage == .succeeded)
+        #expect(job.metadataDisposition == .acceptedNew)
+        #expect(job.audioDisposition == .acceptedNew)
+        #expect(job.attemptCount == 1)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
+    @Test func metadataAcceptedExistingAndAudioSuccessMarksLocalRecordingUploaded() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "retry-after-metadata-only", title: "重试录音", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let fakeClient = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedExisting",
+            audioDisposition: "acceptedNew"
+        )), events: [
+            .metadataStarted,
+            .metadataSucceeded(disposition: "acceptedExisting"),
+            .audioStarted,
+            .audioSucceeded(disposition: "acceptedNew")
+        ])
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager
+        )
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(job.overallState == .succeeded)
+        #expect(job.metadataDisposition == .acceptedExisting)
+        #expect(job.audioDisposition == .acceptedNew)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+        #expect(coordinator.errorMessage(for: metadata) == nil)
+        #expect(fakeClient.lastMetadata?.id == metadata.id)
+    }
+
+    @Test func metadataSuccessAndAudioTemporaryFailureLeavesRetryableJob() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "audio-temp-failure", title: "音频临时失败", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let fakeClient = FakeRecordingUploadClient(
+            result: .failure(RecordingUploadError.audioUploadFailed("network timeout")),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedNew"),
+                .audioStarted
+            ]
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .failed)
+        #expect(job.overallState == .retryableFailed)
+        #expect(job.metadataStage == .succeeded)
+        #expect(job.audioStage == .failed)
+        #expect(job.metadataDisposition == .acceptedNew)
+        #expect(job.attemptCount == 1)
+        #expect(job.nextRetryAfter != nil)
+        #expect(job.lastErrorCode == "audio_upload_failed")
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
+    }
+
+    @Test func retryAfterMetadataSuccessAndAudioFailureCanCompleteUpload() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "audio-retry-complete", title: "重试完成", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let failingClient = FakeRecordingUploadClient(
+            result: .failure(RecordingUploadError.audioUploadFailed("network timeout")),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedNew"),
+                .audioStarted
+            ]
+        )
+        let firstCoordinator = RecordingUploadCoordinator(uploadClient: failingClient, jobStore: jobStore)
+
+        _ = await firstCoordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+
+        let retryClient = FakeRecordingUploadClient(
+            result: .success(RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: "metadata.json",
+                audioFileName: "audio.m4a",
+                metadataDisposition: "acceptedExisting",
+                audioDisposition: "acceptedNew"
+            )),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedExisting"),
+                .audioStarted,
+                .audioSucceeded(disposition: "acceptedNew")
+            ]
+        )
+        let retryCoordinator = RecordingUploadCoordinator(uploadClient: retryClient, jobStore: jobStore)
+        let failedMetadata = try store.loadMetadata(id: metadata.id)
+
+        let status = await retryCoordinator.uploadAndWait(metadata: failedMetadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(job.overallState == .succeeded)
+        #expect(job.metadataStage == .succeeded)
+        #expect(job.audioStage == .succeeded)
+        #expect(job.attemptCount == 2)
+        #expect(job.metadataDisposition == .acceptedExisting)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
+    @Test func metadataConflictMarksLocalRecordingFailedWithReadableError() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "metadata-conflict-iphone", title: "冲突录音", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let fakeClient = FakeRecordingUploadClient(result: .failure(
+            RecordingUploadError.metadataUploadFailed("recording_metadata_conflict")
+        ), events: [.metadataStarted])
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager
+        )
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let queue = RecordingUploadQueue(jobStore: jobStore, retryPolicy: .standard)
+
+        #expect(status == .failed)
+        #expect(job.overallState == .fatalFailed)
+        #expect(job.metadataStage == .failed)
+        #expect(job.isFatal)
+        #expect(try queue.retryableJobs().isEmpty)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(coordinator.errorMessage(for: metadata)?.contains("recording_metadata_conflict") == true)
+    }
+
+    @Test func audioConflictMarksLocalRecordingFailedWithReadableError() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "audio-conflict-iphone", title: "音频冲突", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let fakeClient = FakeRecordingUploadClient(result: .failure(
+            RecordingUploadError.audioUploadFailed("recording_audio_conflict")
+        ), events: [
+            .metadataStarted,
+            .metadataSucceeded(disposition: "acceptedNew"),
+            .audioStarted
+        ])
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager
+        )
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let queue = RecordingUploadQueue(jobStore: jobStore, retryPolicy: .standard)
+
+        #expect(status == .failed)
+        #expect(job.overallState == .fatalFailed)
+        #expect(job.metadataStage == .succeeded)
+        #expect(job.audioStage == .failed)
+        #expect(job.isFatal)
+        #expect(try queue.retryableJobs().isEmpty)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(coordinator.errorMessage(for: metadata)?.contains("recording_audio_conflict") == true)
+    }
+
+    @Test func staleInProgressUploadJobRecoversOnRecordingManagerLoad() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "stale-job-recovery", title: "中断任务", store: store, uploadStatus: "uploading")
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 100)
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        _ = try jobStore.markAttemptStarted(recordingID: metadata.id, now: now.addingTimeInterval(1))
+        _ = try jobStore.applyProgress(recordingID: metadata.id, event: .metadataStarted, now: now.addingTimeInterval(2))
+
+        let manager = RecordingManager(fileStore: store)
+        let recoveredJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(manager.recordings.first?.uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(recoveredJob.overallState == .retryableFailed)
+        #expect(recoveredJob.metadataStage == .failed)
+        #expect(recoveredJob.lastErrorCode == "upload_interrupted")
+        #expect(recoveredJob.nextRetryAfter != nil)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
+    }
+
+    @Test func resumableUploadProgressPersistsInLedger() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-ledger-progress", title: "进度任务", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 1_000)
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+
+        let job = try jobStore.applyProgress(
+            recordingID: metadata.id,
+            event: .audioResumableSessionStarted(
+                sessionID: "session-1",
+                totalBytes: 10,
+                chunkSize: 4,
+                totalSHA256: "abc123",
+                confirmedBytes: 4
+            ),
+            now: now.addingTimeInterval(1)
+        )
+        let loadedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let ledgerData = try Data(contentsOf: jobStore.ledgerURL())
+        let ledgerText = String(data: ledgerData, encoding: .utf8) ?? ""
+
+        #expect(job.uploadMode == .resumableChunks)
+        #expect(loadedJob.resumableSessionID == "session-1")
+        #expect(loadedJob.audioConfirmedBytes == 4)
+        #expect(loadedJob.audioTotalBytes == 10)
+        #expect(loadedJob.audioChunkCount == 3)
+        #expect(loadedJob.audioCompletedChunkCount == 1)
+        #expect(loadedJob.currentProgressFraction == 0.4)
+        #expect(ledgerText.contains(#""version" : 2"#) || ledgerText.contains(#""version":2"#))
+        #expect(!ledgerText.localizedCaseInsensitiveContains("sharedSecret"))
+        #expect(!ledgerText.localizedCaseInsensitiveContains("hmac"))
+    }
+
+    @Test func resumableRetryableFailurePreservesSessionAndConfirmedBytes() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-failure-preserve", title: "失败保留", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 2_000)
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        _ = try jobStore.applyProgress(
+            recordingID: metadata.id,
+            event: .audioResumableSessionStarted(
+                sessionID: "session-preserve",
+                totalBytes: 12,
+                chunkSize: 4,
+                totalSHA256: "sha",
+                confirmedBytes: 8
+            ),
+            now: now
+        )
+
+        let failed = try jobStore.markFailure(
+            recordingID: metadata.id,
+            classification: RecordingUploadFailureClassification(code: "network_failed", message: "network lost", isFatal: false),
+            retryPolicy: .standard,
+            now: now.addingTimeInterval(1)
+        )
+
+        #expect(failed.overallState == .retryableFailed)
+        #expect(failed.resumableSessionID == "session-preserve")
+        #expect(failed.audioConfirmedBytes == 8)
+        #expect(failed.resumableState == .retryableFailed)
+        #expect(failed.nextRetryAfter != nil)
+    }
+
+    @Test func staleResumableInProgressJobRecoversToPausedRetryable() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "stale-resumable-job", title: "续传中断", store: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 3_000)
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        _ = try jobStore.markAttemptStarted(recordingID: metadata.id, now: now)
+        _ = try jobStore.applyProgress(
+            recordingID: metadata.id,
+            event: .audioResumableSessionStarted(
+                sessionID: "session-stale",
+                totalBytes: 20,
+                chunkSize: 5,
+                totalSHA256: "sha",
+                confirmedBytes: 10
+            ),
+            now: now
+        )
+
+        let recovered = try #require(try jobStore.recoverStaleInProgressJobs(now: now.addingTimeInterval(10)).first)
+
+        #expect(recovered.overallState == .retryableFailed)
+        #expect(recovered.audioStage == .failed)
+        #expect(recovered.resumableState == .paused)
+        #expect(recovered.resumableSessionID == "session-stale")
+        #expect(recovered.audioConfirmedBytes == 10)
+    }
+
+    @Test func smallFileBelowThresholdUsesExistingSingleRequestUpload() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "single-request-small", title: "小文件", store: store, audioData: Data("small".utf8))
+        let transport = FakeRecordingSecureUploadTransport()
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 64,
+            resumableChunkSize: 4
+        )
+
+        let result = try await client.uploadRecording(metadata: metadata, settings: makePairedMacSnapshot())
+
+        #expect(result.audioDisposition == "acceptedNew")
+        #expect(transport.metadataUploadCount == 1)
+        #expect(transport.singleFileUploadCount == 1)
+        #expect(transport.resumableStartCount == 0)
+        #expect(transport.chunkOffsets.isEmpty)
+    }
+
+    @Test func largeFileAboveThresholdUsesResumableStartChunksFinalize() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-large", title: "大文件", store: store, audioData: Data("abcdefghi".utf8))
+        let transport = FakeRecordingSecureUploadTransport()
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        var events: [RecordingUploadProgressEvent] = []
+
+        let result = try await client.uploadRecording(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            progress: { event in events.append(event) }
+        )
+
+        #expect(result.audioDisposition == "acceptedNew")
+        #expect(transport.metadataUploadCount == 1)
+        #expect(transport.singleFileUploadCount == 0)
+        #expect(transport.resumableStartCount == 1)
+        #expect(transport.chunkOffsets == [0, 3, 6])
+        #expect(transport.finalizeCount == 1)
+        #expect(events.contains(.audioResumableProgress(sessionID: "session-1", confirmedBytes: 9, totalBytes: 9, nextOffset: 9)))
+    }
+
+    @Test func resumableNetworkFailurePreservesProgressInCoordinatorLedger() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-network-failure", title: "网络中断", store: store, audioData: Data("abcdefghi".utf8))
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.failChunkAtOffset = 3
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: client, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let storedMetadata = try store.loadMetadata(id: metadata.id)
+
+        #expect(status == .failed)
+        #expect(job.overallState == .retryableFailed)
+        #expect(job.metadataStage == .succeeded)
+        #expect(job.audioStage == .failed)
+        #expect(job.resumableSessionID == "session-1")
+        #expect(job.audioConfirmedBytes == 3)
+        #expect(storedMetadata.uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(storedMetadata.uploadProgressConfirmedBytes == 3)
+    }
+
+    @Test func resumableRetryQueriesStatusAndResumesFromMacConfirmedOffset() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-retry-status", title: "续传恢复", store: store, audioData: Data("abcdefghi".utf8))
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date(timeIntervalSince1970: 4_000)
+        var job = RecordingUploadJob.make(metadata: metadata, settings: makePairedMacSnapshot(), now: now)
+        job.metadataStage = .succeeded
+        job.metadataDisposition = .acceptedNew
+        job.audioStage = .failed
+        job.overallState = .retryableFailed
+        job.uploadMode = .resumableChunks
+        job.resumableState = .retryableFailed
+        job.resumableSessionID = "session-1"
+        job.audioConfirmedBytes = 3
+        job.audioTotalBytes = 9
+        job.audioChunkSize = 3
+        job.audioTotalSHA256 = try SecureUploadUtilities.sha256Hex(fileURL: store.audioURL(for: metadata))
+        try jobStore.saveJob(job)
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.statusConfirmedBytes = 6
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: client, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let completedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(transport.statusCount == 1)
+        #expect(transport.metadataUploadCount == 0)
+        #expect(transport.chunkOffsets == [6])
+        #expect(completedJob.overallState == .succeeded)
+        #expect(completedJob.audioConfirmedBytes == 9)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
+    @Test func resumableFinalizeAcceptedExistingMarksUploaded() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-finalize-existing", title: "重复完成", store: store, audioData: Data("abcdefghi".utf8))
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.finalizeDisposition = "acceptedExisting"
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: client, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let completedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(completedJob.audioDisposition == .acceptedExisting)
+        #expect(completedJob.currentProgressFraction == 1)
+    }
+
+    @Test func resumableAudioConflictMarksFatalFailed() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "resumable-audio-conflict", title: "续传冲突", store: store, audioData: Data("abcdefghi".utf8))
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.chunkErrorAtOffset = (3, RecordingUploadError.audioUploadFailed("recording_audio_conflict"))
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        let coordinator = RecordingUploadCoordinator(uploadClient: client, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(metadata: metadata, settings: makePairedMacSnapshot(), recordingManager: manager)
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        let queue = RecordingUploadQueue(jobStore: jobStore, retryPolicy: .standard)
+
+        #expect(status == .failed)
+        #expect(job.overallState == .fatalFailed)
+        #expect(job.resumableState == .fatalFailed)
+        #expect(job.audioStage == .failed)
+        #expect(job.audioConfirmedBytes == 3)
+        #expect(try queue.retryableJobs().isEmpty)
+    }
+
+    @Test func secureUploadClientAudioMainPathUsesFileUploadNotWholeAudioData() throws {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let sourceURL = testFileURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Rokurics", isDirectory: true)
+            .appendingPathComponent("SecureMacUploadClient.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("upload(for: request, fromFile: fileURL)"))
+        #expect(!source.contains("Data(contentsOf: audioURL)"))
+        #expect(!source.contains("Data(contentsOf: fileURL)"))
+    }
+
     @Test func doubleTapRecordingIconResolvesMoveToTrashIntent() {
         #expect(RecordingRowIconInteraction.intent(for: .singleTap) == .none)
         #expect(RecordingRowIconInteraction.intent(for: .doubleTap) == .moveToTrash)
@@ -949,6 +1606,860 @@ struct RokuricsTests {
         #expect(SecureMacUploadClient.isHTTPSUploadEnabled)
     }
 
+    @Test func localNetworkInventoryEncodesWithoutAbsolutePathsOrSecrets() throws {
+        let artifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: "recording-01",
+            logicalPathToken: "transcripts/recording-01/transcript.md"
+        )
+        let inventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "iphone-01",
+                deviceName: "Vita iPhone",
+                platform: .iPhone,
+                generatedAt: Date(timeIntervalSince1970: 1),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            artifacts: [
+                LocalNetworkSyncArtifactEntry(
+                    artifactID: artifactID,
+                    kind: .transcriptMarkdown,
+                    ownerID: "recording-01",
+                    checksum: "abc",
+                    size: 12,
+                    updatedAt: Date(timeIntervalSince1970: 2),
+                    availability: .local,
+                    logicalPathToken: "transcripts/recording-01/transcript.md"
+                )
+            ]
+        )
+
+        let data = try Self.studyEncoder.encode(inventory)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        let decoded = try Self.studyDecoder.decode(LocalNetworkSyncInventory.self, from: data)
+
+        #expect(decoded.inventoryHash == inventory.inventoryHash)
+        #expect(!json.contains("/Users/"))
+        #expect(!json.lowercased().contains("sharedsecret"))
+        #expect(!json.lowercased().contains("hmac"))
+    }
+
+    @Test func artifactSanitizerRejectsTraversalAbsoluteAndEscapePaths() throws {
+        #expect(throws: LocalNetworkSyncArtifactValidationError.pathTraversal) {
+            try LocalNetworkSyncArtifactID.validateLogicalPathToken("transcripts/../secret.txt")
+        }
+        #expect(throws: LocalNetworkSyncArtifactValidationError.absolutePath) {
+            try LocalNetworkSyncArtifactID.validateLogicalPathToken("/Users/vita/secret.txt")
+        }
+        #expect(throws: LocalNetworkSyncArtifactValidationError.invalidArtifactID) {
+            try LocalNetworkSyncArtifactID.validate("../artifact")
+        }
+
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RokuricsArtifactEscapeTests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        let outsideURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RokuricsOutside-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: outsideURL) }
+        try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: true)
+        let symlinkURL = rootURL.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: outsideURL)
+
+        #expect(throws: LocalNetworkSyncArtifactValidationError.unsafeResolvedPath) {
+            _ = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: rootURL, logicalPathToken: "link/escape.md")
+        }
+    }
+
+    @Test func localNetworkDiffPlannerSchedulesTranscriptDownloadButNotAudioDownload() {
+        let generatedAt = Date(timeIntervalSince1970: 1)
+        let local = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "iphone-01",
+                deviceName: "iPhone",
+                platform: .iPhone,
+                generatedAt: generatedAt,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            )
+        )
+        let transcriptID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "recording-01", logicalPathToken: "transcripts/recording-01/transcript.md")
+        let audioID = LocalNetworkSyncArtifactID.make(kind: .audio, ownerID: "recording-01", logicalPathToken: "audio/inbox/recording-01/audio.m4a")
+        let peer = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: generatedAt,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            artifacts: [
+                LocalNetworkSyncArtifactEntry(
+                    artifactID: transcriptID,
+                    kind: .transcriptMarkdown,
+                    ownerID: "recording-01",
+                    checksum: "tx",
+                    size: 20,
+                    updatedAt: generatedAt,
+                    availability: .local,
+                    logicalPathToken: "transcripts/recording-01/transcript.md"
+                ),
+                LocalNetworkSyncArtifactEntry(
+                    artifactID: audioID,
+                    kind: .audio,
+                    ownerID: "recording-01",
+                    checksum: nil,
+                    size: 5,
+                    updatedAt: generatedAt,
+                    availability: .local,
+                    logicalPathToken: "audio/inbox/recording-01/audio.m4a"
+                )
+            ]
+        )
+
+        let plan = LocalNetworkSyncDiffPlanner().plan(local: local, peer: peer, lastSuccessfulSyncAt: nil)
+
+        #expect(plan.downloadArtifactActions.map(\.entityID).contains(transcriptID))
+        #expect(!plan.downloadArtifactActions.map(\.entityID).contains(audioID))
+        #expect(plan.noOps.contains { $0.entityID == audioID && $0.reason == "audio_auto_download_disabled" })
+    }
+
+    @Test func localNetworkDiffPlannerMarksBothChangedConflictAndTombstoneWinner() {
+        let lastSync = Date(timeIntervalSince1970: 100)
+        let localFolder = LocalNetworkSyncFolderEntry(
+            folderID: "folder-conflict",
+            parentID: nil,
+            path: "Course",
+            name: "Local",
+            colorToken: nil,
+            updatedAt: Date(timeIntervalSince1970: 130),
+            revisionHash: "local",
+            deleted: false
+        )
+        let peerFolder = LocalNetworkSyncFolderEntry(
+            folderID: "folder-conflict",
+            parentID: nil,
+            path: "Course",
+            name: "Peer",
+            colorToken: nil,
+            updatedAt: Date(timeIntervalSince1970: 140),
+            revisionHash: "peer",
+            deleted: false
+        )
+        let localTombstoneVictim = LocalNetworkSyncFolderEntry(
+            folderID: "folder-tombstone",
+            parentID: nil,
+            path: "Old",
+            name: "Old",
+            colorToken: nil,
+            updatedAt: Date(timeIntervalSince1970: 10),
+            revisionHash: "old-local",
+            deleted: false
+        )
+        let peerTombstone = LocalNetworkSyncFolderEntry(
+            folderID: "folder-tombstone",
+            parentID: nil,
+            path: "Old",
+            name: "Old",
+            colorToken: nil,
+            updatedAt: Date(timeIntervalSince1970: 20),
+            revisionHash: "old-peer-deleted",
+            deleted: true
+        )
+        let local = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "iphone-01",
+                deviceName: "iPhone",
+                platform: .iPhone,
+                generatedAt: lastSync,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            folders: [localFolder, localTombstoneVictim]
+        )
+        let peer = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: lastSync,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            folders: [peerFolder, peerTombstone]
+        )
+
+        let conflictPlan = LocalNetworkSyncDiffPlanner().plan(local: local, peer: peer, lastSuccessfulSyncAt: lastSync)
+        let tombstonePlan = LocalNetworkSyncDiffPlanner().plan(local: local, peer: peer, lastSuccessfulSyncAt: nil)
+
+        #expect(conflictPlan.conflictActions.contains { $0.entityID == "folder-conflict" && $0.reason == "both_changed_after_last_sync" })
+        #expect(tombstonePlan.downloadMetadataActions.contains { $0.entityID == "folder-tombstone" && $0.reason == "peer_tombstone_wins" })
+    }
+
+    @Test func localNetworkSyncStateCorruptionDoesNotCrashOrDeleteRecordings() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        _ = try saveRecording(id: "state-corruption-audio", title: "保留录音", store: audioStore)
+        let syncURL = rootURL
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("local-network-sync-state.json", isDirectory: false)
+        try FileManager.default.createDirectory(at: syncURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not-json".utf8).write(to: syncURL)
+
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+
+        #expect(stateStore.state == .empty)
+        #expect(stateStore.lastError != nil)
+        #expect(try audioStore.loadMetadata(id: "state-corruption-audio").id == "state-corruption-audio")
+    }
+
+    @Test func localNetworkSchedulerPreventsReentrantTicks() async {
+        var tickCount = 0
+        let scheduler = LocalNetworkSyncScheduler(interval: 0.01) { _ in
+            tickCount += 1
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        async let first: Bool = scheduler.requestTick(trigger: "first")
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        let second = await scheduler.requestTick(trigger: "second")
+        let firstResult = await first
+
+        #expect(firstResult)
+        #expect(!second)
+        #expect(tickCount == 1)
+    }
+
+    @Test func heartbeatMonitorStartsPeriodicForegroundPing() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let client = FakeLocalNetworkHeartbeatClient()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: client,
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(
+                heartbeatInterval: 0.01,
+                requestTimeout: 0.01,
+                missedHeartbeatLimit: 2,
+                staleAfter: 0.05,
+                disconnectedAfter: 0.1
+            )
+        )
+
+        monitor.startForegroundMonitoring()
+        try? await Task.sleep(nanoseconds: 35_000_000)
+        monitor.suspend()
+
+        #expect(client.requests.count >= 1)
+        #expect(statusStore.status(for: makePairedMacSnapshot().deviceID)?.monitoringMode == .suspended)
+    }
+
+    @Test func heartbeatMonitorDoesNotStartWithoutPairedDevice() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let client = FakeLocalNetworkHeartbeatClient()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makeUnpairedMacSnapshot()),
+            client: client,
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(
+                heartbeatInterval: 0.01,
+                requestTimeout: 0.01,
+                missedHeartbeatLimit: 2,
+                staleAfter: 0.05,
+                disconnectedAfter: 0.1
+            )
+        )
+
+        let didStart = monitor.startForegroundMonitoring()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        #expect(!didStart)
+        #expect(!monitor.isMonitoring)
+        #expect(client.requests.isEmpty)
+        #expect(statusStore.latestStatus == nil)
+    }
+
+    @Test func pairingSuccessAllowsHeartbeatToStartAfterPreviouslyUnpairedState() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let provider = FakeSecureMacConnectionSnapshotProvider(snapshot: makeUnpairedMacSnapshot())
+        let client = FakeLocalNetworkHeartbeatClient()
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: provider,
+            client: client,
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            configuration: LocalNetworkHeartbeatConfiguration(
+                heartbeatInterval: 0.01,
+                requestTimeout: 0.01,
+                missedHeartbeatLimit: 2,
+                staleAfter: 0.05,
+                disconnectedAfter: 0.1
+            )
+        )
+
+        #expect(!monitor.startForegroundMonitoring())
+        provider.snapshot = makePairedMacSnapshot()
+        #expect(monitor.startForegroundMonitoring())
+        try? await Task.sleep(nanoseconds: 25_000_000)
+        monitor.suspend()
+
+        #expect(client.requests.count >= 1)
+    }
+
+    @MainActor
+    @Test func pairingSuccessStoresCurrentMacIdentityInConnectionStore() throws {
+        let suiteName = "RokuricsTests.Pairing.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let keychain = KeychainStore(service: "com.Vita0818.Rokurics.tests.\(UUID().uuidString)")
+        defer {
+            try? keychain.delete(account: SecureMacConnectionSettings.deviceIDKey)
+            try? keychain.delete(account: SecureMacConnectionSettings.sharedSecretKey)
+            try? keychain.delete(account: SecureMacConnectionSettings.macFingerprintKey)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = SecureMacConnectionStore(userDefaults: defaults, keychainStore: keychain)
+        let fingerprint = String(repeating: "a", count: 64)
+        let result = SecurePairingResult(
+            deviceID: "iphone-\(UUID().uuidString.lowercased())",
+            sharedSecretBase64URL: Data("paired-secret-\(UUID().uuidString)".utf8).base64URLEncodedString(),
+            pairedAt: "2026-05-26T10:00:00Z",
+            macName: "Rokurics Mac",
+            macModel: "MacBook"
+        )
+
+        try store.savePairing(
+            result: result,
+            host: " https://192.168.1.25:8787/pair ",
+            portText: "8787",
+            fingerprint: fingerprint.uppercased()
+        )
+
+        let snapshot = store.snapshot
+        #expect(snapshot.isPaired)
+        #expect(snapshot.macHost == "192.168.1.25")
+        #expect(snapshot.macPort == 8787)
+        #expect(snapshot.macFingerprint == fingerprint)
+        #expect(snapshot.deviceID == result.deviceID)
+        #expect(snapshot.sharedSecretBase64URL == result.sharedSecretBase64URL)
+
+        let reloaded = SecureMacConnectionStore(userDefaults: defaults, keychainStore: keychain)
+        #expect(reloaded.snapshot.macHost == "192.168.1.25")
+        #expect(reloaded.snapshot.macPort == 8787)
+        #expect(reloaded.snapshot.macFingerprint == fingerprint)
+        #expect(reloaded.snapshot.sharedSecretBase64URL == result.sharedSecretBase64URL)
+    }
+
+    @Test func heartbeatPongMarksPeerOnlineAndRecordsLatency() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: FakeLocalNetworkHeartbeatClient(),
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        let didSend = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let status = try #require(statusStore.status(for: makePairedMacSnapshot().deviceID, now: Date(timeIntervalSince1970: 11)))
+
+        #expect(didSend)
+        #expect(status.presenceState == .online)
+        #expect(status.state == .connected)
+        #expect(status.missedHeartbeatCount == 0)
+        #expect(status.latencyMilliseconds != nil)
+    }
+
+    @Test func heartbeatTimeoutsIncrementMissesAndDisconnectAfterThreshold() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL, missedHeartbeatLimit: 2)
+        let client = FakeLocalNetworkHeartbeatClient(error: URLError(.timedOut))
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: client,
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 2, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let first = try #require(statusStore.status(for: makePairedMacSnapshot().deviceID, now: Date(timeIntervalSince1970: 10)))
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 11))
+        let second = try #require(statusStore.status(for: makePairedMacSnapshot().deviceID, now: Date(timeIntervalSince1970: 11)))
+
+        #expect(first.presenceState == .stale)
+        #expect(first.missedHeartbeatCount == 1)
+        #expect(second.presenceState == .disconnected)
+        #expect(second.missedHeartbeatCount == 2)
+    }
+
+    @Test func heartbeatMonitorPreventsConcurrentRequests() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let client = FakeLocalNetworkHeartbeatClient(delayNanoseconds: 50_000_000)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: client,
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        async let first: Bool = monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        let second = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let firstResult = await first
+
+        #expect(firstResult)
+        #expect(!second)
+        #expect(client.maxConcurrentRequests == 1)
+    }
+
+    @Test func signedRequestSuccessRefreshesPresenceState() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let snapshot = makePairedMacSnapshot()
+
+        _ = statusStore.recordHeartbeatFailure(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            errorCode: "heartbeat_timeout",
+            errorMessage: "Timed out"
+        )
+        let refreshed = statusStore.recordSignedRequestSucceeded(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            now: Date(timeIntervalSince1970: 20)
+        )
+
+        #expect(refreshed.presenceState == .online)
+        #expect(refreshed.lastSignedRequestSucceededAt == Date(timeIntervalSince1970: 20))
+        #expect(refreshed.missedHeartbeatCount == 0)
+    }
+
+    @Test func heartbeatFailureDoesNotDeleteUploadJobOrSyncState() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "heartbeat-preserve-upload-job", title: "保留上传任务", store: audioStore, uploadStatus: "failed")
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let snapshot = makePairedMacSnapshot()
+        let connectionProvider = FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot)
+        _ = try jobStore.ensureJob(for: metadata, settings: snapshot, now: Date(timeIntervalSince1970: 1))
+        let syncStateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        syncStateStore.recordFailure(code: "previous_sync_failure", message: "keep me", at: Date(timeIntervalSince1970: 2))
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL, missedHeartbeatLimit: 1)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: connectionProvider,
+            client: FakeLocalNetworkHeartbeatClient(error: URLError(.cannotConnectToHost)),
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 1, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 3))
+
+        #expect(try jobStore.loadJob(recordingID: metadata.id) != nil)
+        #expect(syncStateStore.state.lastErrorCode == "previous_sync_failure")
+        #expect(connectionProvider.snapshot.isPaired)
+    }
+
+    @Test func heartbeatSecurityFailureMapsToSecurityError() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: FakeLocalNetworkHeartbeatClient(error: SecureMacUploadError.fingerprintMismatch),
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let status = try #require(statusStore.status(for: makePairedMacSnapshot().deviceID, now: Date(timeIntervalSince1970: 10)))
+
+        #expect(status.presenceState == .securityError)
+        #expect(status.lastErrorCode == "certificate_pinning_failed")
+    }
+
+    @Test func staleHostOrPortHeartbeatFailureIsClassifiedWithoutClearingCredentials() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = SecureMacConnectionSnapshot(
+            macHost: "192.0.2.55",
+            macPort: 65535,
+            macFingerprint: String(repeating: "a", count: 64),
+            macName: "Rokurics Mac",
+            macModel: "Mac",
+            deviceID: "iphone-stale-host",
+            sharedSecretBase64URL: Data("stale-host-secret".utf8).base64EncodedString(),
+            pairedAt: "2026-05-26T10:00:00Z"
+        )
+        let provider = FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: provider,
+            client: FakeLocalNetworkHeartbeatClient(error: SecureMacUploadError.httpsUnavailable("连接被拒绝或 Mac 未监听该地址。")),
+            statusStore: statusStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let status = try #require(statusStore.status(for: snapshot.deviceID, now: Date(timeIntervalSince1970: 10)))
+
+        #expect(status.presenceState == .stale)
+        #expect(status.lastErrorCode == "heartbeat_unreachable")
+        #expect(provider.snapshot.isPaired)
+        #expect(provider.snapshot.sharedSecretBase64URL == snapshot.sharedSecretBase64URL)
+    }
+
+    @Test func heartbeatConfigurationSupportsForegroundSecondScaleIntervals() {
+        let configuration = LocalNetworkHeartbeatConfiguration(
+            heartbeatInterval: 1,
+            requestTimeout: 1.5,
+            missedHeartbeatLimit: 3,
+            staleAfter: 6,
+            disconnectedAfter: 10
+        )
+
+        #expect((1...5).contains(configuration.heartbeatInterval))
+        #expect(configuration.requestTimeout <= 3)
+        #expect(configuration.missedHeartbeatLimit == 3)
+    }
+
+    @Test func heartbeatPayloadDoesNotCarrySyncOrFileDataOrSecrets() throws {
+        let request = ConnectionHeartbeatRequest(
+            deviceID: "iphone-01",
+            deviceName: "Vita iPhone",
+            platform: .iPhone,
+            appInstanceID: "instance-01",
+            sequenceNumber: 7,
+            sentAt: Date(timeIntervalSince1970: 10),
+            lastKnownPeerStatusRevision: 3
+        )
+
+        let json = String(data: try Self.studyEncoder.encode(request), encoding: .utf8) ?? ""
+
+        #expect(!json.lowercased().contains("sharedsecret"))
+        #expect(!json.lowercased().contains("hmac"))
+        #expect(!json.lowercased().contains("manifest"))
+        #expect(!json.lowercased().contains("transcript"))
+        #expect(!json.lowercased().contains("audio"))
+        #expect(!json.lowercased().contains("note"))
+    }
+
+    @Test func disconnectedOrSecurityStatusDoesNotClearPairedCredentials() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let provider = FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL, missedHeartbeatLimit: 1)
+
+        _ = statusStore.recordHeartbeatFailure(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            errorCode: "certificate_pinning_failed",
+            errorMessage: "Certificate pinning failed",
+            isSecurityFailure: true
+        )
+
+        #expect(statusStore.status(for: snapshot.deviceID)?.presenceState == .securityError)
+        #expect(provider.snapshot.isPaired)
+        #expect(provider.snapshot.sharedSecretBase64URL == snapshot.sharedSecretBase64URL)
+    }
+
+    @Test func localNetworkSyncEngineDoesNotRunSecureSyncWithoutPairedDevice() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let fakeClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makeUnpairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL)
+        )
+
+        let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 1))
+
+        #expect(plan == nil)
+        #expect(fakeClient.inventoryRequestCount == 0)
+    }
+
+    @Test func localNetworkSyncEngineRespectsNextAllowedSyncAt() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        var blockedState = LocalNetworkSyncState.empty
+        blockedState.nextAllowedSyncAt = Date(timeIntervalSince1970: 10_000)
+        stateStore.replace(blockedState)
+        let fakeClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: stateStore
+        )
+
+        let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 1))
+
+        #expect(plan == nil)
+        #expect(fakeClient.inventoryRequestCount == 0)
+    }
+
+    @Test func localNetworkSyncEngineDownloadsTranscriptArtifact() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let logicalPath = "transcripts/recording-remote/transcript.md"
+        let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "recording-remote", logicalPathToken: logicalPath)
+        let item = StudyItemMetadata(
+            recordingID: "recording-remote",
+            title: "远端转写",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 9,
+            transcriptMarkdownRelativePath: logicalPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted"
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "mac-01",
+            generatedAt: Date(timeIntervalSince1970: 2_020),
+            items: [item],
+            folders: []
+        )
+        let peerInventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            studyItems: [
+                LocalNetworkSyncStudyItemEntry(
+                    itemID: item.itemID,
+                    kind: item.kind,
+                    title: item.title,
+                    folderIDs: item.folderIDs,
+                    recordingID: item.recordingID,
+                    updatedAt: item.updatedAt,
+                    revisionHash: LocalNetworkSyncMetadataHash.hash(item),
+                    deleted: false
+                )
+            ],
+            artifacts: [
+                LocalNetworkSyncArtifactEntry(
+                    artifactID: artifactID,
+                    kind: .transcriptMarkdown,
+                    ownerID: "recording-remote",
+                    checksum: SecureUploadUtilities.sha256Hex(Data("hello transcript".utf8)),
+                    size: 16,
+                    updatedAt: Date(timeIntervalSince1970: 2_020),
+                    availability: .local,
+                    logicalPathToken: logicalPath
+                )
+            ],
+            studyManifest: manifest
+        )
+        let fakeClient = FakeLocalNetworkSyncClient(
+            peerInventory: peerInventory,
+            artifactResponses: [
+                artifactID: LocalNetworkSyncArtifactResponse(
+                    ok: true,
+                    artifactID: artifactID,
+                    kind: .transcriptMarkdown,
+                    checksum: SecureUploadUtilities.sha256Hex(Data("hello transcript".utf8)),
+                    size: 16,
+                    logicalPathToken: logicalPath,
+                    dataBase64: Data("hello transcript".utf8).base64EncodedString(),
+                    error: nil
+                )
+            ]
+        )
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL)
+        )
+
+        let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
+        let downloadedURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
+
+        #expect(plan?.downloadArtifactActions.map(\.entityID).contains(artifactID) == true)
+        #expect(String(data: try Data(contentsOf: downloadedURL), encoding: .utf8) == "hello transcript")
+        #expect(fakeClient.artifactRequestIDs == [artifactID])
+    }
+
+    @Test func localNetworkSyncEngineAppliesCompletedReceiveStatusToLocalMetadata() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "receive-return-01", title: "待确认上传", store: audioStore, uploadStatus: "failed")
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let peerInventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            recordings: [
+                LocalNetworkSyncRecordingEntry(
+                    recordingID: metadata.id,
+                    metadataHash: LocalNetworkSyncMetadataHash.hash(metadata),
+                    audioAvailable: true,
+                    audioChecksum: nil,
+                    audioSize: metadata.fileSize,
+                    uploadLedgerState: nil,
+                    receiveStatus: "completed",
+                    processingStatus: "notStarted",
+                    updatedAt: metadata.endedAt.addingTimeInterval(60),
+                    deleted: false
+                )
+            ]
+        )
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: FakeLocalNetworkSyncClient(peerInventory: peerInventory),
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL)
+        )
+
+        _ = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
+
+        #expect(try audioStore.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
+    @Test func secureUploadServerResponseDecodesMetadataAcceptedNew() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"audioFileName":null,"disposition":"acceptedNew","metadataFileName":"metadata.json","message":"recording metadata received","ok":true,"processingStatus":"awaitingAudio","receiveFileName":"receive.json","receiveStatus":"metadataReceived","recordingID":"metadata-new"}
+        """)
+
+        #expect(response.ok)
+        #expect(response.recordingID == "metadata-new")
+        #expect(response.metadataFileName == "metadata.json")
+        #expect(response.audioFileName == nil)
+        #expect(response.disposition == "acceptedNew")
+        #expect(response.receiveStatus == "metadataReceived")
+        #expect(response.processingStatus == "awaitingAudio")
+    }
+
+    @Test func secureUploadServerResponseDecodesMetadataAcceptedExisting() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"audioFileName":null,"disposition":"acceptedExisting","metadataFileName":"metadata.json","message":"recording metadata received","ok":true,"processingStatus":"awaitingAudio","receiveFileName":"receive.json","receiveStatus":"metadataReceived","recordingID":"metadata-existing"}
+        """)
+
+        #expect(response.ok)
+        #expect(response.recordingID == "metadata-existing")
+        #expect(response.disposition == "acceptedExisting")
+        #expect(response.receiveStatus == "metadataReceived")
+        #expect(response.processingStatus == "awaitingAudio")
+    }
+
+    @Test func secureUploadServerResponseDecodesMetadataConflict() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"disposition":"rejectedConflict","error":"recording_metadata_conflict","ok":false,"reason":"Conflict"}
+        """)
+        let error = SecureMacUploadError.serverRejected(response.error ?? "missing_error")
+
+        #expect(!response.ok)
+        #expect(response.error == "recording_metadata_conflict")
+        #expect(response.disposition == "rejectedConflict")
+        #expect(response.reason == "Conflict")
+        #expect(error.localizedDescription == "recording_metadata_conflict")
+    }
+
+    @Test func secureUploadServerResponseDecodesAudioAcceptedNew() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"audioFileName":"audio.m4a","disposition":"acceptedNew","metadataFileName":"metadata.json","message":"recording audio received","ok":true,"processingStatus":"notStarted","receiveFileName":"receive.json","receiveStatus":"completed","recordingID":"audio-new"}
+        """)
+
+        #expect(response.ok)
+        #expect(response.recordingID == "audio-new")
+        #expect(response.audioFileName == "audio.m4a")
+        #expect(response.disposition == "acceptedNew")
+        #expect(response.receiveStatus == "completed")
+        #expect(response.processingStatus == "notStarted")
+    }
+
+    @Test func secureUploadServerResponseDecodesAudioAcceptedExisting() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"audioFileName":"audio.m4a","disposition":"acceptedExisting","metadataFileName":"metadata.json","message":"recording audio received","ok":true,"processingStatus":"notStarted","receiveFileName":"receive.json","receiveStatus":"completed","recordingID":"audio-existing"}
+        """)
+
+        #expect(response.ok)
+        #expect(response.recordingID == "audio-existing")
+        #expect(response.audioFileName == "audio.m4a")
+        #expect(response.disposition == "acceptedExisting")
+        #expect(response.receiveStatus == "completed")
+        #expect(response.processingStatus == "notStarted")
+    }
+
+    @Test func secureUploadServerResponseDecodesAudioConflict() throws {
+        let response = try decodeSecureUploadResponse("""
+        {"disposition":"rejectedConflict","error":"recording_audio_conflict","ok":false,"reason":"Conflict"}
+        """)
+        let error = SecureMacUploadError.serverRejected(response.error ?? "missing_error")
+
+        #expect(!response.ok)
+        #expect(response.error == "recording_audio_conflict")
+        #expect(response.disposition == "rejectedConflict")
+        #expect(response.reason == "Conflict")
+        #expect(error.localizedDescription == "recording_audio_conflict")
+    }
+
+    @Test func connectionProbeResponseDecodesTinyEchoPayload() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(ConnectionProbeResponse.self, from: Data("""
+        {"disposition":"ok","echoedClientPayload":"tiny hello","ok":true,"receivedSequenceNumber":9,"serverPayload":"rokurics-probe-ok","serverTime":"2026-05-26T00:00:00Z"}
+        """.utf8))
+
+        #expect(response.ok)
+        #expect(response.disposition == "ok")
+        #expect(response.receivedSequenceNumber == 9)
+        #expect(response.echoedClientPayload == "tiny hello")
+        #expect(response.serverPayload == "rokurics-probe-ok")
+    }
+
+    @Test func secureUploadServerResponseKeepsLegacyAndMalformedErrorsReadable() throws {
+        let legacy = try decodeSecureUploadResponse(#"{"ok":false,"error":"legacy_upload_failed"}"#)
+
+        #expect(!legacy.ok)
+        #expect(legacy.error == "legacy_upload_failed")
+        #expect(SecureMacUploadError.serverRejected(legacy.error ?? "missing_error").localizedDescription == "legacy_upload_failed")
+
+        do {
+            _ = try decodeSecureUploadResponse("not-json")
+            Issue.record("Expected malformed JSON to fail decoding")
+        } catch {
+            #expect(!error.localizedDescription.isEmpty)
+        }
+    }
+
     @Test func iphoneAIProviderPresetFiltersLocalDesktopProviders() {
         let visible = AIProviderPreset.iPhoneVisibleCases
 
@@ -974,12 +2485,13 @@ struct RokuricsTests {
         title: String,
         store: AudioFileStore,
         uploadStatus: String = "localOnly",
-        studyFiling: StudyFilingPath? = nil
+        studyFiling: StudyFilingPath? = nil,
+        audioData: Data = Data("audio".utf8)
     ) throws -> RecordingMetadata {
         let audioURL = try store.recordingsDirectory()
             .appendingPathComponent(id, isDirectory: false)
             .appendingPathExtension("m4a")
-        try Data("audio".utf8).write(to: audioURL)
+        try audioData.write(to: audioURL)
         let metadataURL = try store.makeMetadataURL(id: id)
         let metadata = makeMetadata(
             id: id,
@@ -987,7 +2499,8 @@ struct RokuricsTests {
             relativeAudioPath: try store.relativePath(for: audioURL),
             relativeMetadataPath: try store.relativePath(for: metadataURL),
             uploadStatus: uploadStatus,
-            studyFiling: studyFiling
+            studyFiling: studyFiling,
+            fileSize: Int64(audioData.count)
         )
         try store.saveMetadata(metadata)
         return metadata
@@ -999,7 +2512,8 @@ struct RokuricsTests {
         relativeAudioPath: String,
         relativeMetadataPath: String,
         uploadStatus: String,
-        studyFiling: StudyFilingPath? = nil
+        studyFiling: StudyFilingPath? = nil,
+        fileSize: Int64 = 5
     ) -> RecordingMetadata {
         RecordingMetadata(
             id: id,
@@ -1015,7 +2529,7 @@ struct RokuricsTests {
             sampleRate: 16_000,
             channels: 1,
             bitrate: 64_000,
-            fileSize: 5,
+            fileSize: fileSize,
             uploadStatus: uploadStatus,
             transcriptionStatus: "notStarted",
             noteStatus: "notStarted",
@@ -1036,6 +2550,10 @@ struct RokuricsTests {
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
+
+    private func decodeSecureUploadResponse(_ json: String) throws -> SecureUploadServerResponse {
+        try JSONDecoder().decode(SecureUploadServerResponse.self, from: Data(json.utf8))
+    }
 }
 
 @MainActor
@@ -1045,6 +2563,348 @@ private final class FakeSecureMacConnectionSnapshotProvider: SecureMacConnection
     init(snapshot: SecureMacConnectionSnapshot) {
         self.snapshot = snapshot
     }
+}
+
+private final class FakeRecordingUploadClient: RecordingUploadClientProtocol {
+    enum ResultMode {
+        case success(RecordingUploadResult)
+        case failure(Error)
+    }
+
+    let result: ResultMode
+    let events: [RecordingUploadProgressEvent]
+    private(set) var lastMetadata: RecordingMetadata?
+
+    init(result: ResultMode, events: [RecordingUploadProgressEvent] = []) {
+        self.result = result
+        self.events = events
+    }
+
+    func uploadRecording(
+        metadata: RecordingMetadata,
+        settings: SecureMacConnectionSnapshot,
+        progress: RecordingUploadProgressHandler?
+    ) async throws -> RecordingUploadResult {
+        lastMetadata = metadata
+        for event in events {
+            try progress?(event)
+        }
+
+        switch result {
+        case .success(let uploadResult):
+            return uploadResult
+        case .failure(let error):
+            throw error
+        }
+    }
+}
+
+private final class FakeRecordingSecureUploadTransport: RecordingSecureUploadTransport {
+    var metadataUploadCount = 0
+    var singleFileUploadCount = 0
+    var resumableStartCount = 0
+    var statusCount = 0
+    var finalizeCount = 0
+    var chunkOffsets: [Int64] = []
+    var failChunkAtOffset: Int64?
+    var chunkErrorAtOffset: (offset: Int64, error: Error)?
+    var statusConfirmedBytes: Int64?
+    var finalizeDisposition = "acceptedNew"
+
+    private var sessionID = "session-1"
+    private var confirmedBytes: Int64 = 0
+    private var totalBytes: Int64 = 0
+    private var chunkSize = 0
+
+    func uploadSignedData(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        body: Data,
+        contentType: String,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> SecureUploadServerResponse {
+        metadataUploadCount += 1
+        return SecureUploadServerResponse(
+            ok: true,
+            message: "metadata received",
+            disposition: "acceptedNew",
+            fileName: nil,
+            recordingID: recordingID,
+            metadataFileName: "metadata.json",
+            audioFileName: nil,
+            receiveStatus: "metadataReceived",
+            processingStatus: "awaitingAudio",
+            error: nil,
+            reason: nil
+        )
+    }
+
+    func uploadSignedFile(
+        settings: SecureMacConnectionSnapshot,
+        path: String,
+        fileURL: URL,
+        contentType: String,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> SecureUploadServerResponse {
+        singleFileUploadCount += 1
+        return SecureUploadServerResponse(
+            ok: true,
+            message: "audio received",
+            disposition: "acceptedNew",
+            fileName: "audio.m4a",
+            recordingID: recordingID,
+            metadataFileName: nil,
+            audioFileName: "audio.m4a",
+            receiveStatus: "completed",
+            processingStatus: "notStarted",
+            error: nil,
+            reason: nil
+        )
+    }
+
+    func startResumableAudioUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadStartRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        resumableStartCount += 1
+        sessionID = "session-1"
+        totalBytes = request.totalBytes
+        chunkSize = request.chunkSize
+        confirmedBytes = 0
+        return sessionResponse(
+            disposition: "acceptedNew",
+            confirmedBytes: confirmedBytes,
+            chunkSize: request.chunkSize,
+            completed: false
+        )
+    }
+
+    func fetchResumableAudioUploadStatus(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadStatusRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        statusCount += 1
+        if let statusConfirmedBytes {
+            confirmedBytes = statusConfirmedBytes
+        }
+        return sessionResponse(
+            disposition: "acceptedExisting",
+            confirmedBytes: confirmedBytes,
+            chunkSize: chunkSize == 0 ? nil : chunkSize,
+            completed: false
+        )
+    }
+
+    func uploadResumableAudioChunk(
+        settings: SecureMacConnectionSnapshot,
+        recordingID: String,
+        sessionID: String,
+        offset: Int64,
+        totalSHA256: String,
+        chunk: Data
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        if let chunkErrorAtOffset, chunkErrorAtOffset.offset == offset {
+            throw chunkErrorAtOffset.error
+        }
+        if failChunkAtOffset == offset {
+            throw RecordingUploadError.networkFailed("network lost")
+        }
+
+        chunkOffsets.append(offset)
+        confirmedBytes = offset + Int64(chunk.count)
+        return sessionResponse(
+            disposition: "acceptedNew",
+            confirmedBytes: confirmedBytes,
+            chunkSize: chunkSize == 0 ? chunk.count : chunkSize,
+            completed: false,
+            chunkAccepted: true
+        )
+    }
+
+    func finalizeResumableAudioUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: ResumableAudioUploadFinalizeRequest
+    ) async throws -> ResumableAudioUploadSessionResponse {
+        finalizeCount += 1
+        confirmedBytes = request.totalBytes
+        totalBytes = request.totalBytes
+        return sessionResponse(
+            disposition: finalizeDisposition,
+            confirmedBytes: request.totalBytes,
+            chunkSize: chunkSize == 0 ? nil : chunkSize,
+            completed: true,
+            finalAudioExists: true,
+            finalAudioRelativePath: "audio/inbox/day/\(request.recordingID)/audio.m4a",
+            checksum: request.totalSHA256,
+            fileSize: request.totalBytes
+        )
+    }
+
+    private func sessionResponse(
+        disposition: String,
+        confirmedBytes: Int64,
+        chunkSize: Int?,
+        completed: Bool,
+        chunkAccepted: Bool? = nil,
+        finalAudioExists: Bool? = nil,
+        finalAudioRelativePath: String? = nil,
+        checksum: String? = nil,
+        fileSize: Int64? = nil
+    ) -> ResumableAudioUploadSessionResponse {
+        ResumableAudioUploadSessionResponse(
+            ok: true,
+            disposition: disposition,
+            status: completed ? "completed" : "active",
+            sessionID: sessionID,
+            confirmedBytes: confirmedBytes,
+            nextOffset: confirmedBytes,
+            chunkSize: chunkSize,
+            completed: completed,
+            finalAudioExists: finalAudioExists,
+            chunkAccepted: chunkAccepted,
+            finalAudioRelativePath: finalAudioRelativePath,
+            checksum: checksum,
+            fileSize: fileSize,
+            receiveStatus: completed ? "completed" : nil,
+            processingStatus: completed ? "notStarted" : nil,
+            error: nil,
+            reason: nil
+        )
+    }
+}
+
+private final class FakeLocalNetworkSyncClient: LocalNetworkSyncClientProtocol {
+    let peerInventory: LocalNetworkSyncInventory
+    var artifactResponses: [String: LocalNetworkSyncArtifactResponse]
+    private(set) var inventoryRequestCount = 0
+    private(set) var applyMetadataCount = 0
+    private(set) var artifactRequestIDs: [String] = []
+
+    init(
+        peerInventory: LocalNetworkSyncInventory,
+        artifactResponses: [String: LocalNetworkSyncArtifactResponse] = [:]
+    ) {
+        self.peerInventory = peerInventory
+        self.artifactResponses = artifactResponses
+    }
+
+    func sendDeviceStatus(
+        settings: SecureMacConnectionSnapshot,
+        statusRequest: DeviceStatusRequest
+    ) async throws -> DeviceStatusResponse {
+        DeviceStatusResponse(ok: true, status: nil, syncState: nil, error: nil)
+    }
+
+    func fetchLocalNetworkSyncInventory(
+        settings: SecureMacConnectionSnapshot,
+        localInventory: LocalNetworkSyncInventory
+    ) async throws -> LocalNetworkSyncInventoryResponse {
+        inventoryRequestCount += 1
+        return LocalNetworkSyncInventoryResponse(ok: true, inventory: peerInventory, error: nil)
+    }
+
+    func applyLocalNetworkSyncMetadata(
+        settings: SecureMacConnectionSnapshot,
+        manifest: StudyLibrarySyncManifest
+    ) async throws -> StudyLibrarySyncManifestResponse {
+        applyMetadataCount += 1
+        return StudyLibrarySyncManifestResponse(
+            ok: true,
+            manifest: nil,
+            syncState: nil,
+            deviceStatus: nil,
+            applyResult: StudyLibrarySyncApplyResult(),
+            baseCommitID: nil,
+            newCommitID: nil,
+            remoteChanges: nil,
+            rejectedChanges: nil,
+            error: nil
+        )
+    }
+
+    func requestLocalNetworkSyncArtifact(
+        settings: SecureMacConnectionSnapshot,
+        artifactID: String
+    ) async throws -> LocalNetworkSyncArtifactResponse {
+        artifactRequestIDs.append(artifactID)
+        return artifactResponses[artifactID] ?? LocalNetworkSyncArtifactResponse(
+            ok: false,
+            artifactID: nil,
+            kind: nil,
+            checksum: nil,
+            size: nil,
+            logicalPathToken: nil,
+            dataBase64: nil,
+            error: "missing_fake_artifact"
+        )
+    }
+}
+
+private final class FakeLocalNetworkHeartbeatClient: LocalNetworkHeartbeatClientProtocol {
+    private(set) var requests: [ConnectionHeartbeatRequest] = []
+    private(set) var maxConcurrentRequests = 0
+    private var inFlightRequests = 0
+    var error: Error?
+    var delayNanoseconds: UInt64
+
+    init(error: Error? = nil, delayNanoseconds: UInt64 = 0) {
+        self.error = error
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func sendConnectionHeartbeat(
+        settings: SecureMacConnectionSnapshot,
+        request: ConnectionHeartbeatRequest,
+        requestTimeout: TimeInterval
+    ) async throws -> ConnectionHeartbeatResponse {
+        requests.append(request)
+        inFlightRequests += 1
+        maxConcurrentRequests = max(maxConcurrentRequests, inFlightRequests)
+        defer {
+            inFlightRequests -= 1
+        }
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        if let error {
+            throw error
+        }
+        return ConnectionHeartbeatResponse(
+            ok: true,
+            disposition: "ok",
+            peerDeviceID: "mac-01",
+            serverTime: Date(),
+            receivedSequenceNumber: request.sequenceNumber,
+            connectionStatusRevision: request.lastKnownPeerStatusRevision ?? 0,
+            minimumSuggestedInterval: nil,
+            status: nil,
+            error: nil
+        )
+    }
+}
+
+private func emptyLocalNetworkInventory(
+    deviceID: String,
+    platform: LocalNetworkSyncPlatform
+) -> LocalNetworkSyncInventory {
+    LocalNetworkSyncInventory.make(
+        device: LocalNetworkSyncDeviceSection(
+            deviceID: deviceID,
+            deviceName: platform == .Mac ? "Mac" : "iPhone",
+            platform: platform,
+            generatedAt: Date(timeIntervalSince1970: 1),
+            lastKnownPeerRevision: nil,
+            appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+        )
+    )
 }
 
 private func makePairedMacSnapshot() -> SecureMacConnectionSnapshot {
@@ -1057,5 +2917,18 @@ private func makePairedMacSnapshot() -> SecureMacConnectionSnapshot {
         deviceID: "mac-disabled",
         sharedSecretBase64URL: "c3luYy1zZWNyZXQ",
         pairedAt: "2026-05-22T00:00:00Z"
+    )
+}
+
+private func makeUnpairedMacSnapshot() -> SecureMacConnectionSnapshot {
+    SecureMacConnectionSnapshot(
+        macHost: "",
+        macPort: SecureMacConnectionSettings.defaultPort,
+        macFingerprint: "",
+        macName: "",
+        macModel: "",
+        deviceID: "",
+        sharedSecretBase64URL: "",
+        pairedAt: ""
     )
 }
