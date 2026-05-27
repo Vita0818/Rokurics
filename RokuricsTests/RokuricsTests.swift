@@ -1977,6 +1977,62 @@ struct RokuricsTests {
         #expect(status.latencyMilliseconds != nil)
     }
 
+    @Test func disabledSyncCoordinatorReadsPresenceStoreInsteadOfMarkingOffline() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let provider = FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: provider,
+            studyLibraryStore: StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore),
+            statusStore: statusStore,
+            syncStateStore: syncStateStore,
+            runtimeConfiguration: .default,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+
+        _ = statusStore.recordHeartbeatSuccess(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            sentAt: Date(timeIntervalSince1970: 9),
+            receivedAt: Date(timeIntervalSince1970: 10),
+            latencyMilliseconds: 4
+        )
+        coordinator.startForegroundMonitoring()
+        coordinator.refreshPairingState()
+
+        #expect(!coordinator.isAutomaticSyncMonitoringActive)
+        #expect(coordinator.connectionStatus.presenceState == .online)
+        #expect(coordinator.connectionStatus.state == .connected)
+        #expect(coordinator.connectionStatus.lastSeenAt == Date(timeIntervalSince1970: 10))
+
+        _ = statusStore.recordHeartbeatFailure(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            errorCode: "heartbeat_timeout",
+            errorMessage: "Timed out"
+        )
+        _ = statusStore.recordHeartbeatFailure(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            errorCode: "heartbeat_timeout",
+            errorMessage: "Timed out"
+        )
+        _ = statusStore.recordHeartbeatFailure(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            errorCode: "heartbeat_timeout",
+            errorMessage: "Timed out"
+        )
+        coordinator.refreshPairingState()
+
+        #expect(coordinator.connectionStatus.presenceState == .disconnected)
+        #expect(coordinator.connectionStatus.state == .offline)
+    }
+
     @Test func heartbeatTimeoutsIncrementMissesAndDisconnectAfterThreshold() async throws {
         let (_, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2085,6 +2141,61 @@ struct RokuricsTests {
 
         #expect(status.presenceState == .securityError)
         #expect(status.lastErrorCode == "certificate_pinning_failed")
+    }
+
+    @Test func uploadTestGateUsesPresenceState() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let onlineStatus = statusStore.recordHeartbeatSuccess(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            sentAt: Date(timeIntervalSince1970: 1),
+            receivedAt: Date(timeIntervalSince1970: 2),
+            latencyMilliseconds: 3
+        )
+
+        #expect(MacUploadTestPresenceGate.blockedReason(snapshot: snapshot, status: onlineStatus) == nil)
+
+        let disconnected = statusStore.markOffline(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            error: "heartbeat_disconnected",
+            now: Date(timeIntervalSince1970: 12)
+        )
+
+        #expect(MacUploadTestPresenceGate.blockedReason(snapshot: snapshot, status: disconnected) == "heartbeat_disconnected")
+        #expect(MacUploadTestPresenceGate.blockedReason(snapshot: makeUnpairedMacSnapshot(), status: disconnected) == "not_paired")
+    }
+
+    @Test func heartbeatDiagnosticsContainPhasesWithoutSecrets() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot),
+            client: FakeLocalNetworkHeartbeatClient(),
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+
+        _ = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        monitor.recordSignedRequestSucceeded(settings: snapshot, now: Date(timeIntervalSince1970: 11))
+
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+        #expect(phases.contains("heartbeatRequestStarted"))
+        #expect(phases.contains("heartbeatResponseReceived"))
+        #expect(phases.contains("heartbeatMarkedOnline"))
+        #expect(phases.contains("signedRequestRefreshedLastSeen"))
+
+        let diagnosticsText = try String(contentsOf: diagnosticsStore.logURL, encoding: .utf8)
+        #expect(!diagnosticsText.lowercased().contains("sharedsecret"))
+        #expect(!diagnosticsText.lowercased().contains("hmac"))
+        #expect(!diagnosticsText.lowercased().contains("privatekey"))
+        #expect(!diagnosticsText.contains(snapshot.sharedSecretBase64URL))
     }
 
     @Test func staleHostOrPortHeartbeatFailureIsClassifiedWithoutClearingCredentials() async throws {

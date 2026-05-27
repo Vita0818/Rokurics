@@ -478,6 +478,7 @@ struct ConnectionProbeRouteHandler {
     }
 
     let requestVerifier: RequestVerifier
+    var statusStore: DeviceConnectionStatusStore? = nil
 
     func probeResponse(
         method: String,
@@ -487,13 +488,18 @@ struct ConnectionProbeRouteHandler {
         now: Date = Date()
     ) -> SecureLocalHTTPRouteResponse {
         switch requestVerifier.verify(method: method, path: path, headers: headers, body: body, now: now) {
-        case .accepted:
+        case .accepted(let device):
             do {
                 let request = try Self.decoder.decode(ProbeRequest.self, from: body)
                 guard request.clientPayload.utf8.count <= 1024 else {
                     return Self.errorResponse(statusCode: 413, reason: "Payload Too Large", error: "probe_payload_too_large")
                 }
 
+                _ = statusStore?.recordSignedRequestSucceeded(
+                    deviceID: device.id,
+                    displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+                    now: now
+                )
                 let response = ProbeResponse(
                     ok: true,
                     disposition: "ok",
@@ -928,7 +934,10 @@ final class SecureLocalHTTPSServer {
     }
 
     private var connectionProbeRouteHandler: ConnectionProbeRouteHandler {
-        ConnectionProbeRouteHandler(requestVerifier: requestVerifier)
+        ConnectionProbeRouteHandler(
+            requestVerifier: requestVerifier,
+            statusStore: deviceConnectionStatusStore
+        )
     }
 
     private var pairingBootstrapRouteHandler: PairingBootstrapRouteHandler {
@@ -1420,6 +1429,9 @@ final class SecureLocalHTTPSServer {
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
             errorMessage: response.statusCode == 200 ? nil : response.reason
         )
+        if response.statusCode == 200 {
+            emitConnectionDiagnostic(phase: "signedRequestRefreshedLastSeen", listenerState: "ready", activePort: activePort)
+        }
         sendRouteResponse(response, on: connection)
     }
 
@@ -1445,6 +1457,9 @@ final class SecureLocalHTTPSServer {
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
             errorMessage: response.statusCode == 200 ? nil : response.reason
         )
+        if response.statusCode == 200 {
+            emitConnectionDiagnostic(phase: "signedRequestRefreshedLastSeen", listenerState: "ready", activePort: activePort)
+        }
         sendRouteResponse(response, on: connection)
     }
 

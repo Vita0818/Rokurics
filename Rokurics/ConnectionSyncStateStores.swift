@@ -10,6 +10,8 @@ import Foundation
 
 @MainActor
 final class DeviceConnectionStatusStore: ObservableObject {
+    static let shared = DeviceConnectionStatusStore()
+
     @Published private(set) var statusesByDeviceID: [String: DeviceConnectionStatus] = [:]
     @Published private(set) var lastError: String?
 
@@ -45,7 +47,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
     }
 
     func status(for deviceID: String, now: Date = Date()) -> DeviceConnectionStatus? {
-        guard var status = statusesByDeviceID[deviceID] else {
+        guard let status = statusesByDeviceID[deviceID] else {
             return nil
         }
 
@@ -427,6 +429,95 @@ final class DeviceConnectionStatusStore: ObservableObject {
         return applicationSupportURL
             .appendingPathComponent("Rokurics", isDirectory: true)
             .appendingPathComponent("Sync", isDirectory: true)
+    }
+}
+
+struct ConnectionDiagnosticEntry: Codable, Equatable {
+    var timestamp: Date
+    var phase: String
+    var deviceIDPrefix: String?
+    var heartbeatMissCount: Int?
+    var uploadTestBlockedReason: String?
+    var errorCode: String?
+    var errorMessage: String?
+}
+
+@MainActor
+final class ConnectionDiagnosticsStore {
+    static let shared = ConnectionDiagnosticsStore()
+
+    private let fileManager: FileManager
+    let logURL: URL
+    private let maxEntries: Int
+
+    init(fileManager: FileManager = .default, rootURL: URL? = nil, maxEntries: Int = 200) {
+        self.fileManager = fileManager
+        self.maxEntries = maxEntries
+        let root = rootURL ?? Self.applicationSupportRootURL(fileManager: fileManager)
+        logURL = root
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent("connection-diagnostics.jsonl", isDirectory: false)
+    }
+
+    func record(
+        phase: String,
+        deviceID: String? = nil,
+        heartbeatMissCount: Int? = nil,
+        uploadTestBlockedReason: String? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        timestamp: Date = Date()
+    ) {
+        let entry = ConnectionDiagnosticEntry(
+            timestamp: timestamp,
+            phase: phase,
+            deviceIDPrefix: deviceID.map { String($0.prefix(12)) },
+            heartbeatMissCount: heartbeatMissCount,
+            uploadTestBlockedReason: sanitized(uploadTestBlockedReason),
+            errorCode: sanitized(errorCode),
+            errorMessage: sanitized(errorMessage)
+        )
+
+        do {
+            try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let nextEntries = Array((loadEntries() + [entry]).suffix(maxEntries))
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            let lines = try nextEntries
+                .map { try String(data: encoder.encode($0), encoding: .utf8) ?? "{}" }
+                .joined(separator: "\n")
+            try Data((lines + "\n").utf8).write(to: logURL, options: .atomic)
+        } catch {
+            print("[RokuricsConnectionDiagnostics] write failed: \(error.localizedDescription)")
+        }
+    }
+
+    func loadEntries() -> [ConnectionDiagnosticEntry] {
+        guard fileManager.fileExists(atPath: logURL.path),
+              let rawText = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return rawText
+            .split(separator: "\n")
+            .compactMap { try? decoder.decode(ConnectionDiagnosticEntry.self, from: Data($0.utf8)) }
+    }
+
+    private func sanitized(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func applicationSupportRootURL(fileManager: FileManager) -> URL {
+        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        return applicationSupportURL.appendingPathComponent("Rokurics", isDirectory: true)
     }
 }
 

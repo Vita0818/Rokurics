@@ -2579,6 +2579,32 @@ struct RokuricsMacTests {
         #expect(heartbeatResponse.receivedSequenceNumber == 42)
         #expect(heartbeatResponse.status?.presenceState == .online)
         #expect(pairedDeviceStore.device(for: deviceID)?.lastSeenAt != nil)
+        let firstLastSeen = try #require(statusStore.status(for: deviceID)?.lastSeenAt)
+
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        let secondHeartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: deviceID,
+            deviceName: "Deviceless iPhone",
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 43,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: heartbeatResponse.connectionStatusRevision
+        ))
+        let secondHeartbeatResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/heartbeat",
+                body: secondHeartbeatBody,
+                nonce: "real-listener-paired-heartbeat-2"
+            ),
+            body: secondHeartbeatBody
+        )
+        #expect(secondHeartbeatResponse.statusCode == 200)
+        let secondLastSeen = try #require(statusStore.status(for: deviceID)?.lastSeenAt)
+        #expect(secondLastSeen > firstLastSeen)
 
         let probeBody = try encodedConnectionProbeRequest(
             sequenceNumber: 99,
@@ -2600,6 +2626,12 @@ struct RokuricsMacTests {
         #expect(probeResponse.json["disposition"] as? String == "ok")
         #expect(probeResponse.json["receivedSequenceNumber"] as? Int == 99)
         #expect(probeResponse.json["echoedClientPayload"] as? String == "tiny probe payload")
+        let probeStatus = try #require(statusStore.status(for: deviceID))
+        #expect(probeStatus.lastSignedRequestSucceededAt != nil)
+        #expect(probeStatus.lastSeenAt != nil)
+
+        let disconnectedStatus = try #require(statusStore.status(for: deviceID, now: secondLastSeen.addingTimeInterval(11)))
+        #expect(disconnectedStatus.presenceState == .disconnected)
     }
 
     @MainActor

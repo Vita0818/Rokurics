@@ -21,6 +21,37 @@ private enum MacConnectionFeedbackKind {
     case upload
 }
 
+struct MacUploadTestPresenceGate {
+    static func blockedReason(
+        snapshot: SecureMacConnectionSnapshot,
+        status: DeviceConnectionStatus,
+        isHTTPSUploadEnabled: Bool = SecureMacUploadClient.isHTTPSUploadEnabled
+    ) -> String? {
+        guard snapshot.isPaired else {
+            return "not_paired"
+        }
+        guard isHTTPSUploadEnabled else {
+            return "https_upload_disabled"
+        }
+        guard status.deviceID == snapshot.deviceID else {
+            return "presence_unavailable"
+        }
+        if status.presenceState == .online || status.state == .connected {
+            return nil
+        }
+        if status.presenceState == .securityError {
+            return "security_error"
+        }
+        if status.presenceState == .stale {
+            return "heartbeat_stale"
+        }
+        if status.presenceState == .disconnected || status.state == .offline {
+            return "heartbeat_disconnected"
+        }
+        return "heartbeat_not_online"
+    }
+}
+
 struct MacConnectionView: View {
     @ObservedObject var connectionStore: SecureMacConnectionStore
     @ObservedObject private var studyLibraryStore: StudyLibraryStore
@@ -268,7 +299,14 @@ struct MacConnectionView: View {
     }
 
     private var canUploadSecurely: Bool {
-        settingsSnapshot.isPaired && SecureMacUploadClient.isHTTPSUploadEnabled
+        uploadTestBlockedReason == nil
+    }
+
+    private var uploadTestBlockedReason: String? {
+        MacUploadTestPresenceGate.blockedReason(
+            snapshot: settingsSnapshot,
+            status: syncCoordinator.connectionStatus
+        )
     }
 
     private var canRunHTTPSCheck: Bool {
@@ -465,10 +503,21 @@ struct MacConnectionView: View {
     @MainActor
     private func uploadTestFile(runID: UUID) async {
         print("[RokuricsSecureUpload] upload button tapped")
-        guard canUploadSecurely else {
+        let blockedReason = uploadTestBlockedReason
+        ConnectionDiagnosticsStore.shared.record(
+            phase: "uploadTestGateEvaluated",
+            deviceID: settingsSnapshot.deviceID,
+            uploadTestBlockedReason: blockedReason ?? "allowed"
+        )
+        guard blockedReason == nil else {
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "uploadTestBlockedReason",
+                deviceID: settingsSnapshot.deviceID,
+                uploadTestBlockedReason: blockedReason
+            )
             feedbackKind = .upload
-            recentStatus = "上传未开始"
-            errorMessage = SecureMacUploadError.notPaired.localizedDescription
+            recentStatus = "上传测试已阻断"
+            errorMessage = uploadTestBlockedMessage(for: blockedReason)
             return
         }
 
@@ -484,6 +533,7 @@ struct MacConnectionView: View {
                 return
             }
 
+            syncCoordinator.recordSignedRequestSucceeded(settings: settingsSnapshot)
             recentStatus = "上传测试成功：\(result.fileName)"
             errorMessage = nil
         } catch SecureMacUploadError.fingerprintMismatch {
@@ -509,6 +559,21 @@ struct MacConnectionView: View {
         isUploading = false
         uploadTask = nil
         uploadRunID = nil
+    }
+
+    private func uploadTestBlockedMessage(for reason: String?) -> String {
+        switch reason {
+        case "not_paired":
+            return SecureMacUploadError.notPaired.localizedDescription
+        case "security_error":
+            return "连接处于安全错误状态，请重新配对。"
+        case "heartbeat_stale", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
+            return "Mac 当前未在线，请等待前台心跳恢复后再测试上传。"
+        case "https_upload_disabled":
+            return "HTTPS 上传未启用。"
+        default:
+            return "Mac 当前未在线，请等待前台心跳恢复后再测试上传。"
+        }
     }
 
     @MainActor

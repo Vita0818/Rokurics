@@ -34,6 +34,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     private let syncInterval: TimeInterval
     private var heartbeatTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    private var statusStoreSubscription: AnyCancellable?
     private var failureCount = 0
 
     init(
@@ -49,7 +50,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         syncInterval: TimeInterval = 240
     ) {
         let resolvedClient = client ?? SecureMacUploadClient()
-        let resolvedStatusStore = statusStore ?? DeviceConnectionStatusStore()
+        let resolvedStatusStore = statusStore ?? .shared
         let resolvedSyncStateStore = syncStateStore ?? StudyLibrarySyncStateStore()
         self.connectionStore = connectionStore
         self.studyLibraryStore = studyLibraryStore
@@ -63,6 +64,12 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         self.syncInterval = syncInterval
         self.syncState = resolvedSyncStateStore.state
         self.connectionStatus = resolvedStatusStore.latestStatus ?? .unpaired(displayName: "Mac")
+        self.statusStoreSubscription = resolvedStatusStore.$statusesByDeviceID
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refreshConnectionStatusFromStore()
+                }
+            }
     }
 
     var syncSummary: StudyLibrarySyncStatusSummary {
@@ -88,7 +95,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         syncTask = nil
 
         guard runtimeConfiguration.gitBackedSyncEnabled else {
-            recordDisabledStatusForCurrentPairing()
+            refreshConnectionStatusFromStore()
             return
         }
 
@@ -115,20 +122,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             return
         }
 
-        let displayName = snapshot.macName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Rokurics Mac" : snapshot.macName
-        connectionStatus = statusStore.status(for: snapshot.deviceID)
-            ?? DeviceConnectionStatus(
-                deviceID: snapshot.deviceID,
-                displayName: displayName,
-                state: .offline,
-                lastSeenAt: nil,
-                lastHeartbeatAt: nil,
-                lastSyncAt: syncState.lastSuccessfulSyncAt,
-                lastSyncStatus: runtimeConfiguration.gitBackedSyncEnabled
-                    ? syncState.lastError ?? "待同步"
-                    : StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
-                lastError: nil
-            )
+        refreshConnectionStatusFromStore()
     }
 
     func performHeartbeat() async {
@@ -185,6 +179,20 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         }
 
         return await performSync(trigger: "manual")
+    }
+
+    func recordSignedRequestSucceeded(settings: SecureMacConnectionSnapshot, now: Date = Date()) {
+        guard settings.isPaired else {
+            return
+        }
+
+        _ = statusStore.recordSignedRequestSucceeded(
+            deviceID: settings.deviceID,
+            displayName: settings.macName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Rokurics Mac" : settings.macName,
+            now: now
+        )
+        ConnectionDiagnosticsStore.shared.record(phase: "signedRequestRefreshedLastSeen", deviceID: settings.deviceID)
+        refreshConnectionStatusFromStore(now: now)
     }
 
     private func heartbeatLoop() async {
@@ -397,7 +405,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
 
     private func recordDisabledStatusForCurrentPairing() {
         syncState = syncStateStore.state
-        recordDisabledStatus(for: connectionStore.snapshot)
+        refreshConnectionStatusFromStore()
     }
 
     private func recordDisabledStatus(for snapshot: SecureMacConnectionSnapshot) {
@@ -408,13 +416,42 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             return
         }
 
+        refreshConnectionStatusFromStore()
+    }
+
+    private func refreshConnectionStatusFromStore(now: Date = Date()) {
+        let snapshot = connectionStore.snapshot
+        syncState = syncStateStore.state
+        guard snapshot.isPaired else {
+            connectionStatus = statusStore.markUnpaired(displayName: "Mac")
+            return
+        }
+
         let displayName = snapshot.macName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Rokurics Mac" : snapshot.macName
-        connectionStatus = statusStore.recordSyncResult(
-            deviceID: snapshot.deviceID,
-            displayName: displayName,
-            statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
-            error: StudyLibrarySyncRuntimeConfiguration.disabledReason
-        )
+        connectionStatus = statusStore.status(for: snapshot.deviceID, now: now)
+            ?? DeviceConnectionStatus(
+                deviceID: snapshot.deviceID,
+                displayName: displayName,
+                state: .offline,
+                lastSeenAt: nil,
+                lastHeartbeatAt: nil,
+                lastSyncAt: syncState.lastSuccessfulSyncAt,
+                lastSyncStatus: runtimeConfiguration.gitBackedSyncEnabled
+                    ? syncState.lastError ?? "待同步"
+                    : StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
+                lastError: nil,
+                presenceState: .unknown,
+                monitoringMode: runtimeConfiguration.gitBackedSyncEnabled ? .foregroundActive : .disabled,
+                lastHeartbeatSentAt: nil,
+                lastHeartbeatReceivedAt: nil,
+                lastSuccessfulHeartbeatAt: nil,
+                lastSignedRequestSucceededAt: nil,
+                missedHeartbeatCount: 0,
+                consecutiveFailureCount: 0,
+                latencyMilliseconds: nil,
+                lastErrorCode: nil,
+                connectionStatusRevision: 0
+            )
     }
 
     private func sleep(seconds: TimeInterval) async {
@@ -470,6 +507,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
     private let connectionStore: any SecureMacConnectionSnapshotProviding
     private let client: any LocalNetworkHeartbeatClientProtocol
     private let statusStore: DeviceConnectionStatusStore
+    private let diagnosticsStore: ConnectionDiagnosticsStore
     private let configuration: LocalNetworkHeartbeatConfiguration
     private var heartbeatTask: Task<Void, Never>?
     private var sequenceNumber: UInt64 = 0
@@ -479,15 +517,13 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
         connectionStore: any SecureMacConnectionSnapshotProviding,
         client: (any LocalNetworkHeartbeatClientProtocol)? = nil,
         statusStore: DeviceConnectionStatusStore? = nil,
+        diagnosticsStore: ConnectionDiagnosticsStore? = nil,
         configuration: LocalNetworkHeartbeatConfiguration = .foregroundDefault
     ) {
         self.connectionStore = connectionStore
         self.client = client ?? SecureMacUploadClient()
-        self.statusStore = statusStore ?? DeviceConnectionStatusStore(
-            staleAfter: configuration.staleAfter,
-            disconnectedAfter: configuration.disconnectedAfter,
-            missedHeartbeatLimit: configuration.missedHeartbeatLimit
-        )
+        self.statusStore = statusStore ?? .shared
+        self.diagnosticsStore = diagnosticsStore ?? .shared
         self.configuration = configuration
     }
 
@@ -507,11 +543,13 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
             return false
         }
 
+        diagnosticsStore.record(phase: "heartbeatMonitorStart", deviceID: snapshot.deviceID)
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else {
                     return
                 }
+                self.diagnosticsStore.record(phase: "heartbeatTickScheduled", deviceID: self.connectionStore.snapshot.deviceID)
                 _ = await self.performHeartbeat()
                 try? await Task.sleep(nanoseconds: UInt64(self.configuration.heartbeatInterval * 1_000_000_000))
             }
@@ -529,10 +567,12 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
             return
         }
 
-        _ = statusStore.markMonitoringSuspended(
+        diagnosticsStore.record(phase: "heartbeatMonitorStop", deviceID: snapshot.deviceID)
+        let status = statusStore.markMonitoringSuspended(
             deviceID: snapshot.deviceID,
             displayName: displayName(for: snapshot)
         )
+        diagnosticsStore.record(phase: "heartbeatMarkedStale", deviceID: snapshot.deviceID, heartbeatMissCount: status.missedHeartbeatCount)
     }
 
     @discardableResult
@@ -554,6 +594,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
         sequenceNumber += 1
         let statusBeforeSend = statusStore.status(for: snapshot.deviceID, now: now)
         _ = statusStore.markHeartbeatSent(deviceID: snapshot.deviceID, displayName: displayName, now: now)
+        diagnosticsStore.record(phase: "heartbeatRequestStarted", deviceID: snapshot.deviceID, heartbeatMissCount: statusBeforeSend?.missedHeartbeatCount)
         let request = ConnectionHeartbeatRequest(
             deviceID: snapshot.deviceID,
             deviceName: UIDevice.current.name,
@@ -575,23 +616,38 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
             }
             let receivedAt = Date()
             let latencyMilliseconds = max(0, receivedAt.timeIntervalSince(now) * 1_000)
-            _ = statusStore.recordHeartbeatSuccess(
+            let status = statusStore.recordHeartbeatSuccess(
                 deviceID: snapshot.deviceID,
                 displayName: displayName,
                 sentAt: now,
                 receivedAt: receivedAt,
                 latencyMilliseconds: latencyMilliseconds
             )
+            diagnosticsStore.record(phase: "heartbeatResponseReceived", deviceID: snapshot.deviceID)
+            diagnosticsStore.record(phase: "heartbeatMarkedOnline", deviceID: snapshot.deviceID, heartbeatMissCount: status.missedHeartbeatCount)
             return true
         } catch {
             let mapped = mapHeartbeatError(error)
-            _ = statusStore.recordHeartbeatFailure(
+            let status = statusStore.recordHeartbeatFailure(
                 deviceID: snapshot.deviceID,
                 displayName: displayName,
                 errorCode: mapped.code,
                 errorMessage: mapped.message,
                 isSecurityFailure: mapped.isSecurityFailure
             )
+            diagnosticsStore.record(
+                phase: mapped.code.contains("timedOut") || mapped.code.contains("-1001") ? "heartbeatTimeout" : "heartbeatResponseFailure",
+                deviceID: snapshot.deviceID,
+                heartbeatMissCount: status.missedHeartbeatCount,
+                errorCode: mapped.code,
+                errorMessage: mapped.message
+            )
+            diagnosticsStore.record(phase: "heartbeatMissCount", deviceID: snapshot.deviceID, heartbeatMissCount: status.missedHeartbeatCount)
+            if status.presenceState == .disconnected {
+                diagnosticsStore.record(phase: "heartbeatMarkedDisconnected", deviceID: snapshot.deviceID, heartbeatMissCount: status.missedHeartbeatCount)
+            } else if status.presenceState == .stale {
+                diagnosticsStore.record(phase: "heartbeatMarkedStale", deviceID: snapshot.deviceID, heartbeatMissCount: status.missedHeartbeatCount)
+            }
             return false
         }
     }
@@ -605,6 +661,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
             displayName: displayName(for: settings),
             now: now
         )
+        diagnosticsStore.record(phase: "signedRequestRefreshedLastSeen", deviceID: settings.deviceID)
     }
 
     private func displayName(for snapshot: SecureMacConnectionSnapshot) -> String {
@@ -1064,7 +1121,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         let audioFileStore = AudioFileStore()
         let recordingManager = RecordingManager(fileStore: audioFileStore)
         let connectionStore = SecureMacConnectionStore()
-        let connectionStatusStore = DeviceConnectionStatusStore()
+        let connectionStatusStore = DeviceConnectionStatusStore.shared
         let secureClient = SecureMacUploadClient()
         let uploadCoordinator = RecordingUploadCoordinator()
         let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioFileStore)

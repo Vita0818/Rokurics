@@ -43,10 +43,16 @@ final class RokuricsMacUITests: XCTestCase {
     func testIPhoneConnectionStartPairingPublishesCodeAndEnablesCopy() throws {
         let app = makeIsolatedApp()
         app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8), "Mac app should launch into the foreground")
+        app.activate()
 
-        let sidebarButton = app.buttons["mac-sidebar-iphone-connection"]
-        XCTAssertTrue(sidebarButton.waitForExistence(timeout: 8), "iPhone connection sidebar button should exist")
-        sidebarButton.click()
+        let sidebarEntry = sidebarIPhoneConnectionEntry(in: app)
+        XCTAssertTrue(
+            sidebarEntry.waitForExistence(timeout: 8),
+            "iPhone connection sidebar entry should exist.\n\(app.debugDescription)"
+        )
+        XCTAssertTrue(sidebarEntry.isEnabled, "iPhone connection sidebar entry should be enabled")
+        sidebarEntry.click()
 
         let startButton = app.buttons["mac-iphone-start-pairing-button"]
         XCTAssertTrue(startButton.waitForExistence(timeout: 8), "Start pairing button should exist in the real Mac UI")
@@ -71,11 +77,26 @@ final class RokuricsMacUITests: XCTestCase {
 
     private func makeIsolatedApp() -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-NSQuitAlwaysKeepsWindows", "NO"
+        ]
         app.launchEnvironment["ROKURICS_UI_TEST_MODE"] = "1"
         app.launchEnvironment["ROKURICS_UI_TEST_STORAGE_NAMESPACE"] = UUID().uuidString
         app.launchEnvironment["ROKURICS_UI_TEST_RECEIVER_PORT"] = "0"
         app.launchEnvironment["ROKURICS_UI_TEST_HOST"] = "127.0.0.1"
         return app
+    }
+
+    private func sidebarIPhoneConnectionEntry(in app: XCUIApplication) -> XCUIElement {
+        let entry = app.descendants(matching: .any)["mac-sidebar-iphone-connection"]
+        if entry.waitForExistence(timeout: 2) {
+            return entry
+        }
+
+        app.activate()
+        app.typeKey("n", modifierFlags: [.command])
+        return entry
     }
 
     private func waitForDiagnostics(
