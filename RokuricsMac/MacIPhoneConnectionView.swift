@@ -15,7 +15,6 @@ struct MacIPhoneConnectionView: View {
     @State private var isFingerprintVisible = false
     @State private var didCopyPairingInfo = false
     @State private var activeSheet: MacIPhoneConnectionSheet?
-    @State private var manualSyncStatus: DeviceConnectionStatus?
     @State private var didRecordConnectionPageLoaded = false
 
     var body: some View {
@@ -48,7 +47,11 @@ struct MacIPhoneConnectionView: View {
             }
         }
         .onAppear {
+            secureReceiverService.recordWindowOpened()
             recordConnectionPageLoadedIfNeeded()
+        }
+        .onDisappear {
+            secureReceiverService.recordWindowClosed()
         }
         .onChange(of: secureReceiverService.pairingPayload) { _, _ in
             recordConnectionPageState()
@@ -172,7 +175,7 @@ struct MacIPhoneConnectionView: View {
                 Button {
                     startPairingFlow()
                 } label: {
-                    Label("开始配对", systemImage: "key.fill")
+                    Label(startConnectionButtonTitle, systemImage: "key.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(MacConnectionPrimaryButtonStyle())
@@ -183,7 +186,7 @@ struct MacIPhoneConnectionView: View {
     }
 
     private func connectedContent(for device: PairedDevice) -> some View {
-        let status = manualSyncStatus ?? secureReceiverService.connectionStatus(for: device)
+        let status = secureReceiverService.connectionStatus(for: device)
         return MacConnectedDeviceLayout(
             device: device,
             status: status,
@@ -193,10 +196,9 @@ struct MacIPhoneConnectionView: View {
                 activeSheet = .connectionDetail
             },
             onSyncNow: {
-                manualSyncStatus = secureReceiverService.prepareManualStudyLibrarySync(for: device)
+                _ = secureReceiverService.prepareManualStudyLibrarySync(for: device)
             },
             onDisconnect: {
-                manualSyncStatus = nil
                 secureReceiverService.disconnectPairedDevices()
             }
         )
@@ -212,6 +214,10 @@ struct MacIPhoneConnectionView: View {
 
     private var isBeginPairingButtonEnabled: Bool {
         secureReceiverService.canBeginPairingFromUI
+    }
+
+    private var startConnectionButtonTitle: String {
+        "开始配对"
     }
 
     private var isFingerprintReady: Bool {
@@ -554,6 +560,7 @@ struct MacConnectedDeviceCardView: View {
     let onSyncNow: (() -> Void)?
     let onDisconnect: (() -> Void)?
     @Environment(\.colorScheme) private var colorScheme
+    @State private var presenceNow = Date()
 
     init(
         device: PairedDevice,
@@ -624,7 +631,7 @@ struct MacConnectedDeviceCardView: View {
 
             VStack(spacing: 8) {
                 MacConnectedStatusRow(title: "状态", value: stateText, tint: stateTint)
-                MacConnectedStatusRow(title: "最近在线", value: status.lastSeenAt.map { Self.relativeDateFormatter.localizedString(for: $0, relativeTo: Date()) } ?? "暂无", tint: MacTheme.softText(for: colorScheme))
+                MacConnectedStatusRow(title: "最近在线", value: presence.recentOnlineText, tint: MacTheme.softText(for: colorScheme))
                 MacConnectedStatusRow(title: "最近同步", value: lastSyncText, tint: MacTheme.softText(for: colorScheme))
             }
             .padding(12)
@@ -655,6 +662,12 @@ struct MacConnectedDeviceCardView: View {
             }
             .padding(.top, 4)
         }
+        .task {
+            while !Task.isCancelled {
+                presenceNow = Date()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
     }
 
     private var connectionInfoView: some View {
@@ -667,27 +680,22 @@ struct MacConnectedDeviceCardView: View {
     }
 
     private var stateText: String {
-        switch status.state {
-        case .unpaired:
-            return "未配对"
-        case .offline:
-            return "已配对但离线"
-        case .connecting:
-            return "正在连接"
-        case .connected:
-            return "已连接"
-        }
+        presence.statusText
     }
 
     private var stateTint: Color {
-        switch status.state {
-        case .connected:
+        switch presence.state {
+        case .online:
             return MacTheme.aqua
         case .connecting:
             return MacTheme.mint
-        case .offline, .unpaired:
+        case .interrupted, .stale, .disconnected, .securityError, .unknown:
             return MacTheme.coral
         }
+    }
+
+    private var presence: ConnectionPresenceSnapshot {
+        status.presenceSnapshot(now: presenceNow)
     }
 
     private var lastSyncText: String {
@@ -758,7 +766,7 @@ private struct MacIPhoneConnectionDetailSheet: View {
                     MacConnectionDivider()
                     detailRow("配对时间", device.map { formattedDate($0.pairedAt) } ?? "未知", style: .number)
                     MacConnectionDivider()
-                    detailRow("最近连接", status.lastSeenAt.map(formattedDate) ?? "暂无", style: .number)
+                    detailRow("最近连接", status.presenceSnapshot().recentOnlineText, style: .number)
                     MacConnectionDivider()
                     detailRow("最近同步", lastSyncText, style: .name)
                     MacConnectionDivider()
@@ -802,16 +810,7 @@ private struct MacIPhoneConnectionDetailSheet: View {
     }
 
     private var connectionStateText: String {
-        switch status.state {
-        case .unpaired:
-            return "未配对"
-        case .offline:
-            return "已配对但离线"
-        case .connecting:
-            return "正在连接"
-        case .connected:
-            return "已连接"
-        }
+        status.presenceSnapshot().statusText
     }
 
     private var lastSyncText: String {

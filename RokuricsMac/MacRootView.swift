@@ -12,7 +12,7 @@ struct MacRootView: View {
     @State private var isSettingsSelected = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var didRecordAppLaunch = false
-    @StateObject private var secureReceiverService: SecureReceiverService
+    @ObservedObject private var secureReceiverService: SecureReceiverService
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
@@ -22,20 +22,10 @@ struct MacRootView: View {
     @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
     @StateObject private var userProfileStore = MacUserProfileStore()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
 
-    init() {
-        if let uiTestHost = MacAppStorageProfile.uiTestPreferredHost {
-            _secureReceiverService = StateObject(
-                wrappedValue: SecureReceiverService(
-                    port: MacAppStorageProfile.receiverPort,
-                    preferredIPAddressProvider: { uiTestHost }
-                )
-            )
-        } else {
-            _secureReceiverService = StateObject(
-                wrappedValue: SecureReceiverService(port: MacAppStorageProfile.receiverPort)
-            )
-        }
+    init(secureReceiverService: SecureReceiverService) {
+        self.secureReceiverService = secureReceiverService
     }
 
     var body: some View {
@@ -69,6 +59,14 @@ struct MacRootView: View {
             }
             didRecordAppLaunch = true
             secureReceiverService.recordAppLaunch()
+            secureReceiverService.appBecameActive()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                secureReceiverService.appBecameActive()
+            } else {
+                secureReceiverService.appBecameInactive()
+            }
         }
     }
 
@@ -305,5 +303,5 @@ private struct MacDetailPillText: View {
 }
 
 #Preview {
-    MacRootView()
+    MacRootView(secureReceiverService: SecureReceiverService())
 }

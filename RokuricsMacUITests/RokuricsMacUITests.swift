@@ -42,6 +42,7 @@ final class RokuricsMacUITests: XCTestCase {
     @MainActor
     func testIPhoneConnectionStartPairingPublishesCodeAndEnablesCopy() throws {
         let app = makeIsolatedApp()
+        app.terminate()
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 8), "Mac app should launch into the foreground")
         app.activate()

@@ -25,10 +25,15 @@ struct MacUploadTestPresenceGate {
     static func blockedReason(
         snapshot: SecureMacConnectionSnapshot,
         status: DeviceConnectionStatus,
+        now: Date = Date(),
+        userConnectionIntent: UserConnectionIntent = .wantsConnected,
         isHTTPSUploadEnabled: Bool = SecureMacUploadClient.isHTTPSUploadEnabled
     ) -> String? {
         guard snapshot.isPaired else {
             return "not_paired"
+        }
+        guard userConnectionIntent == .wantsConnected else {
+            return "user_does_not_want_connection"
         }
         guard isHTTPSUploadEnabled else {
             return "https_upload_disabled"
@@ -36,16 +41,17 @@ struct MacUploadTestPresenceGate {
         guard status.deviceID == snapshot.deviceID else {
             return "presence_unavailable"
         }
-        if status.presenceState == .online || status.state == .connected {
+        let presence = status.presenceSnapshot(now: now)
+        if presence.isOnline {
             return nil
         }
-        if status.presenceState == .securityError {
+        if presence.state == .securityError {
             return "security_error"
         }
-        if status.presenceState == .stale {
-            return "heartbeat_stale"
+        if presence.state == .interrupted || presence.state == .stale {
+            return "heartbeat_interrupted"
         }
-        if status.presenceState == .disconnected || status.state == .offline {
+        if presence.state == .disconnected {
             return "heartbeat_disconnected"
         }
         return "heartbeat_not_online"
@@ -105,7 +111,7 @@ struct MacConnectionView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         pageHeader
 
-                        if settingsSnapshot.isPaired {
+                        if shouldShowPairedContent {
                             pairedContent(metrics: metrics)
                         } else {
                             unpairedContent
@@ -190,8 +196,8 @@ struct MacConnectionView: View {
                 }
             },
             trailing: {
-                if !settingsSnapshot.isPaired {
-                    MacConnectionStateCapsule(text: "未配对")
+                if !shouldShowPairedContent {
+                    MacConnectionStateCapsule(text: settingsSnapshot.isPaired ? "未连接" : "未配对")
                 }
             }
         ) {
@@ -245,7 +251,7 @@ struct MacConnectionView: View {
                 Button {
                     startPairing()
                 } label: {
-                    Label(isPairing ? "配对中" : "配对", systemImage: isPairing ? "arrow.triangle.2.circlepath" : "key.fill")
+                    Label(pairingActionTitle, systemImage: isPairing ? "arrow.triangle.2.circlepath" : "key.fill")
                 }
                 .buttonStyle(.rokuricsPrimary)
                 .disabled(isPairing || isUploading || !canAttemptPairing)
@@ -298,6 +304,14 @@ struct MacConnectionView: View {
         connectionStore.snapshot
     }
 
+    private var shouldShowPairedContent: Bool {
+        settingsSnapshot.isPaired && connectionStore.userConnectionIntent == .wantsConnected
+    }
+
+    private var pairingActionTitle: String {
+        isPairing ? "配对中" : "配对"
+    }
+
     private var canUploadSecurely: Bool {
         uploadTestBlockedReason == nil
     }
@@ -305,7 +319,8 @@ struct MacConnectionView: View {
     private var uploadTestBlockedReason: String? {
         MacUploadTestPresenceGate.blockedReason(
             snapshot: settingsSnapshot,
-            status: syncCoordinator.connectionStatus
+            status: syncCoordinator.connectionStatus,
+            userConnectionIntent: connectionStore.userConnectionIntent
         )
     }
 
@@ -329,7 +344,7 @@ struct MacConnectionView: View {
     }
 
     private var canAttemptPairing: Bool {
-        !normalizedHost(connectionStore.macHost).isEmpty
+        return !normalizedHost(connectionStore.macHost).isEmpty
             && connectionStore.macPort > 0
             && pairingCode.count == 6
             && connectionStore.normalizedFingerprint.count == 64
@@ -470,6 +485,11 @@ struct MacConnectionView: View {
                 portText: connectionStore.macPortText,
                 fingerprint: normalizedFingerprint
             )
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "userConnectionIntentChanged",
+                deviceID: result.deviceID,
+                result: UserConnectionIntent.wantsConnected.rawValue
+            )
 
             pairingCode = ""
             feedbackKind = nil
@@ -565,9 +585,11 @@ struct MacConnectionView: View {
         switch reason {
         case "not_paired":
             return SecureMacUploadError.notPaired.localizedDescription
+        case "user_does_not_want_connection":
+            return "当前已断开连接，请重新配对。"
         case "security_error":
             return "连接处于安全错误状态，请重新配对。"
-        case "heartbeat_stale", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
+        case "heartbeat_interrupted", "heartbeat_stale", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
             return "Mac 当前未在线，请等待前台心跳恢复后再测试上传。"
         case "https_upload_disabled":
             return "HTTPS 上传未启用。"
@@ -578,16 +600,47 @@ struct MacConnectionView: View {
 
     @MainActor
     private func disconnect() {
-        do {
-            syncCoordinator.stopMonitoring()
-            try connectionStore.clearPairing()
+        let snapshot = settingsSnapshot
+        syncCoordinator.stopMonitoring()
+        syncCoordinator.recordUserDisconnected()
+        ConnectionDiagnosticsStore.shared.record(
+            phase: "disconnectTapped",
+            deviceID: snapshot.deviceID,
+            result: UserConnectionIntent.disconnectedByUser.rawValue
+        )
+        Task { @MainActor in
+            do {
+                try connectionStore.clearPairing()
+                ConnectionDiagnosticsStore.shared.record(phase: "localCredentialsDeleted", deviceID: snapshot.deviceID)
+            } catch {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "localCredentialsDeleted",
+                    deviceID: snapshot.deviceID,
+                    errorCode: "credential_delete_failed",
+                    errorMessage: error.localizedDescription
+                )
+            }
+            syncCoordinator.refreshPairingState()
             pairingCode = ""
             isFingerprintVisible = false
             focusedField = nil
             clearFeedback()
             isDetailPresented = false
-        } catch {
-            showTransientNotice("断开失败：\(error.localizedDescription)")
+
+            if snapshot.isPaired {
+                ConnectionDiagnosticsStore.shared.record(phase: "remoteUnpairAttempted", deviceID: snapshot.deviceID)
+                do {
+                    _ = try await uploadClient.sendDeviceUnpair(settings: snapshot)
+                    ConnectionDiagnosticsStore.shared.record(phase: "remoteUnpairSucceeded", deviceID: snapshot.deviceID)
+                } catch {
+                    ConnectionDiagnosticsStore.shared.record(
+                        phase: "remoteUnpairFailed",
+                        deviceID: snapshot.deviceID,
+                        errorCode: "remote_unpair_failed",
+                        errorMessage: error.localizedDescription
+                    )
+                }
+            }
         }
     }
 
@@ -992,6 +1045,7 @@ private struct ConnectedDeviceCardView: View {
     let onShowDetails: () -> Void
     let onSyncNow: () -> Void
     let onDisconnect: () -> Void
+    @State private var presenceNow = Date()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1013,7 +1067,7 @@ private struct ConnectedDeviceCardView: View {
 
             VStack(spacing: 10) {
                 MacConnectionStatusLine(title: "状态", value: stateText, tint: stateTint)
-                MacConnectionStatusLine(title: "最近连接", value: status.lastSeenAt.map { Self.relativeDateFormatter.localizedString(for: $0, relativeTo: Date()) } ?? "暂无", tint: RokuricsColors.softText)
+                MacConnectionStatusLine(title: "最近连接", value: presence.recentOnlineText, tint: RokuricsColors.softText)
                 MacConnectionStatusLine(title: "最近同步", value: lastSyncText, tint: RokuricsColors.softText)
             }
             .padding(14)
@@ -1039,6 +1093,12 @@ private struct ConnectedDeviceCardView: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .rokuricsLiquidGlassCard(cornerRadius: 28, material: .thinMaterial, fillOpacity: 0.42, strokeOpacity: 0.42, shadowOpacity: 0.10, shadowRadius: 17, shadowY: 9)
+        .task {
+            while !Task.isCancelled {
+                presenceNow = Date()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
     }
 
     private var displayName: String {
@@ -1053,27 +1113,22 @@ private struct ConnectedDeviceCardView: View {
     }
 
     private var stateText: String {
-        switch status.state {
-        case .unpaired:
-            return "未配对"
-        case .offline:
-            return "已配对但离线"
-        case .connecting:
-            return "正在连接"
-        case .connected:
-            return "已连接"
-        }
+        presence.statusText
     }
 
     private var stateTint: Color {
-        switch status.state {
-        case .connected:
+        switch presence.state {
+        case .online:
             return RokuricsColors.softTeal
         case .connecting:
             return RokuricsColors.aqua
-        case .offline, .unpaired:
+        case .interrupted, .stale, .disconnected, .securityError, .unknown:
             return RokuricsColors.coral
         }
+    }
+
+    private var presence: ConnectionPresenceSnapshot {
+        status.presenceSnapshot(now: presenceNow)
     }
 
     private var lastSyncText: String {

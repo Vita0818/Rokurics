@@ -8,15 +8,55 @@
 import Combine
 import Foundation
 
+enum PairedCredentialState: String, Codable, Equatable {
+    case none
+    case paired
+    case invalid
+    case revoked
+    case fingerprintMismatch
+}
+
+enum UserConnectionIntent: String, Codable, Equatable {
+    case wantsConnected
+    case disconnectedByUser
+
+    init(from decoder: Decoder) throws {
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        if rawValue == "doesNotWantConnection" {
+            self = .disconnectedByUser
+        } else {
+            self = UserConnectionIntent(rawValue: rawValue) ?? .wantsConnected
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 struct PairedDevice: Codable, Identifiable {
     let id: String
     let deviceName: String
     let sharedSecretBase64URL: String
     let pairedAt: Date
     var lastSeenAt: Date?
+    var userConnectionIntent: UserConnectionIntent?
 
     var idPrefix: String {
         String(id.prefix(12))
+    }
+
+    var resolvedConnectionIntent: UserConnectionIntent {
+        userConnectionIntent ?? .wantsConnected
+    }
+
+    var pairedCredentialState: PairedCredentialState {
+        .paired
+    }
+
+    var wantsConnection: Bool {
+        resolvedConnectionIntent == .wantsConnected
     }
 }
 
@@ -37,6 +77,18 @@ final class PairedDeviceStore: ObservableObject {
 
     var deviceCount: Int {
         devices.count
+    }
+
+    var hasStoredDevices: Bool {
+        !devices.isEmpty
+    }
+
+    var hasWantsConnectedDevice: Bool {
+        devices.contains { $0.wantsConnection }
+    }
+
+    var hasPausedDevices: Bool {
+        devices.contains { $0.resolvedConnectionIntent == .disconnectedByUser }
     }
 
     var displayPath: String {
@@ -66,9 +118,39 @@ final class PairedDeviceStore: ObservableObject {
         save()
     }
 
+    func setUserConnectionIntent(_ intent: UserConnectionIntent, for deviceID: String) {
+        guard let index = devices.firstIndex(where: { $0.id == deviceID }) else {
+            return
+        }
+
+        devices[index].userConnectionIntent = intent
+        save()
+    }
+
+    func setUserConnectionIntentForAll(_ intent: UserConnectionIntent) {
+        guard !devices.isEmpty else {
+            return
+        }
+
+        for index in devices.indices {
+            devices[index].userConnectionIntent = intent
+        }
+        save()
+    }
+
     func clearAll() {
         devices.removeAll()
         save()
+    }
+
+    @discardableResult
+    func removeDevice(id: String) -> Bool {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        devices.remove(at: index)
+        save()
+        return true
     }
 
     private func load() {

@@ -47,6 +47,18 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     let fingerprintPrefix: String?
     let listenerState: String?
     let activePort: Int?
+    let routeReceivedAt: Date?
+    let routePath: String?
+    let heartbeatSequence: UInt64?
+    let requestDeviceIDPrefix: String?
+    let verifierStartedAt: Date?
+    let verifierSucceeded: Bool?
+    let verifierFailed: Bool?
+    let markDeviceSeenCalled: Bool?
+    let pairedDeviceLastSeenBefore: Date?
+    let pairedDeviceLastSeenAfter: Date?
+    let connectionStatusStoreUpdated: Bool?
+    let uiObservedLastSeenAt: Date?
     let beginPairingRequested: Bool?
     let codeIssued: Bool?
     let beginPairingButtonEnabled: Bool?
@@ -54,6 +66,7 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     let copyEnabled: Bool?
     let errorCode: String?
     let errorMessage: String?
+    let errorCategory: String?
 }
 
 @MainActor
@@ -87,8 +100,21 @@ final class ConnectionDiagnosticsStore {
         beginPairingButtonEnabled: Bool? = nil,
         payloadPublished: Bool? = nil,
         copyEnabled: Bool? = nil,
+        routeReceivedAt: Date? = nil,
+        routePath: String? = nil,
+        heartbeatSequence: UInt64? = nil,
+        requestDeviceIDPrefix: String? = nil,
+        verifierStartedAt: Date? = nil,
+        verifierSucceeded: Bool? = nil,
+        verifierFailed: Bool? = nil,
+        markDeviceSeenCalled: Bool? = nil,
+        pairedDeviceLastSeenBefore: Date? = nil,
+        pairedDeviceLastSeenAfter: Date? = nil,
+        connectionStatusStoreUpdated: Bool? = nil,
+        uiObservedLastSeenAt: Date? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
+        errorCategory: String? = nil,
         timestamp: Date = Date()
     ) {
         let entry = ConnectionDiagnosticEntry(
@@ -99,13 +125,26 @@ final class ConnectionDiagnosticsStore {
             fingerprintPrefix: fingerprintPrefix(fingerprint),
             listenerState: listenerState,
             activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: sanitized(routePath),
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: sanitized(requestDeviceIDPrefix).map { String($0.prefix(12)) },
+            verifierStartedAt: verifierStartedAt,
+            verifierSucceeded: verifierSucceeded,
+            verifierFailed: verifierFailed,
+            markDeviceSeenCalled: markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: connectionStatusStoreUpdated,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             beginPairingRequested: beginPairingRequested,
             codeIssued: codeIssued,
             beginPairingButtonEnabled: beginPairingButtonEnabled,
             payloadPublished: payloadPublished,
             copyEnabled: copyEnabled,
             errorCode: errorCode,
-            errorMessage: sanitized(errorMessage)
+            errorMessage: sanitized(errorMessage),
+            errorCategory: sanitized(errorCategory)
         )
 
         do {
@@ -176,6 +215,7 @@ final class SecureReceiverService: ObservableObject {
     @Published private(set) var connectionErrorCode: SecureReceiverConnectionErrorCode?
     @Published private(set) var pairingFlowState: SecureReceiverPairingFlowState = .idle
     @Published private(set) var pairingPayload: SecureReceiverPairingPayload?
+    @Published private(set) var presenceObservationRevision = 0
 
     let identityManager: MacIdentityManager
     let pairedDeviceStore: PairedDeviceStore
@@ -192,6 +232,7 @@ final class SecureReceiverService: ObservableObject {
 
     private var httpsServer: SecureLocalHTTPSServer?
     private var pendingPairingStartAfterHTTPSReady = false
+    private var storeObservationCancellables: Set<AnyCancellable> = []
     private let preferredIPAddressProvider: () -> String?
     private let expiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -249,6 +290,7 @@ final class SecureReceiverService: ObservableObject {
         if loadIdentityOnInit {
             identityManager.loadOrCreateIdentity()
         }
+        bindPresenceStores()
         acceptedUploadCount = receivedFileStore.savedFileCount()
         refreshSecurityState()
     }
@@ -290,10 +332,18 @@ final class SecureReceiverService: ObservableObject {
     }
 
     var latestPairedDevice: PairedDevice? {
-        pairedDeviceStore.devices.sorted { first, second in
+        pairedDeviceStore.devices.filter { $0.wantsConnection }.sorted { first, second in
             (first.lastSeenAt ?? first.pairedAt) > (second.lastSeenAt ?? second.pairedAt)
         }
         .first
+    }
+
+    var hasStoredPairedDevices: Bool {
+        pairedDeviceStore.hasStoredDevices
+    }
+
+    var hasPausedPairedDevices: Bool {
+        false
     }
 
     var tlsBlockerText: String {
@@ -302,6 +352,40 @@ final class SecureReceiverService: ObservableObject {
 
     func recordAppLaunch() {
         recordConnectionDiagnostic(phase: "appLaunch")
+    }
+
+    func appBecameActive() {
+        recordConnectionDiagnostic(phase: "appBecameActive")
+        resumeConnectionIfUserWantsConnected()
+    }
+
+    func appBecameInactive() {
+        recordConnectionDiagnostic(phase: "appBecameInactive")
+    }
+
+    func resumePresenceEvaluation() {
+        let devices = pairedDeviceStore.devices.filter { $0.wantsConnection }
+        guard !devices.isEmpty else {
+            recordConnectionDiagnostic(phase: "heartbeatSuppressedBecauseUserDoesNotWantConnection")
+            return
+        }
+        for device in devices {
+            _ = deviceConnectionStatusStore.markMonitoringResumed(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName
+            )
+        }
+        presenceObservationRevision += 1
+        recordConnectionDiagnostic(phase: "presenceEvaluatorResumed")
+    }
+
+    func recordWindowOpened() {
+        recordConnectionDiagnostic(phase: "windowOpened")
+        resumeConnectionIfUserWantsConnected()
+    }
+
+    func recordWindowClosed() {
+        recordConnectionDiagnostic(phase: "windowClosed")
     }
 
     func recordConnectionPageLoaded(beginPairingButtonEnabled: Bool, copyEnabled: Bool) {
@@ -434,8 +518,21 @@ final class SecureReceiverService: ObservableObject {
                         phase: event.phase,
                         listenerState: event.listenerState,
                         activePort: event.activePort,
+                        routeReceivedAt: event.routeReceivedAt,
+                        routePath: event.routePath,
+                        heartbeatSequence: event.heartbeatSequence,
+                        requestDeviceIDPrefix: event.requestDeviceIDPrefix,
+                        verifierStartedAt: event.verifierStartedAt,
+                        verifierSucceeded: event.verifierSucceeded,
+                        verifierFailed: event.verifierFailed,
+                        markDeviceSeenCalled: event.markDeviceSeenCalled,
+                        pairedDeviceLastSeenBefore: event.pairedDeviceLastSeenBefore,
+                        pairedDeviceLastSeenAfter: event.pairedDeviceLastSeenAfter,
+                        connectionStatusStoreUpdated: event.connectionStatusStoreUpdated,
+                        uiObservedLastSeenAt: event.uiObservedLastSeenAt,
                         errorCode: event.errorCode,
-                        errorMessage: event.errorMessage
+                        errorMessage: event.errorMessage,
+                        errorCategory: event.errorCategory
                     )
                 }
             }
@@ -484,6 +581,12 @@ final class SecureReceiverService: ObservableObject {
 
     func beginPairing() {
         pairingManager.refresh()
+        if pairedDeviceStore.hasPausedDevices && !pairedDeviceStore.hasWantsConnectedDevice {
+            pairingManager.unpairAll(reason: "start_pairing_after_disconnect")
+            _ = deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
+            refreshPairingState()
+            recordConnectionDiagnostic(phase: "startPairingAfterDisconnect")
+        }
         pendingPairingStartAfterHTTPSReady = true
         recordConnectionDiagnostic(
             phase: "begin_pairing_requested",
@@ -564,11 +667,27 @@ final class SecureReceiverService: ObservableObject {
     }
 
     func disconnectPairedDevices() {
+        let devices = pairedDeviceStore.devices
         pairingManager.invalidatePairing(reason: "mac_ui_disconnect")
-        pairedDeviceStore.clearAll()
-        deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
+        pendingPairingStartAfterHTTPSReady = false
+        pairingPayload = nil
+        httpsServer?.stop()
+        httpsServer = nil
+        isHTTPSRunning = false
+        httpsStatusText = identityManager.status.hasTLSIdentity ? "HTTPS 身份就绪" : "HTTPS 未就绪"
+        for device in devices {
+            _ = deviceConnectionStatusStore.markUserDisconnected(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName
+            )
+        }
+        pairingManager.unpairAll(reason: "mac_ui_disconnect")
+        _ = deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
         refreshPairingState()
         lastError = pairedDeviceStore.lastError
+        recordConnectionDiagnostic(phase: "disconnectTapped")
+        recordConnectionDiagnostic(phase: "localCredentialsDeleted")
+        recordConnectionDiagnostic(phase: "userConnectionIntentChanged", errorMessage: UserConnectionIntent.disconnectedByUser.rawValue)
     }
 
     func connectionStatus(for device: PairedDevice?) -> DeviceConnectionStatus {
@@ -591,25 +710,61 @@ final class SecureReceiverService: ObservableObject {
             )
     }
 
+    private func bindPresenceStores() {
+        pairedDeviceStore.$devices
+            .dropFirst()
+            .sink { [weak self] devices in
+                guard let self else {
+                    return
+                }
+                self.pairedDeviceCount = devices.count
+                self.presenceObservationRevision += 1
+            }
+            .store(in: &storeObservationCancellables)
+
+        deviceConnectionStatusStore.$statusesByDeviceID
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self else {
+                    return
+                }
+                self.presenceObservationRevision += 1
+            }
+            .store(in: &storeObservationCancellables)
+    }
+
     @discardableResult
     func prepareManualStudyLibrarySync(for device: PairedDevice?) -> DeviceConnectionStatus {
+        recordConnectionDiagnostic(phase: "manualSyncTapped")
         guard let device else {
             return deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
         }
+        guard device.wantsConnection else {
+            recordConnectionDiagnostic(phase: "syncSkippedBecauseUserDoesNotWantConnection")
+            return deviceConnectionStatusStore.markUserDisconnected(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName
+            )
+        }
 
         guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
-            return deviceConnectionStatusStore.recordSyncResult(
+            let status = deviceConnectionStatusStore.recordSyncStatus(
                 deviceID: device.id,
                 displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
-                statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText,
-                error: StudyLibrarySyncRuntimeConfiguration.disabledReason
+                statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText
             )
+            recordConnectionDiagnostic(
+                phase: "syncFailedPresenceUnchanged",
+                errorCode: "sync_disabled",
+                errorMessage: StudyLibrarySyncRuntimeConfiguration.disabledReason
+            )
+            return status
         }
 
         studyLibraryStore.refresh()
         let manifest = studyLibraryStore.makeSyncManifest(deviceID: "mac-\(String(fingerprint.prefix(16)))")
         syncStateStore.recordPush(deviceID: device.id, remoteManifestHash: nil, pendingUploads: manifest.pendingUploads.count)
-        return deviceConnectionStatusStore.recordSyncResult(
+        return deviceConnectionStatusStore.recordSyncStatus(
             deviceID: device.id,
             displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             statusText: "已准备 \(manifest.summaryText)"
@@ -645,6 +800,18 @@ final class SecureReceiverService: ObservableObject {
         } else if let identityError = identityManager.lastError {
             lastError = identityError
         }
+    }
+
+    private func resumeConnectionIfUserWantsConnected() {
+        guard pairedDeviceStore.hasWantsConnectedDevice else {
+            recordConnectionDiagnostic(phase: "heartbeatSuppressedBecauseUserDoesNotWantConnection")
+            return
+        }
+
+        if canStartHTTPS, httpsServer == nil {
+            startSecureReceiving()
+        }
+        resumePresenceEvaluation()
     }
 
     private func applyHTTPSReadyState(activePort: Int?, listenerState: String) {
@@ -799,8 +966,21 @@ final class SecureReceiverService: ObservableObject {
         beginPairingButtonEnabled: Bool? = nil,
         payloadPublished: Bool? = nil,
         copyEnabled: Bool? = nil,
+        routeReceivedAt: Date? = nil,
+        routePath: String? = nil,
+        heartbeatSequence: UInt64? = nil,
+        requestDeviceIDPrefix: String? = nil,
+        verifierStartedAt: Date? = nil,
+        verifierSucceeded: Bool? = nil,
+        verifierFailed: Bool? = nil,
+        markDeviceSeenCalled: Bool? = nil,
+        pairedDeviceLastSeenBefore: Date? = nil,
+        pairedDeviceLastSeenAfter: Date? = nil,
+        connectionStatusStoreUpdated: Bool? = nil,
+        uiObservedLastSeenAt: Date? = nil,
         errorCode: String? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        errorCategory: String? = nil
     ) {
         connectionDiagnosticsStore.record(
             phase: phase,
@@ -814,8 +994,21 @@ final class SecureReceiverService: ObservableObject {
             beginPairingButtonEnabled: beginPairingButtonEnabled,
             payloadPublished: payloadPublished,
             copyEnabled: copyEnabled,
+            routeReceivedAt: routeReceivedAt,
+            routePath: routePath,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            verifierStartedAt: verifierStartedAt,
+            verifierSucceeded: verifierSucceeded,
+            verifierFailed: verifierFailed,
+            markDeviceSeenCalled: markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: connectionStatusStoreUpdated,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             errorCode: errorCode,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            errorCategory: errorCategory
         )
     }
 }

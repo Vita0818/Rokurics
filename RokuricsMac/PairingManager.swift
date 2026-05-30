@@ -66,6 +66,22 @@ final class PairingManager: ObservableObject {
         print("[RokuricsPairing] pairing code invalidated: \(reason)")
     }
 
+    @discardableResult
+    func unpairDevice(id deviceID: String) -> Bool {
+        let removed = pairedDeviceStore.removeDevice(id: deviceID)
+        if pairedDeviceStore.deviceCount == 0 {
+            state = .idle
+        }
+        return removed
+    }
+
+    func unpairAll(reason: String = "user_disconnect") {
+        pairedDeviceStore.clearAll()
+        activeChallenge = nil
+        state = .idle
+        print("[RokuricsPairing] all paired devices cleared: \(reason)")
+    }
+
     func completePairing(deviceName: String, deviceType: String, code: String, now: Date = Date()) -> PairingResult? {
         print("[RokuricsPairing] pairing attempt received: deviceType=\(deviceType), name=\(deviceName)")
 

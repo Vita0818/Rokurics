@@ -26,7 +26,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
         fileManager: FileManager = .default,
         rootURL: URL? = nil,
         offlineThreshold: TimeInterval = 12,
-        staleAfter: TimeInterval = 6,
+        staleAfter: TimeInterval = 5,
         disconnectedAfter: TimeInterval = 10,
         missedHeartbeatLimit: Int = 3
     ) {
@@ -154,6 +154,15 @@ final class DeviceConnectionStatusStore: ObservableObject {
         at date: Date = Date(),
         error: String? = nil
     ) -> DeviceConnectionStatus {
+        guard error == nil else {
+            return recordSyncStatus(
+                deviceID: deviceID,
+                displayName: displayName,
+                statusText: statusText,
+                at: date
+            )
+        }
+
         var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
             deviceID: deviceID,
             displayName: displayName,
@@ -168,23 +177,44 @@ final class DeviceConnectionStatusStore: ObservableObject {
         status.lastSyncAt = date
         status.lastSyncStatus = statusText
         status.lastError = error
-        if error == nil {
-            status.state = .connected
-            status.lastSeenAt = date
-            status.lastHeartbeatAt = date
-            status.lastSignedRequestSucceededAt = date
-            status.presenceState = .online
-            status.missedHeartbeatCount = 0
-            status.consecutiveFailureCount = 0
-            status.lastErrorCode = nil
-        } else {
-            status.presenceState = .disconnected
-            status.lastErrorCode = error
-        }
+        status.state = .connected
+        status.lastSeenAt = date
+        status.lastHeartbeatAt = date
+        status.lastSignedRequestSucceededAt = date
+        status.presenceState = .online
+        status.missedHeartbeatCount = 0
+        status.consecutiveFailureCount = 0
+        status.lastErrorCode = nil
         status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
         return status
+    }
+
+    @discardableResult
+    func recordSyncStatus(
+        deviceID: String,
+        displayName: String,
+        statusText: String,
+        at date: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .offline,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.lastSyncAt = date
+        status.lastSyncStatus = statusText
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: date)
     }
 
     @discardableResult
@@ -274,10 +304,20 @@ final class DeviceConnectionStatusStore: ObservableObject {
         let missedCount = (status.missedHeartbeatCount ?? 0) + 1
         let failureCount = (status.consecutiveFailureCount ?? 0) + 1
         status.displayName = displayName
-        status.state = .offline
-        status.presenceState = isSecurityFailure
-            ? .securityError
-            : (missedCount >= missedHeartbeatLimit ? .disconnected : .stale)
+        if isSecurityFailure {
+            status.state = .offline
+            status.presenceState = .securityError
+        } else if missedCount >= missedHeartbeatLimit
+                    || latestOnlineEvidenceDate(for: status).map({ now.timeIntervalSince($0) > disconnectedAfter }) == true {
+            status.state = .offline
+            status.presenceState = .disconnected
+        } else if latestOnlineEvidenceDate(for: status).map({ now.timeIntervalSince($0) > staleAfter }) ?? true {
+            status.state = .offline
+            status.presenceState = .interrupted
+        } else {
+            status.state = .connected
+            status.presenceState = .online
+        }
         status.monitoringMode = .foregroundActive
         status.missedHeartbeatCount = missedCount
         status.consecutiveFailureCount = failureCount
@@ -311,6 +351,66 @@ final class DeviceConnectionStatusStore: ObservableObject {
         status.monitoringMode = .suspended
         status.lastErrorCode = "not_actively_monitoring"
         status.lastError = "Heartbeat monitoring is suspended."
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: now)
+    }
+
+    @discardableResult
+    func markUserDisconnected(
+        deviceID: String,
+        displayName: String,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .offline,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.state = .offline
+        status.presenceState = .disconnected
+        status.monitoringMode = .disabled
+        status.lastErrorCode = "user_disconnected"
+        status.lastError = "User disconnected."
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return status
+    }
+
+    @discardableResult
+    func markMonitoringResumed(
+        deviceID: String,
+        displayName: String,
+        now: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connecting,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        status.displayName = displayName
+        status.monitoringMode = .foregroundActive
+        if status.presenceState == .stale || status.presenceState == .unknown || status.presenceState == nil {
+            status.presenceState = .connecting
+            status.state = .connecting
+        }
+        if status.lastErrorCode == "not_actively_monitoring" {
+            status.lastErrorCode = nil
+            status.lastError = nil
+        }
         status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
@@ -383,6 +483,15 @@ final class DeviceConnectionStatusStore: ObservableObject {
         }
 
         var evaluated = status
+        if evaluated.presenceState == .securityError {
+            evaluated.state = .offline
+            return evaluated
+        }
+        if evaluated.monitoringMode == .suspended {
+            evaluated.state = .offline
+            evaluated.presenceState = .stale
+            return evaluated
+        }
         guard let lastEvidenceAt = latestOnlineEvidenceDate(for: status) else {
             if evaluated.presenceState == nil {
                 evaluated.presenceState = .unknown
@@ -391,16 +500,19 @@ final class DeviceConnectionStatusStore: ObservableObject {
         }
 
         let age = now.timeIntervalSince(lastEvidenceAt)
-        if age > disconnectedAfter {
+        if (evaluated.missedHeartbeatCount ?? 0) >= missedHeartbeatLimit || age > disconnectedAfter {
             evaluated.state = .offline
             evaluated.presenceState = .disconnected
             evaluated.lastErrorCode = evaluated.lastErrorCode ?? "heartbeat_disconnected"
             evaluated.lastError = evaluated.lastError ?? "Heartbeat timed out."
         } else if age > staleAfter || age > offlineThreshold {
             evaluated.state = .offline
-            evaluated.presenceState = .stale
-            evaluated.lastErrorCode = evaluated.lastErrorCode ?? "heartbeat_stale"
+            evaluated.presenceState = .interrupted
+            evaluated.lastErrorCode = evaluated.lastErrorCode ?? "heartbeat_interrupted"
             evaluated.lastError = evaluated.lastError ?? "Heartbeat is stale."
+        } else {
+            evaluated.state = .connected
+            evaluated.presenceState = .online
         }
         return evaluated
     }
@@ -436,8 +548,17 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     var timestamp: Date
     var phase: String
     var deviceIDPrefix: String?
+    var heartbeatSequence: UInt64?
+    var requestStartedAt: Date?
+    var requestPath: String?
+    var responseReceivedAt: Date?
+    var responseSequence: UInt64?
+    var result: String?
+    var latencyMs: Double?
     var heartbeatMissCount: Int?
     var uploadTestBlockedReason: String?
+    var pendingUploadCount: Int?
+    var pendingDownloadCount: Int?
     var errorCode: String?
     var errorMessage: String?
 }
@@ -462,8 +583,17 @@ final class ConnectionDiagnosticsStore {
     func record(
         phase: String,
         deviceID: String? = nil,
+        heartbeatSequence: UInt64? = nil,
+        requestStartedAt: Date? = nil,
+        requestPath: String? = nil,
+        responseReceivedAt: Date? = nil,
+        responseSequence: UInt64? = nil,
+        result: String? = nil,
+        latencyMs: Double? = nil,
         heartbeatMissCount: Int? = nil,
         uploadTestBlockedReason: String? = nil,
+        pendingUploadCount: Int? = nil,
+        pendingDownloadCount: Int? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
         timestamp: Date = Date()
@@ -472,8 +602,17 @@ final class ConnectionDiagnosticsStore {
             timestamp: timestamp,
             phase: phase,
             deviceIDPrefix: deviceID.map { String($0.prefix(12)) },
+            heartbeatSequence: heartbeatSequence,
+            requestStartedAt: requestStartedAt,
+            requestPath: sanitized(requestPath),
+            responseReceivedAt: responseReceivedAt,
+            responseSequence: responseSequence,
+            result: sanitized(result),
+            latencyMs: latencyMs,
             heartbeatMissCount: heartbeatMissCount,
             uploadTestBlockedReason: sanitized(uploadTestBlockedReason),
+            pendingUploadCount: pendingUploadCount,
+            pendingDownloadCount: pendingDownloadCount,
             errorCode: sanitized(errorCode),
             errorMessage: sanitized(errorMessage)
         )
@@ -640,19 +779,27 @@ final class LocalNetworkSyncStateStore: ObservableObject {
     }
 
     func recordAttempt(
+        localDeviceID: String? = nil,
         peerDeviceID: String?,
         localInventoryHash: String?,
         peerInventoryHash: String?,
         pendingUploadCount: Int,
         pendingDownloadCount: Int,
+        planSummary: String? = nil,
+        conflictCount: Int? = nil,
         at date: Date = Date()
     ) {
+        state.localDeviceID = localDeviceID ?? state.localDeviceID
+        state.peerDeviceID = peerDeviceID ?? state.peerDeviceID
+        state.lastSyncStartedAt = date
         state.lastSyncAt = date
         state.lastPeerDeviceID = peerDeviceID ?? state.lastPeerDeviceID
         state.lastLocalInventoryHash = localInventoryHash ?? state.lastLocalInventoryHash
         state.lastPeerInventoryHash = peerInventoryHash ?? state.lastPeerInventoryHash
         state.pendingUploadCount = pendingUploadCount
         state.pendingDownloadCount = pendingDownloadCount
+        state.lastPlanSummary = planSummary
+        state.lastConflictCount = conflictCount
         save()
     }
 
@@ -666,6 +813,8 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         at date: Date = Date()
     ) {
         state.version = LocalNetworkSyncState.currentVersion
+        state.peerDeviceID = peerDeviceID
+        state.lastSyncCompletedAt = date
         state.lastSyncAt = date
         state.lastSuccessfulSyncAt = date
         state.lastPeerDeviceID = peerDeviceID
@@ -678,6 +827,14 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         state.lastErrorMessage = nil
         state.pendingUploadCount = pendingUploadCount
         state.pendingDownloadCount = pendingDownloadCount
+        if pendingUploadCount == 0, pendingDownloadCount == 0 {
+            state.activeTransfers = []
+        }
+        save()
+    }
+
+    func recordActiveTransfers(_ transfers: [LocalNetworkTransferProgress]) {
+        state.activeTransfers = transfers
         save()
     }
 
@@ -689,6 +846,7 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         maximumBackoff: TimeInterval = 600
     ) {
         state.version = LocalNetworkSyncState.currentVersion
+        state.lastSyncCompletedAt = date
         state.lastSyncAt = date
         state.consecutiveFailureCount += 1
         let exponent = max(0, state.consecutiveFailureCount - 1)

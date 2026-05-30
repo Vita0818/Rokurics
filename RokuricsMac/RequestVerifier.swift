@@ -12,6 +12,18 @@ enum RequestVerificationResult {
     case rejected(String)
 }
 
+struct RequestVerificationTrace: Equatable {
+    var verifierStartedAt: Date
+    var routePath: String
+    var deviceIDPrefix: String?
+    var verifierSucceeded: Bool
+    var verifierFailedReason: String?
+    var markDeviceSeenCalled: Bool
+    var pairedDeviceLastSeenBefore: Date?
+    var pairedDeviceLastSeenAfter: Date?
+    var errorCategory: String?
+}
+
 @MainActor
 final class RequestVerifier {
     private struct PathRule {
@@ -23,6 +35,7 @@ final class RequestVerifier {
     private let pairedDeviceProvider: @MainActor (String) -> PairedDevice?
     private let markDeviceSeen: @MainActor (String, Date) -> Void
     private var recentNoncesByDeviceID: [String: [String: Date]] = [:]
+    private(set) var lastTrace: RequestVerificationTrace?
     private let timestampWindow: TimeInterval = 5 * 60
     private let pathRules: [String: PathRule] = [
         "/upload-secure-test": PathRule(
@@ -62,6 +75,11 @@ final class RequestVerifier {
         ),
         "/device/status": PathRule(
             maxBodyBytes: 256 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/device/unpair": PathRule(
+            maxBodyBytes: 16 * 1024,
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
         ),
@@ -147,16 +165,28 @@ final class RequestVerifier {
         bodyByteCount: Int,
         now: Date = Date()
     ) -> RequestVerificationResult {
+        var trace = RequestVerificationTrace(
+            verifierStartedAt: now,
+            routePath: path,
+            deviceIDPrefix: nil,
+            verifierSucceeded: false,
+            verifierFailedReason: nil,
+            markDeviceSeenCalled: false,
+            pairedDeviceLastSeenBefore: nil,
+            pairedDeviceLastSeenAfter: nil,
+            errorCategory: nil
+        )
+
         guard method == "POST" else {
-            return reject("method_not_allowed")
+            return reject("method_not_allowed", trace: trace)
         }
 
         guard let pathRule = pathRules[path] else {
-            return reject("path_not_allowed")
+            return reject("path_not_allowed", trace: trace)
         }
 
         guard bodyByteCount <= pathRule.maxBodyBytes else {
-            return reject("body_too_large")
+            return reject("body_too_large", trace: trace)
         }
 
         let normalizedHeaders = headers.reduce(into: [String: String]()) { result, header in
@@ -165,12 +195,12 @@ final class RequestVerifier {
 
         let contentType = normalizedHeaders["content-type"]?.lowercased() ?? ""
         guard pathRule.allowedContentTypePrefixes.contains(where: { contentType.hasPrefix($0) }) else {
-            return reject("content_type_not_allowed")
+            return reject("content_type_not_allowed", trace: trace)
         }
 
         if let requiredUploadType = pathRule.requiredUploadType {
             guard normalizedHeaders["x-rokurics-upload-type"] == requiredUploadType else {
-                return reject("upload_type_mismatch")
+                return reject("upload_type_mismatch", trace: trace)
             }
         }
 
@@ -181,28 +211,30 @@ final class RequestVerifier {
             let bodySHA256 = normalizedHeaders["x-rokurics-body-sha256"],
             let signature = normalizedHeaders["x-rokurics-signature"]
         else {
-            return reject("missing_security_headers")
+            return reject("missing_security_headers", trace: trace)
         }
+        trace.deviceIDPrefix = String(deviceID.prefix(12))
 
         guard let device = pairedDeviceProvider(deviceID) else {
-            return reject("unknown_device")
+            return reject("unknown_device", trace: trace)
         }
+        trace.pairedDeviceLastSeenBefore = device.lastSeenAt
 
         guard isTimestampValid(timestamp, now: now) else {
             print("[RokuricsVerifier] timestamp rejected")
-            return reject("timestamp_out_of_window")
+            return reject("timestamp_out_of_window", trace: trace)
         }
         print("[RokuricsVerifier] timestamp accepted")
 
         pruneNonces(now: now)
         guard !hasSeenNonce(nonce, for: deviceID) else {
             print("[RokuricsVerifier] nonce rejected")
-            return reject("nonce_replay")
+            return reject("nonce_replay", trace: trace)
         }
         print("[RokuricsVerifier] nonce accepted")
 
         guard MacSecurityUtilities.constantTimeEquals(actualBodyHash, bodySHA256.lowercased()) else {
-            return reject("body_hash_mismatch")
+            return reject("body_hash_mismatch", trace: trace)
         }
 
         let signaturePayload = [
@@ -220,11 +252,15 @@ final class RequestVerifier {
             ),
             MacSecurityUtilities.constantTimeEquals(expectedSignature, signature)
         else {
-            return reject("signature_mismatch")
+            return reject("signature_mismatch", trace: trace)
         }
 
         rememberNonce(nonce, for: deviceID, now: now)
         markDeviceSeen(deviceID, now)
+        trace.markDeviceSeenCalled = true
+        trace.pairedDeviceLastSeenAfter = pairedDeviceProvider(deviceID)?.lastSeenAt
+        trace.verifierSucceeded = true
+        lastTrace = trace
         print("[RokuricsVerifier] request signature verification success: deviceIDPrefix=\(String(deviceID.prefix(12)))")
         return .accepted(device: device)
     }
@@ -259,7 +295,11 @@ final class RequestVerifier {
         }
     }
 
-    private func reject(_ reason: String) -> RequestVerificationResult {
+    private func reject(_ reason: String, trace: RequestVerificationTrace) -> RequestVerificationResult {
+        var trace = trace
+        trace.verifierFailedReason = reason
+        trace.errorCategory = reason
+        lastTrace = trace
         print("[RokuricsVerifier] request signature verification failure: \(reason)")
         print("[RokuricsVerifier] rejected reason: \(reason)")
         return .rejected(reason)

@@ -102,6 +102,11 @@ struct RecordingLibraryView: View {
         .onChange(of: studyLibraryStore.allStudyFolders) {
             keepBrowsePathValid()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .localNetworkStudyLibraryDidChange)) { _ in
+            recordingManager.reloadRecordings()
+            studyLibraryStore.refresh()
+            keepBrowsePathValid()
+        }
         .alert(RecordingLocalOperationCopy.renameTitle, isPresented: $isRenameAlertPresented) {
             TextField("录音名称", text: $renameDraft)
 

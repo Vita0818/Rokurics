@@ -122,6 +122,24 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         isTranscribed && !isNoteGenerating
     }
 
+    var localNetworkReceiveTransferProgress: LocalNetworkTransferProgress? {
+        guard !hasAudio, receiveStatus != "completed" else {
+            return nil
+        }
+
+        let state: LocalNetworkTransferState = receiveStatus == "failed" ? .failed : .pending
+        return LocalNetworkTransferProgress(
+            objectID: "recordingAudio:\(id)",
+            objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+            state: state,
+            progressFraction: state == .failed ? nil : 0,
+            receivedBytes: 0,
+            totalBytes: fileSize > 0 ? fileSize : nil,
+            sourceDeviceID: nil,
+            statusText: state == .failed ? "接收失败" : "等待录音"
+        )
+    }
+
     var failureReasonSummary: String? {
         TranscriptionFailureReasonFormatter.summary(
             for: transcriptionError,

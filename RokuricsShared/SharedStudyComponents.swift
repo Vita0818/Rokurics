@@ -1865,6 +1865,67 @@ struct StudyRecordingCardActions: View {
     }
 }
 
+struct StudyRecordingTransferProgressView: View {
+    let transfer: LocalNetworkTransferProgress
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 5) {
+            ProgressView(value: clampedProgress)
+                .progressViewStyle(.linear)
+                .frame(width: 112)
+                .tint(tint)
+
+            Text(statusText)
+                .font(statusFont)
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(width: 132, alignment: .trailing)
+        .accessibilityLabel(statusText)
+    }
+
+    private var clampedProgress: Double {
+        min(max(transfer.progressFraction ?? 0, 0), 1)
+    }
+
+    private var statusText: String {
+        if let statusText = transfer.statusText, !statusText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return statusText
+        }
+        switch transfer.state {
+        case .pending:
+            return "等待传输"
+        case .transferring:
+            return "\(Int(clampedProgress * 100))%"
+        case .verifying:
+            return "校验中"
+        case .complete:
+            return "已完成"
+        case .failed:
+            return "传输失败"
+        }
+    }
+
+    private var tint: Color {
+        switch transfer.state {
+        case .failed:
+            return RokuricsSharedStyle.coral
+        case .pending, .transferring, .verifying, .complete:
+            return RokuricsSharedStyle.aqua
+        }
+    }
+
+    private var statusFont: Font {
+        #if os(macOS)
+        MacTypography.chineseCaption(size: 11, weight: .semibold)
+        #else
+        RokuricsTypography.caption(size: 11, weight: .semibold)
+        #endif
+    }
+}
+
 private struct StudyRecordingCardActionGroupGlyph: View {
     let model: StudyRecordingCardActionModel
     @Environment(\.colorScheme) private var colorScheme
@@ -1969,7 +2030,12 @@ struct StudyRecordingBundleCardContent: View {
                     .lineLimit(1)
             }
         } actions: {
-            StudyRecordingCardActions(actions: actions)
+            if let transfer = item.localNetworkTransferProgress,
+               transfer.isVisibleInActionArea {
+                StudyRecordingTransferProgressView(transfer: transfer)
+            } else {
+                StudyRecordingCardActions(actions: actions)
+            }
         }
     }
 }

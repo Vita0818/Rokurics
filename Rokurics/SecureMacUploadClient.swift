@@ -126,6 +126,12 @@ final class SecureMacUploadClient: ObservableObject {
         let error: String?
     }
 
+    private struct DeviceUnpairRequest: Encodable {
+        let deviceID: String
+        let reason: String
+        let requestedAt: Date
+    }
+
     func healthCheck(
         host: String,
         port: Int,
@@ -365,6 +371,19 @@ final class SecureMacUploadClient: ObservableObject {
         )
     }
 
+    func sendDeviceUnpair(
+        settings: SecureMacConnectionSnapshot,
+        reason: String = "user_disconnect"
+    ) async throws -> SecureUploadServerResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/device/unpair",
+            body: DeviceUnpairRequest(deviceID: settings.deviceID, reason: reason, requestedAt: Date()),
+            requestTimeout: 2,
+            resourceTimeout: 3
+        )
+    }
+
     func fetchStudyLibraryManifest(settings: SecureMacConnectionSnapshot) async throws -> StudyLibrarySyncManifestResponse {
         try await postSignedJSON(
             settings: settings,
@@ -427,6 +446,19 @@ final class SecureMacUploadClient: ObservableObject {
             path: "/sync/artifact-request",
             body: LocalNetworkSyncArtifactRequest(artifactID: artifactID),
             requestTimeout: 10,
+            resourceTimeout: 30
+        )
+    }
+
+    func putLocalNetworkSyncArtifact(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncArtifactPutRequest
+    ) async throws -> LocalNetworkSyncArtifactPutResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/artifact-put",
+            body: request,
+            requestTimeout: 15,
             resourceTimeout: 30
         )
     }

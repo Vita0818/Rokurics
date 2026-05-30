@@ -1270,6 +1270,35 @@ private struct MacStudyRecordingCard: View {
             }
             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
 
+            actionArea
+            .frame(width: 150, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .macLiquidGlassCard(cornerRadius: 18, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.04, shadowRadius: 8, shadowY: 4)
+        .onTapGesture {
+            if !isTitleEditing {
+                onOpenDetail()
+            }
+        }
+    }
+
+    private var canUseTranscriptionButton: Bool {
+        item.hasAudio && !isTranscribing && !item.isTranscriptionActive
+    }
+
+    private var canUseNoteButton: Bool {
+        item.canStartNoteGeneration && !isGeneratingNote
+    }
+
+    @ViewBuilder
+    private var actionArea: some View {
+        if let transfer = item.localNetworkReceiveTransferProgress,
+           transfer.isVisibleInActionArea {
+            StudyRecordingTransferProgressView(transfer: transfer)
+        } else {
             HStack(spacing: 8) {
                 MacStudyCardIconButton(
                     systemImage: "play.fill",
@@ -1303,26 +1332,7 @@ private struct MacStudyRecordingCard: View {
                     action: onImportToChat
                 )
             }
-            .frame(width: 150, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .macLiquidGlassCard(cornerRadius: 18, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.04, shadowRadius: 8, shadowY: 4)
-        .onTapGesture {
-            if !isTitleEditing {
-                onOpenDetail()
-            }
-        }
-    }
-
-    private var canUseTranscriptionButton: Bool {
-        item.hasAudio && !isTranscribing && !item.isTranscriptionActive
-    }
-
-    private var canUseNoteButton: Bool {
-        item.canStartNoteGeneration && !isGeneratingNote
     }
 
     private var transcriptionHelpText: String {

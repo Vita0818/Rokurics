@@ -8,11 +8,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    @ObservedObject var secureReceiverService: SecureReceiverService
+
     var body: some View {
-        MacRootView()
+        MacRootView(secureReceiverService: secureReceiverService)
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(secureReceiverService: SecureReceiverService())
 }

@@ -31,6 +31,43 @@ struct SecureMacConnectionSnapshot {
     }
 }
 
+enum PairedCredentialState: String, Codable, Equatable {
+    case none
+    case paired
+    case invalid
+    case revoked
+    case fingerprintMismatch
+}
+
+enum UserConnectionIntent: String, Codable, Equatable {
+    case wantsConnected
+    case disconnectedByUser
+
+    init(from decoder: Decoder) throws {
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        if rawValue == "doesNotWantConnection" {
+            self = .disconnectedByUser
+        } else {
+            self = UserConnectionIntent(rawValue: rawValue) ?? .wantsConnected
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static func storedValue(_ rawValue: String?) -> UserConnectionIntent? {
+        guard let rawValue, !rawValue.isEmpty else {
+            return nil
+        }
+        if rawValue == "doesNotWantConnection" {
+            return .disconnectedByUser
+        }
+        return UserConnectionIntent(rawValue: rawValue)
+    }
+}
+
 enum SecureMacConnectionSettings {
     static let macHostKey = "rokurics.secure.macHost"
     static let macPortKey = "rokurics.secure.macPort"
@@ -43,6 +80,7 @@ enum SecureMacConnectionSettings {
     static let deviceIDKey = "rokurics.secure.deviceID"
     static let sharedSecretKey = "rokurics.secure.sharedSecret"
     static let pairedAtKey = "rokurics.secure.pairedAt"
+    static let userConnectionIntentKey = "rokurics.secure.userConnectionIntent"
     static let keychainService = "com.Vita0818.Rokurics.secure-mac"
     static let defaultPort = 8787
 
@@ -134,6 +172,7 @@ private struct SecureMacConnectionStoreState: Equatable {
     var deviceID = ""
     var sharedSecret = ""
     var pairedAt = ""
+    var userConnectionIntent: UserConnectionIntent = .disconnectedByUser
     var storageError: String?
 }
 
@@ -171,6 +210,7 @@ final class SecureMacConnectionStore: ObservableObject {
     var deviceID: String { state.deviceID }
     var sharedSecret: String { state.sharedSecret }
     var pairedAt: String { state.pairedAt }
+    var userConnectionIntent: UserConnectionIntent { state.userConnectionIntent }
     var storageError: String? { state.storageError }
 
     private let userDefaults: UserDefaults
@@ -208,6 +248,14 @@ final class SecureMacConnectionStore: ObservableObject {
         snapshot.isPaired
     }
 
+    var pairedCredentialState: PairedCredentialState {
+        snapshot.isPaired ? .paired : .none
+    }
+
+    var shouldAttemptConnection: Bool {
+        snapshot.isPaired && state.userConnectionIntent == .wantsConnected
+    }
+
     func refreshFromStorage() {
         let storedHost = userDefaults.string(forKey: SecureMacConnectionSettings.macHostKey) ?? ""
         let storedPortText = loadPortText()
@@ -223,6 +271,9 @@ final class SecureMacConnectionStore: ObservableObject {
         var loadedSharedSecret = ""
         var loadedFingerprint = defaultsFingerprint
         var loadedStorageError: String?
+        let storedIntent = UserConnectionIntent.storedValue(
+            userDefaults.string(forKey: SecureMacConnectionSettings.userConnectionIntentKey)
+        )
 
         do {
             loadedDeviceID = try keychainStore.load(account: SecureMacConnectionSettings.deviceIDKey) ?? ""
@@ -232,6 +283,13 @@ final class SecureMacConnectionStore: ObservableObject {
         } catch {
             loadedStorageError = error.localizedDescription
         }
+        let storedPort = Int(Self.sanitizedPortText(storedPortText)) ?? 0
+        let hasStoredPairing = !normalizedHost(storedHost).isEmpty
+            && storedPort > 0
+            && !SecureUploadUtilities.normalizedCertificateFingerprint(loadedFingerprint).isEmpty
+            && !loadedDeviceID.isEmpty
+            && !loadedSharedSecret.isEmpty
+        let resolvedIntent = storedIntent ?? (hasStoredPairing ? .wantsConnected : .disconnectedByUser)
 
         applyState(SecureMacConnectionStoreState(
             macHost: normalizedHost(storedHost),
@@ -242,6 +300,7 @@ final class SecureMacConnectionStore: ObservableObject {
             deviceID: loadedDeviceID,
             sharedSecret: loadedSharedSecret,
             pairedAt: storedPairedAt,
+            userConnectionIntent: resolvedIntent,
             storageError: loadedStorageError
         ))
         SecureMacConnectionSettings.clearPrototypeSharedSecretFromDefaults(userDefaults: userDefaults)
@@ -278,6 +337,7 @@ final class SecureMacConnectionStore: ObservableObject {
             deviceID: result.deviceID,
             sharedSecret: result.sharedSecretBase64URL,
             pairedAt: result.pairedAt,
+            userConnectionIntent: .wantsConnected,
             storageError: nil
         ))
         persistConnectionFields()
@@ -312,7 +372,8 @@ final class SecureMacConnectionStore: ObservableObject {
             SecureMacConnectionSettings.macModelKey,
             SecureMacConnectionSettings.legacyMacDisplayNameKey,
             SecureMacConnectionSettings.legacyMacDeviceModelKey,
-            SecureMacConnectionSettings.pairedAtKey
+            SecureMacConnectionSettings.pairedAtKey,
+            SecureMacConnectionSettings.userConnectionIntentKey
         ].forEach(userDefaults.removeObject)
 
         applyState(SecureMacConnectionStoreState(storageError: firstError?.localizedDescription))
@@ -322,6 +383,14 @@ final class SecureMacConnectionStore: ObservableObject {
         if let firstError {
             throw firstError
         }
+    }
+
+    func setUserConnectionIntent(_ intent: UserConnectionIntent) {
+        var nextState = state
+        nextState.userConnectionIntent = intent
+        applyState(nextState)
+        persistConnectionFields()
+        NotificationCenter.default.post(name: .secureMacPairingDidChange, object: nil)
     }
 
     func applyPairingInfo(_ pairingInfo: RokuricsPairingInfo) {
@@ -362,6 +431,7 @@ final class SecureMacConnectionStore: ObservableObject {
         userDefaults.set(state.macName, forKey: SecureMacConnectionSettings.macNameKey)
         userDefaults.set(state.macModel, forKey: SecureMacConnectionSettings.macModelKey)
         userDefaults.set(state.pairedAt, forKey: SecureMacConnectionSettings.pairedAtKey)
+        userDefaults.set(state.userConnectionIntent.rawValue, forKey: SecureMacConnectionSettings.userConnectionIntentKey)
     }
 
     private func loadPortText() -> String {

@@ -478,8 +478,13 @@ struct StudyLibrarySyncTests {
         let encoded = String(data: try JSONEncoder().encode(inventory), encoding: .utf8) ?? ""
 
         #expect(response.ok)
+        #expect(inventory.schemaVersion == LocalNetworkSyncInventory.appSchemaVersion)
+        #expect(inventory.sourcePlatform == .Mac)
+        #expect(inventory.sourceDeviceID == inventory.device.deviceID)
         #expect(inventory.recordings.first { $0.recordingID == "inventory-recording" }?.receiveStatus == "completed")
+        #expect(inventory.artifacts.contains { $0.kind == .receiveJSON })
         #expect(inventory.artifacts.contains { $0.kind == .transcriptMarkdown && $0.logicalPathToken == transcriptRelativePath })
+        #expect(inventory.objects.contains { $0.objectKind == .transcriptMarkdown && $0.fileName == "transcript.md" && $0.size != nil && $0.updatedAt >= Date(timeIntervalSince1970: 0) })
         #expect(!encoded.contains(appRootURL.path))
         #expect(!encoded.lowercased().contains("sharedsecret"))
     }
@@ -536,6 +541,117 @@ struct StudyLibrarySyncTests {
         #expect(traversal.error == "invalid_artifact_id")
         #expect(!unknown.ok)
         #expect(unknown.error == "artifact_not_found")
+    }
+
+    @MainActor
+    @Test func localNetworkSyncArtifactPutStoresApprovedSmallArtifactAndRejectsUnsafePaths() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let transcriptPath = "transcripts/incoming-recording/transcript.md"
+        let transcriptData = Data("incoming transcript".utf8)
+        let transcriptArtifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: "incoming-recording",
+            logicalPathToken: transcriptPath
+        )
+        let request = LocalNetworkSyncArtifactPutRequest(
+            artifactID: transcriptArtifactID,
+            kind: .transcriptMarkdown,
+            ownerID: "incoming-recording",
+            checksum: MacSecurityUtilities.sha256Hex(transcriptData),
+            size: Int64(transcriptData.count),
+            updatedAt: Date(timeIntervalSince1970: 2_500),
+            logicalPathToken: transcriptPath,
+            dataBase64: transcriptData.base64EncodedString()
+        )
+
+        let response = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(request)
+        )
+        let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+        let repeated = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(request)
+        )
+        let traversalPath = "transcripts/../secret.md"
+        let traversal = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: traversalPath),
+                kind: .transcriptMarkdown,
+                ownerID: "incoming-recording",
+                checksum: MacSecurityUtilities.sha256Hex(transcriptData),
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: traversalPath,
+                dataBase64: transcriptData.base64EncodedString()
+            ))
+        )
+        let absolutePath = "/tmp/rokurics-escape/transcript.md"
+        let absolute = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: absolutePath),
+                kind: .transcriptMarkdown,
+                ownerID: "incoming-recording",
+                checksum: MacSecurityUtilities.sha256Hex(transcriptData),
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: absolutePath,
+                dataBase64: transcriptData.base64EncodedString()
+            ))
+        )
+        let wrongKindPath = "notes/incoming-recording/transcript.md"
+        let wrongKind = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: wrongKindPath),
+                kind: .transcriptMarkdown,
+                ownerID: "incoming-recording",
+                checksum: MacSecurityUtilities.sha256Hex(transcriptData),
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: wrongKindPath,
+                dataBase64: transcriptData.base64EncodedString()
+            ))
+        )
+        let audioPath = "audio/inbox/incoming-recording/audio.m4a"
+        let audio = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: LocalNetworkSyncArtifactID.make(kind: .audio, ownerID: "incoming-recording", logicalPathToken: audioPath),
+                kind: .audio,
+                ownerID: "incoming-recording",
+                checksum: MacSecurityUtilities.sha256Hex(transcriptData),
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: audioPath,
+                dataBase64: transcriptData.base64EncodedString()
+            ))
+        )
+
+        #expect(response.ok)
+        #expect(response.disposition == "acceptedNew")
+        #expect(response.checksum == MacSecurityUtilities.sha256Hex(transcriptData))
+        #expect(String(data: try Data(contentsOf: storedURL), encoding: .utf8) == "incoming transcript")
+        #expect(repeated.ok)
+        #expect(repeated.disposition == "acceptedExisting")
+        #expect(!traversal.ok)
+        #expect(traversal.error == "artifact_path_traversal")
+        #expect(!absolute.ok)
+        #expect(absolute.error == "artifact_absolute_path")
+        #expect(!wrongKind.ok)
+        #expect(wrongKind.error == "unsupported_artifact_kind")
+        #expect(!audio.ok)
+        #expect(audio.error == "unsupported_artifact_kind")
     }
 
     @MainActor

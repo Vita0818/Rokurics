@@ -179,6 +179,30 @@ struct RokuricsMacTests {
         #expect(action.intent == .startTranscription)
     }
 
+    @Test func missingIncomingAudioUsesTransferProgressModelInActionArea() {
+        let item = MacRecordingInboxItem(
+            id: "incoming-audio-progress",
+            title: "正在接收",
+            receivedAt: Date(timeIntervalSince1970: 10),
+            duration: 5,
+            fileSize: 2048,
+            sourceDeviceName: "iPhone",
+            transcriptionStatus: "notStarted",
+            noteStatus: "notGenerated",
+            receiveStatus: "metadataReceived",
+            hasAudio: false,
+            transcriptRelativePath: nil,
+            transcriptMarkdownRelativePath: nil,
+            transcriptionError: nil
+        )
+        let completed = makeInboxItem(transcriptionStatus: "notStarted", transcriptionError: nil, hasAudio: true)
+
+        #expect(item.localNetworkReceiveTransferProgress?.state == .pending)
+        #expect(item.localNetworkReceiveTransferProgress?.isVisibleInActionArea == true)
+        #expect(item.localNetworkReceiveTransferProgress?.totalBytes == 2048)
+        #expect(completed.localNetworkReceiveTransferProgress == nil)
+    }
+
     @Test func noteStoreWritesNoteMarkdownToDatedRecordingDirectory() throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
@@ -2423,6 +2447,7 @@ struct RokuricsMacTests {
         let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
         let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
         let readySignal = ListenerReadySignal()
+        let diagnosticRecorder = SecureConnectionDiagnosticRecorder()
 
         let server = SecureLocalHTTPSServer(
             port: 0,
@@ -2443,7 +2468,8 @@ struct RokuricsMacTests {
             },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
-            onRecordingAccepted: { _ in }
+            onRecordingAccepted: { _ in },
+            onConnectionDiagnostic: { diagnosticRecorder.record($0) }
         )
         defer {
             server.stop()
@@ -2552,59 +2578,58 @@ struct RokuricsMacTests {
         let pairedDevice = try #require(pairedDeviceStore.device(for: deviceID))
         #expect(pairedDevice.sharedSecretBase64URL == sharedSecret)
 
-        let heartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
-            deviceID: deviceID,
-            deviceName: "Deviceless iPhone",
-            platform: .iPhone,
-            appInstanceID: nil,
-            sequenceNumber: 42,
-            sentAt: Date(),
-            lastKnownPeerStatusRevision: nil
-        ))
-        let heartbeatHeaders = try signedJSONHeaders(
-            device: pairedDevice,
-            path: "/connection/heartbeat",
-            body: heartbeatBody,
-            nonce: "real-listener-paired-heartbeat"
-        )
-        let heartbeatRawResponse = try await client.postData(
-            port: activePort,
-            path: "/connection/heartbeat",
-            headers: heartbeatHeaders,
-            body: heartbeatBody
-        )
-        #expect(heartbeatRawResponse.statusCode == 200)
-        let heartbeatResponse = try Self.connectionJSONDecoder.decode(ConnectionHeartbeatResponse.self, from: heartbeatRawResponse.body)
-        #expect(heartbeatResponse.ok)
-        #expect(heartbeatResponse.receivedSequenceNumber == 42)
-        #expect(heartbeatResponse.status?.presenceState == .online)
-        #expect(pairedDeviceStore.device(for: deviceID)?.lastSeenAt != nil)
-        let firstLastSeen = try #require(statusStore.status(for: deviceID)?.lastSeenAt)
-
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        let secondHeartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
-            deviceID: deviceID,
-            deviceName: "Deviceless iPhone",
-            platform: .iPhone,
-            appInstanceID: nil,
-            sequenceNumber: 43,
-            sentAt: Date(),
-            lastKnownPeerStatusRevision: heartbeatResponse.connectionStatusRevision
-        ))
-        let secondHeartbeatResponse = try await client.postData(
-            port: activePort,
-            path: "/connection/heartbeat",
-            headers: try signedJSONHeaders(
-                device: pairedDevice,
+        var lastKnownPeerStatusRevision: Int?
+        var heartbeatLastSeenDates: [Date] = []
+        for sequence in UInt64(1)...UInt64(3) {
+            let heartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+                deviceID: deviceID,
+                deviceName: "Deviceless iPhone",
+                platform: .iPhone,
+                appInstanceID: nil,
+                sequenceNumber: sequence,
+                sentAt: Date(),
+                lastKnownPeerStatusRevision: lastKnownPeerStatusRevision
+            ))
+            let heartbeatRawResponse = try await client.postData(
+                port: activePort,
                 path: "/connection/heartbeat",
-                body: secondHeartbeatBody,
-                nonce: "real-listener-paired-heartbeat-2"
-            ),
-            body: secondHeartbeatBody
-        )
-        #expect(secondHeartbeatResponse.statusCode == 200)
-        let secondLastSeen = try #require(statusStore.status(for: deviceID)?.lastSeenAt)
-        #expect(secondLastSeen > firstLastSeen)
+                headers: try signedJSONHeaders(
+                    device: pairedDevice,
+                    path: "/connection/heartbeat",
+                    body: heartbeatBody,
+                    nonce: "real-listener-paired-heartbeat-\(sequence)"
+                ),
+                body: heartbeatBody
+            )
+            #expect(heartbeatRawResponse.statusCode == 200)
+            let heartbeatResponse = try Self.connectionJSONDecoder.decode(ConnectionHeartbeatResponse.self, from: heartbeatRawResponse.body)
+            #expect(heartbeatResponse.ok)
+            #expect(heartbeatResponse.receivedSequenceNumber == sequence)
+            #expect(heartbeatResponse.status?.presenceState == .online)
+            #expect(pairedDeviceStore.device(for: deviceID)?.lastSeenAt != nil)
+            let statusLastSeen = try #require(statusStore.status(for: deviceID)?.lastSeenAt)
+            if let previousLastSeen = heartbeatLastSeenDates.last {
+                #expect(statusLastSeen > previousLastSeen)
+            }
+            heartbeatLastSeenDates.append(statusLastSeen)
+            lastKnownPeerStatusRevision = heartbeatResponse.connectionStatusRevision
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let thirdLastSeen = try #require(heartbeatLastSeenDates.last)
+        let heartbeatEvents = diagnosticRecorder.snapshot()
+            .filter { $0.phase == "heartbeat_success" }
+        let receivedSequences = heartbeatEvents.compactMap(\.heartbeatSequence)
+        #expect(receivedSequences == [1, 2, 3])
+        let finalHeartbeatEvent = try #require(heartbeatEvents.last)
+        #expect(finalHeartbeatEvent.routePath == "/connection/heartbeat")
+        #expect(finalHeartbeatEvent.requestDeviceIDPrefix == String(deviceID.prefix(12)))
+        #expect(finalHeartbeatEvent.verifierSucceeded == true)
+        #expect(finalHeartbeatEvent.verifierFailed == false)
+        #expect(finalHeartbeatEvent.markDeviceSeenCalled == true)
+        #expect(finalHeartbeatEvent.connectionStatusStoreUpdated == true)
+        #expect(finalHeartbeatEvent.pairedDeviceLastSeenBefore == heartbeatLastSeenDates[1])
+        #expect(finalHeartbeatEvent.pairedDeviceLastSeenAfter == thirdLastSeen)
+        #expect(finalHeartbeatEvent.uiObservedLastSeenAt == thirdLastSeen)
 
         let probeBody = try encodedConnectionProbeRequest(
             sequenceNumber: 99,
@@ -2630,8 +2655,272 @@ struct RokuricsMacTests {
         #expect(probeStatus.lastSignedRequestSucceededAt != nil)
         #expect(probeStatus.lastSeenAt != nil)
 
-        let disconnectedStatus = try #require(statusStore.status(for: deviceID, now: secondLastSeen.addingTimeInterval(11)))
+        let disconnectedStatus = try #require(statusStore.status(for: deviceID, now: thirdLastSeen.addingTimeInterval(11)))
         #expect(disconnectedStatus.presenceState == .disconnected)
+
+        let resumeHeartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: deviceID,
+            deviceName: "Deviceless iPhone",
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 4,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: lastKnownPeerStatusRevision
+        ))
+        let resumeHeartbeatRawResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: pairedDevice,
+                path: "/connection/heartbeat",
+                body: resumeHeartbeatBody,
+                nonce: "real-listener-resume-heartbeat"
+            ),
+            body: resumeHeartbeatBody
+        )
+        let resumeHeartbeatResponse = try Self.connectionJSONDecoder.decode(ConnectionHeartbeatResponse.self, from: resumeHeartbeatRawResponse.body)
+        let resumedStatus = try #require(statusStore.status(for: deviceID))
+        #expect(resumeHeartbeatRawResponse.statusCode == 200)
+        #expect(resumeHeartbeatResponse.receivedSequenceNumber == 4)
+        #expect(resumedStatus.presenceState == .online)
+        #expect(resumedStatus.missedHeartbeatCount == 0)
+    }
+
+    @MainActor
+    @Test func realHTTPSLocalNetworkSyncInventoryArtifactAndMetadataSmoke() async throws {
+        let fileManager = FileManager.default
+        let rootURL = fileManager.temporaryDirectory
+            .appendingPathComponent("RokuricsRealSyncListener-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? fileManager.removeItem(at: rootURL)
+        }
+
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: rootURL.appendingPathComponent("Security", isDirectory: true),
+            tlsKeyTagNamespace: "real-sync-listener-\(UUID().uuidString)"
+        )
+        identityManager.loadOrCreateIdentity()
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let recordingFileStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let studyLibraryStore = StudyLibraryStore(
+            rootURL: recordingFileStore.libraryRootURL,
+            recordingFileStore: recordingFileStore,
+            listenForInboxChanges: false
+        )
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let readySignal = ListenerReadySignal()
+
+        let transcriptPath = "transcripts/real-sync-recording/transcript.md"
+        let transcriptURL = recordingFileStore.libraryRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+        try fileManager.createDirectory(at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("real sync transcript".utf8).write(to: transcriptURL)
+        let macItem = StudyItemMetadata(
+            recordingID: "real-sync-recording",
+            title: "Mac transcript",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 4,
+            transcriptMarkdownRelativePath: transcriptPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted",
+            modifiedByDeviceID: "mac-seed"
+        )
+        _ = try studyLibraryStore.applySyncManifest(
+            StudyLibrarySyncManifest.make(
+                deviceID: "mac-seed",
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                items: [macItem],
+                folders: []
+            ),
+            localDeviceID: "mac-seed"
+        )
+
+        let server = SecureLocalHTTPSServer(
+            port: 0,
+            identityManager: identityManager,
+            pairingManager: pairingManager,
+            requestVerifier: requestVerifier,
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: nil,
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            onReady: {
+                readySignal.markReady()
+            },
+            onFailed: { message in
+                readySignal.markFailed(message)
+            },
+            onPairingChanged: {},
+            onUploadAccepted: { _ in },
+            onRecordingAccepted: { _ in }
+        )
+        defer {
+            server.stop()
+        }
+
+        try server.start()
+        try await waitForListenerReady(readySignal)
+        let activePort = try #require(server.activePort)
+        let client = RealListenerPinnedHTTPSClient(expectedFingerprint: identityManager.status.certificateFingerprint)
+        defer {
+            client.invalidate()
+        }
+
+        let syncEncoder = JSONEncoder()
+        syncEncoder.dateEncodingStrategy = .iso8601
+        syncEncoder.outputFormatting = [.sortedKeys]
+        let unpairedDevice = PairedDevice(
+            id: "iphone-real-sync-unpaired",
+            deviceName: "Unpaired iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date(timeIntervalSince1970: 1_000),
+            lastSeenAt: nil
+        )
+        let inventoryBody = try syncEncoder.encode(LocalNetworkSyncInventoryRequest(deviceID: unpairedDevice.id, generatedAt: Date(timeIntervalSince1970: 3_000), localInventoryHash: nil))
+        let unpairedSync = try await client.postJSON(
+            port: activePort,
+            path: "/sync/inventory",
+            headers: try signedJSONHeaders(device: unpairedDevice, path: "/sync/inventory", body: inventoryBody, nonce: "real-sync-unpaired"),
+            body: inventoryBody
+        )
+        #expect(unpairedSync.statusCode == 400)
+        #expect(unpairedSync.json["error"] as? String == "unknown_device")
+
+        let pairedDevice = PairedDevice(
+            id: "iphone-real-sync",
+            deviceName: "Real Sync iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date(timeIntervalSince1970: 3_010),
+            lastSeenAt: nil
+        )
+        pairedDeviceStore.upsert(pairedDevice)
+
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 1, clientPayload: "sync probe")
+        let probeResponse = try await client.postJSON(
+            port: activePort,
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/probe", body: probeBody, nonce: "real-sync-probe"),
+            body: probeBody
+        )
+        #expect(probeResponse.statusCode == 200)
+
+        let pairedInventoryBody = try syncEncoder.encode(LocalNetworkSyncInventoryRequest(deviceID: pairedDevice.id, generatedAt: Date(timeIntervalSince1970: 3_020), localInventoryHash: nil))
+        var badHeaders = try signedJSONHeaders(device: pairedDevice, path: "/sync/inventory", body: pairedInventoryBody, nonce: "real-sync-bad-hmac")
+        badHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badHMACResponse = try await client.postJSON(
+            port: activePort,
+            path: "/sync/inventory",
+            headers: badHeaders,
+            body: pairedInventoryBody
+        )
+        #expect(badHMACResponse.statusCode == 400)
+        #expect(badHMACResponse.json["error"] as? String == "signature_mismatch")
+
+        let inventoryResponseRaw = try await client.postData(
+            port: activePort,
+            path: "/sync/inventory",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/sync/inventory", body: pairedInventoryBody, nonce: "real-sync-inventory"),
+            body: pairedInventoryBody
+        )
+        #expect(inventoryResponseRaw.statusCode == 200)
+        let inventoryResponse = try Self.connectionJSONDecoder.decode(LocalNetworkSyncInventoryResponse.self, from: inventoryResponseRaw.body)
+        let inventory = try #require(inventoryResponse.inventory)
+        let transcriptArtifact = try #require(inventory.artifacts.first { $0.kind == .transcriptMarkdown })
+        #expect(inventory.schemaVersion == LocalNetworkSyncInventory.appSchemaVersion)
+        #expect(inventory.sourcePlatform == .Mac)
+
+        let artifactBody = try syncEncoder.encode(LocalNetworkSyncArtifactRequest(artifactID: transcriptArtifact.artifactID))
+        let artifactResponseRaw = try await client.postData(
+            port: activePort,
+            path: "/sync/artifact-request",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/sync/artifact-request", body: artifactBody, nonce: "real-sync-artifact"),
+            body: artifactBody
+        )
+        #expect(artifactResponseRaw.statusCode == 200)
+        let artifactResponse = try Self.connectionJSONDecoder.decode(LocalNetworkSyncArtifactResponse.self, from: artifactResponseRaw.body)
+        #expect(artifactResponse.ok)
+        #expect(artifactResponse.checksum == MacSecurityUtilities.sha256Hex(Data("real sync transcript".utf8)))
+        #expect(String(data: Data(base64Encoded: try #require(artifactResponse.dataBase64)) ?? Data(), encoding: .utf8) == "real sync transcript")
+
+        let incomingArtifactPath = "transcripts/real-sync-incoming/transcript.md"
+        let incomingArtifactData = Data("incoming real sync transcript".utf8)
+        let incomingArtifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: "real-sync-incoming",
+            logicalPathToken: incomingArtifactPath
+        )
+        let artifactPutBody = try syncEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+            artifactID: incomingArtifactID,
+            kind: .transcriptMarkdown,
+            ownerID: "real-sync-incoming",
+            checksum: MacSecurityUtilities.sha256Hex(incomingArtifactData),
+            size: Int64(incomingArtifactData.count),
+            updatedAt: Date(timeIntervalSince1970: 3_030),
+            logicalPathToken: incomingArtifactPath,
+            dataBase64: incomingArtifactData.base64EncodedString()
+        ))
+        let artifactPutResponseRaw = try await client.postData(
+            port: activePort,
+            path: "/sync/artifact-put",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/sync/artifact-put", body: artifactPutBody, nonce: "real-sync-artifact-put"),
+            body: artifactPutBody
+        )
+        #expect(artifactPutResponseRaw.statusCode == 200)
+        let artifactPutResponse = try Self.connectionJSONDecoder.decode(LocalNetworkSyncArtifactPutResponse.self, from: artifactPutResponseRaw.body)
+        let storedIncomingArtifactURL = recordingFileStore.libraryRootURL.appendingPathComponent(incomingArtifactPath, isDirectory: false)
+        #expect(artifactPutResponse.ok)
+        #expect(artifactPutResponse.disposition == "acceptedNew")
+        #expect(String(data: try Data(contentsOf: storedIncomingArtifactURL), encoding: .utf8) == "incoming real sync transcript")
+
+        let incomingItem = StudyItemMetadata(
+            recordingID: "real-sync-incoming",
+            title: "Incoming metadata",
+            createdAt: Date(timeIntervalSince1970: 4_000),
+            duration: 7,
+            updatedAt: Date(timeIntervalSince1970: 4_010),
+            modifiedByDeviceID: pairedDevice.id
+        )
+        let applyBody = try syncEncoder.encode(StudyLibrarySyncManifestRequest(
+            manifest: StudyLibrarySyncManifest.make(
+                deviceID: pairedDevice.id,
+                generatedAt: Date(timeIntervalSince1970: 4_020),
+                items: [incomingItem],
+                folders: []
+            )
+        ))
+        let applyResponseRaw = try await client.postData(
+            port: activePort,
+            path: "/sync/apply-metadata",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/sync/apply-metadata", body: applyBody, nonce: "real-sync-apply"),
+            body: applyBody
+        )
+        #expect(applyResponseRaw.statusCode == 200)
+        let applyResponse = try Self.connectionJSONDecoder.decode(StudyLibrarySyncManifestResponse.self, from: applyResponseRaw.body)
+        #expect(applyResponse.ok)
+        #expect(studyLibraryStore.item(recordingID: "real-sync-incoming")?.title == "Incoming metadata")
+
+        let heartbeatBody = try encodedHeartbeatRequest(ConnectionHeartbeatRequest(
+            deviceID: pairedDevice.id,
+            deviceName: pairedDevice.deviceName,
+            platform: .iPhone,
+            appInstanceID: nil,
+            sequenceNumber: 7,
+            sentAt: Date(),
+            lastKnownPeerStatusRevision: nil
+        ))
+        let heartbeatResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: heartbeatBody, nonce: "real-sync-heartbeat"),
+            body: heartbeatBody
+        )
+        #expect(heartbeatResponse.statusCode == 200)
+        #expect(statusStore.status(for: pairedDevice.id)?.presenceState == .online)
     }
 
     @MainActor
@@ -2902,6 +3191,79 @@ struct RokuricsMacTests {
         #expect(!diagnosticsText.lowercased().contains("sharedsecret"))
         #expect(!diagnosticsText.lowercased().contains("privatekey"))
         #expect(!diagnosticsText.lowercased().contains("hmac"))
+    }
+
+    @MainActor
+    @Test func realListenerUnpairDeletesCredentialsRejectsOldHMACAndAllowsFreshPairing() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        harness.service.beginPairing()
+        let payload = try await waitForPairingPayload(harness.service)
+        let client = RealListenerPinnedHTTPSClient(expectedFingerprint: payload.fingerprint)
+        defer {
+            client.invalidate()
+        }
+
+        let pairResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/pair",
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(withJSONObject: [
+                "pairingCode": payload.pairingCode,
+                "deviceName": "Unpair Test iPhone",
+                "deviceType": "iPhone"
+            ], options: [.sortedKeys])
+        )
+        #expect(pairResponse.statusCode == 200)
+        let deviceID = try #require(pairResponse.json["deviceID"] as? String)
+        let pairedDevice = try #require(harness.pairedDeviceStore.device(for: deviceID))
+
+        let heartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 1))
+        let heartbeatResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: heartbeatBody, nonce: "unpair-before-heartbeat"),
+            body: heartbeatBody
+        )
+        #expect(heartbeatResponse.statusCode == 200)
+
+        let unpairBody = try JSONSerialization.data(withJSONObject: [
+            "deviceID": pairedDevice.id,
+            "reason": "test_disconnect"
+        ], options: [.sortedKeys])
+        let unpairResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/device/unpair",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/device/unpair", body: unpairBody, nonce: "unpair-route"),
+            body: unpairBody
+        )
+        #expect(unpairResponse.statusCode == 200)
+        #expect(unpairResponse.json["ok"] as? Bool == true)
+        #expect(harness.pairedDeviceStore.deviceCount == 0)
+        #expect(harness.statusStore.status(for: pairedDevice.id) == nil)
+
+        let oldHeartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 2))
+        let oldHeartbeatResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: oldHeartbeatBody, nonce: "unpair-old-heartbeat"),
+            body: oldHeartbeatBody
+        )
+        #expect(oldHeartbeatResponse.statusCode == 400)
+        #expect(oldHeartbeatResponse.json["error"] as? String == "unknown_device")
+
+        harness.service.beginPairing()
+        let newPayload = try await waitForPairingPayload(harness.service)
+        #expect(newPayload.pairingCode.count == 6)
+        #expect(newPayload.pairingCode != payload.pairingCode)
     }
 
     @MainActor
@@ -3179,6 +3541,122 @@ struct RokuricsMacTests {
         #expect(audioConflictResponse.statusCode == 409)
         #expect((try routeResponseJSON(audioConflictResponse))["error"] as? String == "recording_audio_conflict")
         #expect(String(data: audioConflictResponse.bodyData, encoding: .utf8)?.contains(pairedDevice.sharedSecretBase64URL) == false)
+    }
+
+    @MainActor
+    @Test func pairedHeartbeatRouteWritebackUpdatesStoresAndMacStatusSource() async throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let securityRootURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityRootURL)
+        let pairedDevice = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(pairedDevice)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: statusStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: service.requestVerifier,
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-presence-test"
+        )
+        let initialRevision = service.presenceObservationRevision
+        var lastSeenDates: [Date] = []
+
+        for sequence in UInt64(1)...UInt64(3) {
+            let now = Date(timeIntervalSince1970: 5_000 + TimeInterval(sequence))
+            let request = ConnectionHeartbeatRequest(
+                deviceID: pairedDevice.id,
+                deviceName: pairedDevice.deviceName,
+                platform: .iPhone,
+                appInstanceID: "iphone-presence-test",
+                sequenceNumber: sequence,
+                sentAt: now,
+                lastKnownPeerStatusRevision: statusStore.status(for: pairedDevice.id)?.connectionStatusRevision
+            )
+            let body = try encodedHeartbeatRequest(request)
+            let response = handler.heartbeatResponse(
+                method: "POST",
+                path: "/connection/heartbeat",
+                headers: try signedJSONHeaders(
+                    device: pairedDevice,
+                    path: "/connection/heartbeat",
+                    body: body,
+                    nonce: "writeback-heartbeat-\(sequence)",
+                    now: now
+                ),
+                body: body,
+                now: now
+            )
+            let decoded = try decodeHeartbeatResponse(response)
+
+            #expect(response.statusCode == 200)
+            #expect(decoded.receivedSequenceNumber == sequence)
+            #expect(service.requestVerifier.lastTrace?.markDeviceSeenCalled == true)
+            #expect(service.requestVerifier.lastTrace?.verifierSucceeded == true)
+            let pairedLastSeen = try #require(pairedDeviceStore.device(for: pairedDevice.id)?.lastSeenAt)
+            let statusLastSeen = try #require(statusStore.status(for: pairedDevice.id)?.lastSeenAt)
+            let uiStatusLastSeen = try #require(service.connectionStatus(for: pairedDevice).lastSeenAt)
+            #expect(pairedLastSeen == now)
+            #expect(statusLastSeen == now)
+            #expect(uiStatusLastSeen == now)
+            lastSeenDates.append(statusLastSeen)
+            await Task.yield()
+        }
+
+        #expect(lastSeenDates == lastSeenDates.sorted())
+        #expect(lastSeenDates[1] > lastSeenDates[0])
+        #expect(lastSeenDates[2] > lastSeenDates[1])
+        #expect(pairedDeviceStore.devices.count == 1)
+        #expect(service.presenceObservationRevision > initialRevision)
+    }
+
+    @MainActor
+    @Test func unpairedAndBadHMACHeartbeatDoNotUpdatePresenceWriteback() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let pairedDevice = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(pairedDevice)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: RequestVerifier(pairedDeviceStore: pairedDeviceStore),
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-presence-test"
+        )
+        let unknownDevice = PairedDevice(
+            id: "unknown-iphone",
+            deviceName: "Unknown iPhone",
+            sharedSecretBase64URL: MacSecurityUtilities.randomBase64URLToken(),
+            pairedAt: Date(timeIntervalSince1970: 1),
+            lastSeenAt: nil
+        )
+        let unknownBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: unknownDevice, sequenceNumber: 1))
+        let unknownResponse = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: unknownDevice, path: "/connection/heartbeat", body: unknownBody, nonce: "unknown-heartbeat"),
+            body: unknownBody
+        )
+        #expect(unknownResponse.statusCode == 400)
+        #expect(pairedDeviceStore.device(for: pairedDevice.id)?.lastSeenAt == nil)
+        #expect(statusStore.latestStatus == nil)
+
+        let badBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 2))
+        var badHeaders = try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: badBody, nonce: "bad-hmac-heartbeat")
+        badHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badResponse = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: badHeaders,
+            body: badBody
+        )
+        #expect(badResponse.statusCode == 400)
+        #expect(pairedDeviceStore.device(for: pairedDevice.id)?.lastSeenAt == nil)
+        #expect(statusStore.latestStatus == nil)
     }
 
     @MainActor
@@ -3547,10 +4025,180 @@ struct RokuricsMacTests {
         let stale = try #require(store.status(for: device.id, now: Date(timeIntervalSince1970: 7)))
         let disconnected = try #require(store.status(for: device.id, now: Date(timeIntervalSince1970: 11)))
 
-        #expect(stale.presenceState == .stale)
+        #expect(stale.presenceState == .interrupted)
         #expect(stale.state == .offline)
         #expect(disconnected.presenceState == .disconnected)
         #expect(disconnected.state == .offline)
+    }
+
+    @MainActor
+    @Test func macPresenceEvaluationResumesWithoutFakingLastSeen() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: statusStore,
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+        let lastSeen = Date()
+        _ = statusStore.recordHeartbeatSuccess(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            sentAt: lastSeen,
+            receivedAt: lastSeen,
+            latencyMilliseconds: 1
+        )
+        _ = statusStore.markMonitoringSuspended(deviceID: device.id, displayName: device.deviceName)
+
+        service.appBecameActive()
+        let resumed = try #require(statusStore.status(for: device.id, now: lastSeen))
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(resumed.monitoringMode == .foregroundActive)
+        #expect(resumed.lastSeenAt == lastSeen)
+        #expect(phases.contains("appBecameActive"))
+        #expect(phases.contains("presenceEvaluatorResumed"))
+    }
+
+    @MainActor
+    @Test func macManualSyncDisabledPreservesPresenceAndStatusSource() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+        let lastSeen = Date()
+        _ = statusStore.recordHeartbeatSuccess(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            sentAt: lastSeen,
+            receivedAt: lastSeen,
+            latencyMilliseconds: 1
+        )
+
+        let manualStatus = service.prepareManualStudyLibrarySync(for: device)
+        let observedStatus = service.connectionStatus(for: device)
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(manualStatus.presenceState == .online)
+        #expect(observedStatus.presenceState == .online)
+        #expect(observedStatus.lastSeenAt == lastSeen)
+        #expect(observedStatus.lastSyncStatus == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(phases.contains("manualSyncTapped"))
+        #expect(phases.contains("syncFailedPresenceUnchanged"))
+    }
+
+    @MainActor
+    @Test func macManualDisconnectDeletesCredentialsAndReturnsToUnpaired() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: statusStore,
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+
+        service.disconnectPairedDevices()
+
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(pairedDeviceStore.deviceCount == 0)
+        #expect(pairedDeviceStore.device(for: device.id) == nil)
+        #expect(statusStore.status(for: device.id) == nil)
+        #expect(service.latestPairedDevice == nil)
+        #expect(phases.contains("disconnectTapped"))
+        #expect(phases.contains("localCredentialsDeleted"))
+        #expect(phases.contains("userConnectionIntentChanged"))
+    }
+
+    @MainActor
+    @Test func macStartPairingAfterDisconnectDoesNotReuseOldCredentials() async throws {
+        let harness = try makeSecureReceiverServiceHarness()
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+        let pairedDeviceStore = harness.pairedDeviceStore
+        var device = makeHeartbeatDevice()
+        device.userConnectionIntent = .disconnectedByUser
+        pairedDeviceStore.upsert(device)
+
+        harness.service.beginPairing()
+        let payload = try await waitForPairingPayload(harness.service)
+        let phases = Set(harness.diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(pairedDeviceStore.device(for: device.id) == nil)
+        #expect(harness.service.latestPairedDevice == nil)
+        #expect(payload.pairingCode.count == 6)
+        #expect(phases.contains("startPairingAfterDisconnect"))
+        #expect(phases.contains("pairing_code_issued"))
+    }
+
+    @MainActor
+    @Test func macPairedDeviceIntentPersistsAcrossStoreReload() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let store = PairedDeviceStore(rootURL: securityURL)
+        let device = makeHeartbeatDevice()
+        store.upsert(device)
+        store.setUserConnectionIntent(.disconnectedByUser, for: device.id)
+
+        let reloaded = PairedDeviceStore(rootURL: securityURL)
+        let stored = try #require(reloaded.device(for: device.id))
+
+        #expect(reloaded.deviceCount == 1)
+        #expect(stored.sharedSecretBase64URL == device.sharedSecretBase64URL)
+        #expect(stored.resolvedConnectionIntent == .disconnectedByUser)
+    }
+
+    @MainActor
+    @Test func macWindowClosePreservesCredentialsAndIntent() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+
+        service.recordWindowClosed()
+        let stored = try #require(pairedDeviceStore.device(for: device.id))
+
+        #expect(stored.sharedSecretBase64URL == device.sharedSecretBase64URL)
+        #expect(stored.resolvedConnectionIntent == .wantsConnected)
+        #expect(diagnosticsStore.loadEntries().contains { $0.phase == "windowClosed" })
     }
 
     @MainActor
@@ -4855,6 +5503,23 @@ private struct RealListenerHTTPSJSONResponse {
     let statusCode: Int
     let body: Data
     let json: [String: Any]
+}
+
+private final class SecureConnectionDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [SecureConnectionDiagnosticEvent] = []
+
+    func record(_ event: SecureConnectionDiagnosticEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [SecureConnectionDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
 }
 
 private final class ListenerReadySignal: @unchecked Sendable {

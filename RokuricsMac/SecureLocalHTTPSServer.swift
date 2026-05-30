@@ -31,8 +31,21 @@ struct SecureConnectionDiagnosticEvent: Sendable {
     let phase: String
     let listenerState: String?
     let activePort: Int?
+    let routeReceivedAt: Date?
+    let routePath: String?
+    let heartbeatSequence: UInt64?
+    let requestDeviceIDPrefix: String?
+    let verifierStartedAt: Date?
+    let verifierSucceeded: Bool?
+    let verifierFailed: Bool?
+    let markDeviceSeenCalled: Bool?
+    let pairedDeviceLastSeenBefore: Date?
+    let pairedDeviceLastSeenAfter: Date?
+    let connectionStatusStoreUpdated: Bool?
+    let uiObservedLastSeenAt: Date?
     let errorCode: String?
     let errorMessage: String?
+    let errorCategory: String?
 }
 
 @MainActor
@@ -741,6 +754,19 @@ final class SecureLocalHTTPSServer {
         let processingStatus: String
     }
 
+    private struct DeviceUnpairRequest: Decodable {
+        let deviceID: String
+        let reason: String?
+        let requestedAt: Date?
+    }
+
+    private struct DeviceUnpairResponse: Encodable {
+        let ok: Bool
+        let disposition: String
+        let deviceID: String
+        let error: String?
+    }
+
     private let port: Int
     private let identityManager: MacIdentityManager
     private let pairingManager: PairingManager
@@ -903,16 +929,42 @@ final class SecureLocalHTTPSServer {
         phase: String,
         listenerState: String? = nil,
         activePort: Int? = nil,
+        routeReceivedAt: Date? = nil,
+        routePath: String? = nil,
+        heartbeatSequence: UInt64? = nil,
+        requestDeviceIDPrefix: String? = nil,
+        verifierStartedAt: Date? = nil,
+        verifierSucceeded: Bool? = nil,
+        verifierFailed: Bool? = nil,
+        markDeviceSeenCalled: Bool? = nil,
+        pairedDeviceLastSeenBefore: Date? = nil,
+        pairedDeviceLastSeenAfter: Date? = nil,
+        connectionStatusStoreUpdated: Bool? = nil,
+        uiObservedLastSeenAt: Date? = nil,
         errorCode: String? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        errorCategory: String? = nil
     ) {
         onConnectionDiagnostic(
             SecureConnectionDiagnosticEvent(
                 phase: phase,
                 listenerState: listenerState,
                 activePort: activePort,
+                routeReceivedAt: routeReceivedAt,
+                routePath: routePath,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: requestDeviceIDPrefix,
+                verifierStartedAt: verifierStartedAt,
+                verifierSucceeded: verifierSucceeded,
+                verifierFailed: verifierFailed,
+                markDeviceSeenCalled: markDeviceSeenCalled,
+                pairedDeviceLastSeenBefore: pairedDeviceLastSeenBefore,
+                pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
+                connectionStatusStoreUpdated: connectionStatusStoreUpdated,
+                uiObservedLastSeenAt: uiObservedLastSeenAt,
                 errorCode: errorCode,
-                errorMessage: errorMessage
+                errorMessage: errorMessage,
+                errorCategory: errorCategory
             )
         )
     }
@@ -1337,6 +1389,10 @@ final class SecureLocalHTTPSServer {
             Task { @MainActor [weak self] in
                 self?.handleDeviceStatusRequest(request, on: connection)
             }
+        case ("POST", "/device/unpair"):
+            Task { @MainActor [weak self] in
+                self?.handleDeviceUnpairRequest(request, on: connection)
+            }
         case ("POST", "/connection/heartbeat"):
             Task { @MainActor [weak self] in
                 self?.handleConnectionHeartbeatRequest(request, on: connection)
@@ -1373,6 +1429,10 @@ final class SecureLocalHTTPSServer {
             Task { @MainActor [weak self] in
                 self?.handleLocalNetworkSyncArtifactRequest(request, on: connection)
             }
+        case ("POST", "/sync/artifact-put"):
+            Task { @MainActor [weak self] in
+                self?.handleLocalNetworkSyncArtifactPutRequest(request, on: connection)
+            }
         default:
             if request.method != "GET" && request.method != "POST" {
                 sendError(statusCode: 405, reason: "Method Not Allowed", error: "method_not_allowed", on: connection)
@@ -1408,59 +1468,237 @@ final class SecureLocalHTTPSServer {
     }
 
     @MainActor
+    private func handleDeviceUnpairRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            guard let unpairRequest = try? Self.syncJSONDecoder.decode(DeviceUnpairRequest.self, from: request.body) else {
+                sendError(statusCode: 400, reason: "Bad Request", error: "bad_unpair_payload", on: connection)
+                return
+            }
+
+            guard unpairRequest.deviceID == device.id else {
+                sendError(statusCode: 400, reason: "Bad Request", error: "device_id_mismatch", on: connection)
+                return
+            }
+
+            let removed = pairingManager.unpairDevice(id: device.id)
+            _ = deviceConnectionStatusStore.markUnpaired(displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName)
+            onPairingChanged()
+            emitConnectionDiagnostic(
+                phase: "localCredentialsDeleted",
+                listenerState: "ready",
+                activePort: activePort,
+                routePath: request.path,
+                requestDeviceIDPrefix: device.idPrefix,
+                errorMessage: unpairRequest.reason
+            )
+            sendJSON(
+                statusCode: 200,
+                reason: "OK",
+                body: DeviceUnpairResponse(
+                    ok: true,
+                    disposition: removed ? "unpaired" : "acceptedExisting",
+                    deviceID: device.id,
+                    error: nil
+                ),
+                on: connection
+            )
+        case .rejected(let reason):
+            emitConnectionDiagnostic(
+                phase: "oldHMACRejectedAfterUnpair",
+                listenerState: "ready",
+                activePort: activePort,
+                routePath: request.path,
+                requestDeviceIDPrefix: Self.deviceIDPrefix(from: request.headers),
+                errorCode: reason
+            )
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
     private func handleConnectionHeartbeatRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        let routeReceivedAt = Date()
+        let heartbeatSequence = Self.heartbeatSequence(from: request.body)
+        let requestDeviceIDPrefix = Self.deviceIDPrefix(from: request.headers)
         let response = connectionHeartbeatRouteHandler.heartbeatResponse(
             method: request.method,
             path: request.path,
             headers: request.headers,
             body: request.body
         )
+        let trace = requestVerifier.lastTrace
+        let uiObservedLastSeenAt = trace?.deviceIDPrefix.flatMap { prefix in
+            deviceConnectionStatusStore.statusesByDeviceID.values.first { $0.deviceID.hasPrefix(prefix) }?.lastSeenAt
+        }
+        emitConnectionDiagnostic(
+            phase: "heartbeatRouteReceived",
+            listenerState: "ready",
+            activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix
+        )
         emitConnectionDiagnostic(
             phase: response.statusCode == 200 ? "heartbeat_success" : "heartbeat_failure",
             listenerState: "ready",
             activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            verifierStartedAt: trace?.verifierStartedAt,
+            verifierSucceeded: trace?.verifierSucceeded,
+            verifierFailed: trace?.verifierFailedReason != nil,
+            markDeviceSeenCalled: trace?.markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: response.statusCode == 200,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
-            errorMessage: response.statusCode == 200 ? nil : response.reason
+            errorMessage: response.statusCode == 200 ? nil : response.reason,
+            errorCategory: response.statusCode == 200 ? nil : trace?.errorCategory
         )
         emitConnectionDiagnostic(
             phase: response.statusCode == 200 ? "heartbeatSuccess" : "heartbeatFailure",
             listenerState: "ready",
             activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            verifierStartedAt: trace?.verifierStartedAt,
+            verifierSucceeded: trace?.verifierSucceeded,
+            verifierFailed: trace?.verifierFailedReason != nil,
+            markDeviceSeenCalled: trace?.markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: response.statusCode == 200,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
-            errorMessage: response.statusCode == 200 ? nil : response.reason
+            errorMessage: response.statusCode == 200 ? nil : response.reason,
+            errorCategory: response.statusCode == 200 ? nil : trace?.errorCategory
         )
         if response.statusCode == 200 {
             emitConnectionDiagnostic(phase: "signedRequestRefreshedLastSeen", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(
+                phase: "lastSeenUpdated",
+                listenerState: "ready",
+                activePort: activePort,
+                routeReceivedAt: routeReceivedAt,
+                routePath: request.path,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: requestDeviceIDPrefix,
+                pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+                pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+                connectionStatusStoreUpdated: true,
+                uiObservedLastSeenAt: uiObservedLastSeenAt
+            )
         }
         sendRouteResponse(response, on: connection)
     }
 
     @MainActor
     private func handleConnectionProbeRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        let routeReceivedAt = Date()
+        let heartbeatSequence = Self.probeSequence(from: request.body)
+        let requestDeviceIDPrefix = Self.deviceIDPrefix(from: request.headers)
         let response = connectionProbeRouteHandler.probeResponse(
             method: request.method,
             path: request.path,
             headers: request.headers,
             body: request.body
         )
+        let trace = requestVerifier.lastTrace
+        let uiObservedLastSeenAt = trace?.deviceIDPrefix.flatMap { prefix in
+            deviceConnectionStatusStore.statusesByDeviceID.values.first { $0.deviceID.hasPrefix(prefix) }?.lastSeenAt
+        }
+        emitConnectionDiagnostic(
+            phase: "heartbeatRouteReceived",
+            listenerState: "ready",
+            activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix
+        )
         emitConnectionDiagnostic(
             phase: response.statusCode == 200 ? "probe_success" : "probe_failure",
             listenerState: "ready",
             activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            verifierStartedAt: trace?.verifierStartedAt,
+            verifierSucceeded: trace?.verifierSucceeded,
+            verifierFailed: trace?.verifierFailedReason != nil,
+            markDeviceSeenCalled: trace?.markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: response.statusCode == 200,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
-            errorMessage: response.statusCode == 200 ? nil : response.reason
+            errorMessage: response.statusCode == 200 ? nil : response.reason,
+            errorCategory: response.statusCode == 200 ? nil : trace?.errorCategory
         )
         emitConnectionDiagnostic(
             phase: response.statusCode == 200 ? "probeSuccess" : "probeFailure",
             listenerState: "ready",
             activePort: activePort,
+            routeReceivedAt: routeReceivedAt,
+            routePath: request.path,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            verifierStartedAt: trace?.verifierStartedAt,
+            verifierSucceeded: trace?.verifierSucceeded,
+            verifierFailed: trace?.verifierFailedReason != nil,
+            markDeviceSeenCalled: trace?.markDeviceSeenCalled,
+            pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+            pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+            connectionStatusStoreUpdated: response.statusCode == 200,
+            uiObservedLastSeenAt: uiObservedLastSeenAt,
             errorCode: response.statusCode == 200 ? nil : "request_verifier_rejected",
-            errorMessage: response.statusCode == 200 ? nil : response.reason
+            errorMessage: response.statusCode == 200 ? nil : response.reason,
+            errorCategory: response.statusCode == 200 ? nil : trace?.errorCategory
         )
         if response.statusCode == 200 {
             emitConnectionDiagnostic(phase: "signedRequestRefreshedLastSeen", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(
+                phase: "lastSeenUpdated",
+                listenerState: "ready",
+                activePort: activePort,
+                routeReceivedAt: routeReceivedAt,
+                routePath: request.path,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: requestDeviceIDPrefix,
+                pairedDeviceLastSeenBefore: trace?.pairedDeviceLastSeenBefore,
+                pairedDeviceLastSeenAfter: trace?.pairedDeviceLastSeenAfter,
+                connectionStatusStoreUpdated: true,
+                uiObservedLastSeenAt: uiObservedLastSeenAt
+            )
         }
         sendRouteResponse(response, on: connection)
+    }
+
+    private static func heartbeatSequence(from body: Data) -> UInt64? {
+        try? syncJSONDecoder.decode(ConnectionHeartbeatRequest.self, from: body).sequenceNumber
+    }
+
+    private struct ProbeSequenceEnvelope: Decodable {
+        let sequenceNumber: UInt64
+    }
+
+    private static func probeSequence(from body: Data) -> UInt64? {
+        try? syncJSONDecoder.decode(ProbeSequenceEnvelope.self, from: body).sequenceNumber
+    }
+
+    private static func deviceIDPrefix(from headers: [String: String]) -> String? {
+        let normalizedHeaders = headers.reduce(into: [String: String]()) { result, header in
+            result[header.key.lowercased()] = header.value
+        }
+        return normalizedHeaders["x-rokurics-device-id"].map { String($0.prefix(12)) }
     }
 
     @MainActor
@@ -1660,6 +1898,7 @@ final class SecureLocalHTTPSServer {
     @MainActor
     func localNetworkSyncInventoryResponseForVerifiedDevice(_ device: PairedDevice) -> LocalNetworkSyncInventoryResponse {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "inventory")
+        emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort)
         return LocalNetworkSyncInventoryResponse(
             ok: true,
             inventory: makeLocalNetworkSyncInventory(),
@@ -1681,6 +1920,12 @@ final class SecureLocalHTTPSServer {
             displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             statusText: applyResult.summaryText,
             error: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+        )
+        emitConnectionDiagnostic(
+            phase: applyResult.failedChanges == 0 ? "metadataApplied" : "syncTickFailed",
+            listenerState: "ready",
+            activePort: activePort,
+            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
         )
 
         if applyResult.failedChanges == 0 {
@@ -1724,6 +1969,7 @@ final class SecureLocalHTTPSServer {
         requestBody: Data
     ) -> LocalNetworkSyncArtifactResponse {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "artifact")
+        emitConnectionDiagnostic(phase: "downloadActionStarted", listenerState: "ready", activePort: activePort)
 
         do {
             let request = try Self.syncJSONDecoder.decode(LocalNetworkSyncArtifactRequest.self, from: requestBody)
@@ -1738,7 +1984,8 @@ final class SecureLocalHTTPSServer {
 
             let artifactURL = try LocalNetworkSyncArtifactFileService.safeFileURL(
                 rootURL: recordingFileStore.libraryRootURL,
-                logicalPathToken: artifact.logicalPathToken
+                logicalPathToken: artifact.logicalPathToken,
+                kind: artifact.kind
             )
             guard FileManager.default.fileExists(atPath: artifactURL.path) else {
                 throw LocalNetworkSyncArtifactValidationError.artifactNotFound
@@ -1749,6 +1996,8 @@ final class SecureLocalHTTPSServer {
             }
 
             let data = try Data(contentsOf: artifactURL)
+            emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "downloadActionCompleted", listenerState: "ready", activePort: activePort)
             return LocalNetworkSyncArtifactResponse(
                 ok: true,
                 artifactID: artifact.artifactID,
@@ -1760,6 +2009,13 @@ final class SecureLocalHTTPSServer {
                 error: nil
             )
         } catch {
+            emitConnectionDiagnostic(
+                phase: "downloadActionFailed",
+                listenerState: "ready",
+                activePort: activePort,
+                errorCode: "sync_artifact_request_failed",
+                errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
             return LocalNetworkSyncArtifactResponse(
                 ok: false,
                 artifactID: nil,
@@ -1774,16 +2030,92 @@ final class SecureLocalHTTPSServer {
     }
 
     @MainActor
+    func localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        requestBody: Data
+    ) -> LocalNetworkSyncArtifactPutResponse {
+        _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "artifact-put")
+        emitConnectionDiagnostic(phase: "uploadActionStarted", listenerState: "ready", activePort: activePort)
+
+        do {
+            let request = try Self.syncJSONDecoder.decode(LocalNetworkSyncArtifactPutRequest.self, from: requestBody)
+            try LocalNetworkSyncArtifactID.validate(request.artifactID)
+            try LocalNetworkSyncArtifactID.validateLogicalPathToken(request.logicalPathToken, for: request.kind)
+            guard request.kind.isAutoDownloadAllowed else {
+                throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+            }
+            guard request.artifactID == LocalNetworkSyncArtifactID.make(
+                kind: request.kind,
+                ownerID: request.ownerID,
+                logicalPathToken: request.logicalPathToken
+            ) else {
+                throw LocalNetworkSyncArtifactValidationError.invalidArtifactID
+            }
+            guard request.size >= 0, request.size <= 4 * 1024 * 1024,
+                  let data = Data(base64Encoded: request.dataBase64),
+                  data.count == Int(request.size) else {
+                throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+            }
+            let checksum = MacSecurityUtilities.sha256Hex(data)
+            guard checksum == request.checksum else {
+                throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+            }
+
+            let artifactURL = try LocalNetworkSyncArtifactFileService.safeFileURL(
+                rootURL: recordingFileStore.libraryRootURL,
+                logicalPathToken: request.logicalPathToken,
+                kind: request.kind
+            )
+            let existingChecksum = (try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: artifactURL))
+            let disposition = existingChecksum == checksum ? "acceptedExisting" : "acceptedNew"
+            try FileManager.default.createDirectory(at: artifactURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if existingChecksum != checksum {
+                try data.write(to: artifactURL, options: .atomic)
+            }
+
+            emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "uploadActionCompleted", listenerState: "ready", activePort: activePort)
+            return LocalNetworkSyncArtifactPutResponse(
+                ok: true,
+                artifactID: request.artifactID,
+                disposition: disposition,
+                checksum: checksum,
+                size: Int64(data.count),
+                error: nil
+            )
+        } catch {
+            emitConnectionDiagnostic(
+                phase: "uploadActionFailed",
+                listenerState: "ready",
+                activePort: activePort,
+                errorCode: "sync_artifact_put_failed",
+                errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+            return LocalNetworkSyncArtifactPutResponse(
+                ok: false,
+                artifactID: nil,
+                disposition: nil,
+                checksum: nil,
+                size: nil,
+                error: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
     private func handleLocalNetworkSyncInventoryRequest(_ request: HTTPRequest, on connection: NWConnection) {
         switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
         case .accepted(let device):
+            emitConnectionDiagnostic(phase: "syncTickStarted", listenerState: "ready", activePort: activePort)
             sendJSON(
                 statusCode: 200,
                 reason: "OK",
                 body: localNetworkSyncInventoryResponseForVerifiedDevice(device),
                 on: connection
             )
+            emitConnectionDiagnostic(phase: "peerInventoryFetched", listenerState: "ready", activePort: activePort)
         case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "syncTickFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
         }
     }
@@ -1793,13 +2125,17 @@ final class SecureLocalHTTPSServer {
         switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
         case .accepted(let device):
             do {
+                emitConnectionDiagnostic(phase: "uploadActionStarted", listenerState: "ready", activePort: activePort)
                 let response = try localNetworkSyncApplyMetadataResponseForVerifiedDevice(device, requestBody: request.body)
                 sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
+                emitConnectionDiagnostic(phase: "uploadActionCompleted", listenerState: "ready", activePort: activePort)
             } catch {
                 syncStateStore.recordFailure(deviceID: device.id, error: error.localizedDescription)
+                emitConnectionDiagnostic(phase: "uploadActionFailed", listenerState: "ready", activePort: activePort, errorCode: "sync_apply_metadata_failed", errorMessage: error.localizedDescription)
                 sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
             }
         case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "uploadActionFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
         }
     }
@@ -1817,6 +2153,23 @@ final class SecureLocalHTTPSServer {
                 on: connection
             )
         case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleLocalNetworkSyncArtifactPutRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            let response = localNetworkSyncArtifactPutResponseForVerifiedDevice(device, requestBody: request.body)
+            sendJSON(
+                statusCode: response.ok ? 200 : 400,
+                reason: response.ok ? "OK" : "Bad Request",
+                body: response,
+                on: connection
+            )
+        case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "uploadActionFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
         }
     }
@@ -2007,6 +2360,8 @@ final class SecureLocalHTTPSServer {
             return 4 * 1024 * 1024
         case "/sync/artifact-request":
             return 256 * 1024
+        case "/sync/artifact-put":
+            return 6 * 1024 * 1024
         default:
             return 1 * 1024 * 1024
         }
@@ -2037,7 +2392,16 @@ final class SecureLocalHTTPSServer {
                 receiveStatus: item.receiveStatus,
                 processingStatus: item.hasAudio ? "notStarted" : "awaitingAudio",
                 updatedAt: item.deletedAt ?? item.receivedAt,
-                deleted: item.isDeleted
+                deleted: item.isDeleted,
+                title: item.title,
+                createdAt: item.receivedAt,
+                tombstone: item.isDeleted,
+                audioAvailability: item.hasAudio ? .local : .missing,
+                uploadStatus: nil,
+                transcriptionStatus: item.transcriptionStatus,
+                noteStatus: item.noteStatus,
+                sourceDeviceID: nil,
+                artifactRefs: nil
             )
         }
         let folders = manifest.folders.map { folder in
@@ -2061,7 +2425,9 @@ final class SecureLocalHTTPSServer {
                 recordingID: item.recordingID,
                 updatedAt: item.updatedAt,
                 revisionHash: LocalNetworkSyncMetadataHash.hash(item),
-                deleted: item.isTrashed
+                deleted: item.isTrashed,
+                path: item.filing.displaySummary,
+                conflictStatus: item.syncConflictStatus
             )
         }
         let artifacts = makeLocalNetworkSyncArtifacts(from: manifest)
@@ -2088,6 +2454,12 @@ final class SecureLocalHTTPSServer {
         var artifacts: [LocalNetworkSyncArtifactEntry] = []
         for item in manifest.items {
             let ownerID = item.recordingID ?? item.itemID
+            appendLocalNetworkSyncArtifact(
+                relativePath: item.receiveRelativePath,
+                kind: .receiveJSON,
+                ownerID: ownerID,
+                artifacts: &artifacts
+            )
             appendLocalNetworkSyncArtifact(
                 relativePath: item.transcriptMarkdownRelativePath,
                 kind: .transcriptMarkdown,
@@ -2124,12 +2496,22 @@ final class SecureLocalHTTPSServer {
         includeChecksum: Bool = true,
         artifacts: inout [LocalNetworkSyncArtifactEntry]
     ) {
+        let fileURL: URL?
+        if kind == .audio {
+            fileURL = try? LocalNetworkSyncArtifactFileService.safeFileURL(
+                rootURL: recordingFileStore.libraryRootURL,
+                logicalPathToken: relativePath ?? ""
+            )
+        } else {
+            fileURL = try? LocalNetworkSyncArtifactFileService.safeFileURL(
+                rootURL: recordingFileStore.libraryRootURL,
+                logicalPathToken: relativePath ?? "",
+                kind: kind
+            )
+        }
         guard let relativePath,
               !relativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let url = try? LocalNetworkSyncArtifactFileService.safeFileURL(
-                rootURL: recordingFileStore.libraryRootURL,
-                logicalPathToken: relativePath
-              ),
+              let url = fileURL,
               FileManager.default.fileExists(atPath: url.path),
               let metadata = LocalNetworkSyncArtifactFileService.metadata(for: url) else {
             return
@@ -2146,7 +2528,10 @@ final class SecureLocalHTTPSServer {
                 size: metadata.size,
                 updatedAt: metadata.updatedAt,
                 availability: .local,
-                logicalPathToken: relativePath
+                logicalPathToken: relativePath,
+                localAvailability: .local,
+                peerAvailability: nil,
+                autoDownloadAllowed: kind.isAutoDownloadAllowed
             )
         )
     }
