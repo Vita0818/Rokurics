@@ -196,10 +196,39 @@ struct RokuricsMacTests {
             transcriptionError: nil
         )
         let completed = makeInboxItem(transcriptionStatus: "notStarted", transcriptionError: nil, hasAudio: true)
+        let explicitProgressItem = MacRecordingInboxItem(
+            id: "incoming-audio-transfer",
+            title: "接收中",
+            receivedAt: Date(timeIntervalSince1970: 11),
+            duration: 5,
+            fileSize: 2048,
+            sourceDeviceName: "iPhone",
+            transcriptionStatus: "notStarted",
+            noteStatus: "notGenerated",
+            receiveStatus: "metadataReceived",
+            hasAudio: false,
+            transcriptRelativePath: nil,
+            transcriptMarkdownRelativePath: nil,
+            transcriptionError: nil,
+            transferProgress: LocalNetworkTransferProgress(
+                objectID: "recordingAudio:incoming-audio-transfer",
+                objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+                state: .transferring,
+                progressFraction: 0.5,
+                receivedBytes: 1024,
+                totalBytes: 2048,
+                sourceDeviceID: "iphone-01",
+                statusText: "传输中 50%"
+            )
+        )
 
         #expect(item.localNetworkReceiveTransferProgress?.state == .pending)
         #expect(item.localNetworkReceiveTransferProgress?.isVisibleInActionArea == true)
         #expect(item.localNetworkReceiveTransferProgress?.totalBytes == 2048)
+        #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.state == .transferring)
+        #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.progressFraction == 0.5)
+        #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.receivedBytes == 1024)
+        #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.statusText == "传输中 50%")
         #expect(completed.localNetworkReceiveTransferProgress == nil)
     }
 
@@ -2304,6 +2333,128 @@ struct RokuricsMacTests {
     }
 
     @MainActor
+    @Test func tracedMetadataAndAudioRouteCompletesInboxAvailability() throws {
+        let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer {
+            UploadFlightRecorder.configureLogURL(nil)
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        let traceID = "upl-test-mac-route-complete"
+        let traceURL = rootURL.appendingPathComponent("upload-trace.jsonl", isDirectory: false)
+        UploadFlightRecorder.configureLogURL(traceURL)
+        let metadata = makeIncomingUploadMetadata(id: "route-trace-complete")
+        let metadataBody = try encodedMetadata(metadata)
+        let audio = Data("audio".utf8)
+        var metadataHeaders = try signedUploadHeaders(
+            device: device,
+            path: "/upload-recording-metadata",
+            body: metadataBody,
+            contentType: "application/json",
+            uploadType: "recording-metadata",
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            nonce: "nonce-route-trace-metadata"
+        )
+        metadataHeaders[UploadFlightRecorder.traceHeaderName] = traceID
+        var audioHeaders = try signedUploadHeaders(
+            device: device,
+            path: "/upload-recording-audio",
+            body: audio,
+            contentType: "audio/m4a",
+            uploadType: "recording-audio",
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            nonce: "nonce-route-trace-audio"
+        )
+        audioHeaders[UploadFlightRecorder.traceHeaderName] = traceID
+
+        let metadataResponse = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: metadataHeaders,
+            body: metadataBody
+        )
+        let audioResponse = handler.audioUploadResponse(
+            method: "POST",
+            path: "/upload-recording-audio",
+            headers: audioHeaders,
+            body: audio
+        )
+        let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
+        let inboxStore = AudioInboxStore(recordingFileStore: store)
+        let inboxItem = try #require(inboxStore.recordingItems.first(where: { $0.id == metadata.id }))
+        let events = try UploadFlightRecorder.loadEvents(from: traceURL)
+        let stages = Set(events.map(\.stage))
+        let rawTrace = try String(contentsOf: traceURL, encoding: .utf8)
+
+        #expect(metadataResponse.statusCode == 200)
+        #expect(audioResponse.statusCode == 200)
+        #expect(record.status == "completed")
+        #expect(record.processingStatus == "notStarted")
+        #expect(record.audioRelativePath != nil)
+        #expect(record.checksum == MacSecurityUtilities.sha256Hex(audio))
+        #expect(inboxItem.hasAudio)
+        #expect(stages.contains("requestVerifierAccepted"))
+        #expect(stages.contains("uploadRouteHandlerEntered"))
+        #expect(stages.contains("metadataPayloadDecoded"))
+        #expect(stages.contains("receiveRecordWaitingForAudio"))
+        #expect(stages.contains("audioRouteRecordingIDParsed"))
+        #expect(stages.contains("audioChecksumComputed"))
+        #expect(stages.contains("audioFileWriteCompleted"))
+        #expect(stages.contains("receiveRecordAudioPathUpdated"))
+        #expect(stages.contains("receiveRecordSavedAfterAudio"))
+        #expect(stages.contains("audioInboxItemMarkedAvailable"))
+        #expect(stages.contains("macUICardStateUpdated"))
+        #expect(events.allSatisfy { $0.traceID == traceID })
+        #expect(!rawTrace.contains(device.sharedSecretBase64URL))
+        #expect(!rawTrace.contains(rootURL.path))
+    }
+
+    @MainActor
+    @Test func tracedBadHMACUploadRouteRecordsVerifierRejectionWithoutStoreWrite() throws {
+        let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
+        defer {
+            UploadFlightRecorder.configureLogURL(nil)
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        let traceID = "upl-test-mac-bad-hmac"
+        let traceURL = rootURL.appendingPathComponent("upload-trace.jsonl", isDirectory: false)
+        UploadFlightRecorder.configureLogURL(traceURL)
+        let metadata = makeIncomingUploadMetadata(id: "route-trace-bad-hmac")
+        let body = try encodedMetadata(metadata)
+        var headers = try signedUploadHeaders(
+            device: device,
+            path: "/upload-recording-metadata",
+            body: body,
+            contentType: "application/json",
+            uploadType: "recording-metadata",
+            recordingID: metadata.id,
+            fileName: metadata.originalFileName,
+            nonce: "nonce-route-trace-bad-hmac"
+        )
+        headers["X-Rokurics-Signature"] = "bad-signature"
+        headers[UploadFlightRecorder.traceHeaderName] = traceID
+
+        let response = handler.metadataUploadResponse(
+            method: "POST",
+            path: "/upload-recording-metadata",
+            headers: headers,
+            body: body
+        )
+        let stages = Set(try UploadFlightRecorder.loadEvents(from: traceURL).map(\.stage))
+        let rawTrace = try String(contentsOf: traceURL, encoding: .utf8)
+
+        #expect(response.statusCode == 400)
+        #expect((try routeResponseJSON(response))["error"] as? String == "signature_mismatch")
+        #expect(stages.contains("requestVerifierEntered"))
+        #expect(stages.contains("requestVerifierHMACRejected"))
+        #expect(!stages.contains("metadataPayloadDecoded"))
+        #expect(store.loadInboxItems().isEmpty)
+        #expect(!rawTrace.contains(device.sharedSecretBase64URL))
+        #expect(!rawTrace.contains(rootURL.path))
+    }
+
+    @MainActor
     @Test func badSignatureAndUnpairedUploadRoutesAreRejectedBeforeStoreWrite() throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -3615,6 +3766,72 @@ struct RokuricsMacTests {
     }
 
     @MainActor
+    @Test func pendingManualSyncRequestIsReturnedOnceFromHeartbeatAndProbe() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let pairedDevice = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(pairedDevice)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let heartbeatHandler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: requestVerifier,
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-pending-sync-test"
+        )
+
+        let heartbeatSyncRunID = "sync-run-heartbeat"
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: pairedDevice.id,
+            displayName: pairedDevice.deviceName,
+            syncRunID: heartbeatSyncRunID,
+            initiatorDeviceID: "mac-test"
+        )
+        let heartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 41))
+        let heartbeatResponse = heartbeatHandler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: heartbeatBody, nonce: "pending-sync-heartbeat"),
+            body: heartbeatBody
+        )
+        let decodedHeartbeat = try decodeHeartbeatResponse(heartbeatResponse)
+        let secondHeartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 42))
+        let secondHeartbeatResponse = heartbeatHandler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/heartbeat", body: secondHeartbeatBody, nonce: "pending-sync-heartbeat-second"),
+            body: secondHeartbeatBody
+        )
+        let decodedSecondHeartbeat = try decodeHeartbeatResponse(secondHeartbeatResponse)
+
+        #expect(decodedHeartbeat.syncRequested == true)
+        #expect(decodedHeartbeat.syncStartSignal?.syncRunID == heartbeatSyncRunID)
+        #expect(decodedSecondHeartbeat.syncRequested == false)
+        #expect(decodedSecondHeartbeat.syncStartSignal == nil)
+
+        let probeSyncRunID = "sync-run-probe"
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: pairedDevice.id,
+            displayName: pairedDevice.deviceName,
+            syncRunID: probeSyncRunID,
+            initiatorDeviceID: "mac-test"
+        )
+        let probeHandler = ConnectionProbeRouteHandler(requestVerifier: requestVerifier, statusStore: statusStore)
+        let probeBody = try encodedConnectionProbeRequest(sequenceNumber: 43, clientPayload: "pending sync probe")
+        let probeResponse = probeHandler.probeResponse(
+            method: "POST",
+            path: "/connection/probe",
+            headers: try signedJSONHeaders(device: pairedDevice, path: "/connection/probe", body: probeBody, nonce: "pending-sync-probe"),
+            body: probeBody
+        )
+        let probeJSON = try routeResponseJSON(probeResponse)
+
+        #expect(probeJSON["syncRequested"] as? Bool == true)
+        #expect((probeJSON["syncStartSignal"] as? [String: Any])?["syncRunID"] as? String == probeSyncRunID)
+        #expect(statusStore.status(for: pairedDevice.id)?.lastSyncAt == nil)
+    }
+
+    @MainActor
     @Test func unpairedAndBadHMACHeartbeatDoNotUpdatePresenceWriteback() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -4068,7 +4285,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func macManualSyncDisabledPreservesPresenceAndStatusSource() throws {
+    @Test func macManualSyncDisabledCreatesPendingRequestWithoutFakeSuccess() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
@@ -4101,9 +4318,12 @@ struct RokuricsMacTests {
         #expect(manualStatus.presenceState == .online)
         #expect(observedStatus.presenceState == .online)
         #expect(observedStatus.lastSeenAt == lastSeen)
-        #expect(observedStatus.lastSyncStatus == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(observedStatus.lastSyncAt == nil)
+        #expect(observedStatus.lastSyncStatus == "等待 iPhone 执行同步")
         #expect(phases.contains("manualSyncTapped"))
-        #expect(phases.contains("syncFailedPresenceUnchanged"))
+        #expect(phases.contains("manualSyncActionFired"))
+        #expect(phases.contains("pendingSyncRequestCreated"))
+        #expect(phases.contains("pendingSyncRequestSet"))
     }
 
     @MainActor

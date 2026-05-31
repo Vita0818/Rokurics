@@ -228,14 +228,81 @@ struct RecordingStudyDetailPage: View {
     }
 
     private func uploadCurrentRecording() {
-        guard let recordingMetadata else {
+        let traceID = UploadFlightRecorder.makeTraceID()
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadButtonTapped",
+            traceID: traceID,
+            recordingID: item?.recordingID,
+            eventResult: "begin",
+            reasonCode: "recordingDetail"
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadActionFired",
+            traceID: traceID,
+            recordingID: item?.recordingID,
+            eventResult: "begin",
+            reasonCode: "recordingDetail"
+        )
+
+        guard macConnectionStore.isPaired else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadSkippedWithReason",
+                traceID: traceID,
+                recordingID: item?.recordingID,
+                eventResult: "skip",
+                reasonCode: "mac_not_paired"
+            )
             return
         }
 
+        recordingManager.reloadRecordings()
+        guard let recordingID = item?.recordingID,
+              let recordingMetadata = recordingManager.recordings.first(where: { $0.id == recordingID }) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadSkippedWithReason",
+                traceID: traceID,
+                recordingID: item?.recordingID,
+                eventResult: "skip",
+                reasonCode: "recording_metadata_missing"
+            )
+            return
+        }
+
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadRecordingResolved",
+            traceID: traceID,
+            recordingID: recordingMetadata.id,
+            eventResult: "success",
+            uploadStatus: recordingMetadata.uploadStatus,
+            fileSize: recordingMetadata.fileSize,
+            resolvedRelativePathToken: recordingMetadata.relativeAudioPath
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadCoordinatorCallStarted",
+            traceID: traceID,
+            recordingID: recordingMetadata.id,
+            eventResult: "begin",
+            uploadStatus: recordingMetadata.uploadStatus
+        )
         uploadCoordinator.upload(
             metadata: recordingMetadata,
             settings: macConnectionStore.snapshot,
-            recordingManager: recordingManager
+            recordingManager: recordingManager,
+            traceID: traceID
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadCoordinatorCallReturned",
+            traceID: traceID,
+            recordingID: recordingMetadata.id,
+            eventResult: "success",
+            uploadStatus: recordingMetadata.uploadStatus
         )
     }
 

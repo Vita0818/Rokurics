@@ -240,12 +240,42 @@ extension DeviceConnectionStatus {
     }
 }
 
+enum LocalNetworkSyncControlPlaneState: String, Codable, Equatable {
+    case idle
+    case syncStartSignalSent
+    case syncStartSignalReceived
+    case syncStartAcked
+    case inventoryExchanging
+    case planningTransfers
+    case transferJobsCreated
+    case transferring
+    case pausedDisconnected
+    case resuming
+    case completed
+    case failed
+    case cancelled
+}
+
 enum LocalNetworkTransferState: String, Codable, Equatable {
     case pending
     case transferring
+    case paused
+    case pausedDisconnected
+    case retryPending
+    case resuming
     case verifying
     case complete
     case failed
+    case conflict
+
+    var isVisibleInActionArea: Bool {
+        switch self {
+        case .pending, .transferring, .paused, .pausedDisconnected, .retryPending, .resuming, .verifying, .failed, .conflict:
+            return true
+        case .complete:
+            return false
+        }
+    }
 }
 
 struct LocalNetworkTransferProgress: Codable, Equatable, Identifiable {
@@ -261,12 +291,7 @@ struct LocalNetworkTransferProgress: Codable, Equatable, Identifiable {
     var statusText: String?
 
     var isVisibleInActionArea: Bool {
-        switch state {
-        case .pending, .transferring, .verifying, .failed:
-            return true
-        case .complete:
-            return false
-        }
+        state.isVisibleInActionArea
     }
 }
 
@@ -354,6 +379,9 @@ struct StudyLibrarySyncState: Codable, Equatable {
     var pendingUploads: Int
     var failedChanges: Int
     var lastError: String?
+    var activeSyncRunID: String?
+    var syncControlPlaneState: LocalNetworkSyncControlPlaneState?
+    var syncControlPlaneUpdatedAt: Date?
 
     init(
         deviceID: String = "",
@@ -365,7 +393,10 @@ struct StudyLibrarySyncState: Codable, Equatable {
         pendingLocalChanges: Int = 0,
         pendingUploads: Int = 0,
         failedChanges: Int = 0,
-        lastError: String? = nil
+        lastError: String? = nil,
+        activeSyncRunID: String? = nil,
+        syncControlPlaneState: LocalNetworkSyncControlPlaneState? = nil,
+        syncControlPlaneUpdatedAt: Date? = nil
     ) {
         self.deviceID = deviceID
         self.lastPulledAt = lastPulledAt
@@ -377,6 +408,9 @@ struct StudyLibrarySyncState: Codable, Equatable {
         self.pendingUploads = pendingUploads
         self.failedChanges = failedChanges
         self.lastError = lastError
+        self.activeSyncRunID = activeSyncRunID
+        self.syncControlPlaneState = syncControlPlaneState
+        self.syncControlPlaneUpdatedAt = syncControlPlaneUpdatedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -390,6 +424,9 @@ struct StudyLibrarySyncState: Codable, Equatable {
         case pendingUploads
         case failedChanges
         case lastError
+        case activeSyncRunID
+        case syncControlPlaneState
+        case syncControlPlaneUpdatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -404,6 +441,9 @@ struct StudyLibrarySyncState: Codable, Equatable {
         pendingUploads = try container.decodeIfPresent(Int.self, forKey: .pendingUploads) ?? 0
         failedChanges = try container.decodeIfPresent(Int.self, forKey: .failedChanges) ?? 0
         lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+        activeSyncRunID = try container.decodeIfPresent(String.self, forKey: .activeSyncRunID)
+        syncControlPlaneState = try container.decodeIfPresent(LocalNetworkSyncControlPlaneState.self, forKey: .syncControlPlaneState)
+        syncControlPlaneUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .syncControlPlaneUpdatedAt)
     }
 }
 
@@ -771,7 +811,50 @@ struct ConnectionHeartbeatResponse: Codable, Equatable {
     var receivedSequenceNumber: UInt64
     var connectionStatusRevision: Int
     var minimumSuggestedInterval: TimeInterval?
+    var syncRequested: Bool?
+    var syncStartSignal: LocalNetworkSyncStartSignal? = nil
     var status: DeviceConnectionStatus?
+    var error: String?
+}
+
+struct LocalNetworkSyncStartSignal: Codable, Equatable {
+    var syncRunID: String
+    var initiatorDeviceID: String
+    var initiatorPlatform: LocalNetworkSyncPlatform
+    var requestedAt: Date
+    var reason: String
+}
+
+struct LocalNetworkSyncStartRequest: Codable, Equatable {
+    var syncRunID: String
+    var deviceID: String
+    var platform: LocalNetworkSyncPlatform
+    var requestedAt: Date
+    var reason: String
+}
+
+struct LocalNetworkSyncStartResponse: Codable, Equatable {
+    var ok: Bool
+    var syncRunID: String?
+    var peerDeviceID: String?
+    var ackAt: Date?
+    var disposition: String?
+    var error: String?
+}
+
+struct LocalNetworkSyncStartAckRequest: Codable, Equatable {
+    var syncRunID: String
+    var deviceID: String
+    var platform: LocalNetworkSyncPlatform
+    var acknowledgedAt: Date
+    var disposition: String
+}
+
+struct LocalNetworkSyncStartAckResponse: Codable, Equatable {
+    var ok: Bool
+    var syncRunID: String?
+    var peerDeviceID: String?
+    var ackReceivedAt: Date?
     var error: String?
 }
 
@@ -922,6 +1005,7 @@ enum LocalNetworkSyncObjectKind: String, Codable, Equatable, Sendable {
     case transcriptJSON
     case noteMarkdown
     case noteJSON
+    case summaryMarkdown
     case summaryJSON
     case studyItem
     case studyFolder
@@ -932,6 +1016,7 @@ struct LocalNetworkSyncObjectEntry: Codable, Equatable, Identifiable {
 
     var objectID: String
     var objectKind: LocalNetworkSyncObjectKind
+    var ownerID: String?
     var displayTitle: String?
     var fileName: String?
     var logicalName: String?
@@ -943,6 +1028,7 @@ struct LocalNetworkSyncObjectEntry: Codable, Equatable, Identifiable {
     var sourceDeviceID: String?
     var logicalPathToken: String?
     var availability: LocalNetworkSyncArtifactAvailability
+    var transferState: LocalNetworkTransferState?
     var transferProgress: Double?
     var conflictStatus: String?
     var autoDownloadAllowed: Bool?
@@ -1093,6 +1179,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             LocalNetworkSyncObjectEntry(
                 objectID: "recordingMetadata:\(recording.recordingID)",
                 objectKind: .recordingMetadata,
+                ownerID: recording.recordingID,
                 displayTitle: recording.title,
                 fileName: nil,
                 logicalName: recording.recordingID,
@@ -1104,15 +1191,42 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 sourceDeviceID: recording.sourceDeviceID,
                 logicalPathToken: nil,
                 availability: .local,
+                transferState: nil,
                 transferProgress: nil,
                 conflictStatus: nil,
                 autoDownloadAllowed: true
+            )
+        }
+        let recordingAudioObjects = recordings.compactMap { recording -> LocalNetworkSyncObjectEntry? in
+            guard recording.audioAvailable || recording.audioSize != nil || recording.audioAvailability != nil else {
+                return nil
+            }
+            return LocalNetworkSyncObjectEntry(
+                objectID: "recordingAudio:\(recording.recordingID)",
+                objectKind: .recordingAudio,
+                ownerID: recording.recordingID,
+                displayTitle: recording.title,
+                fileName: nil,
+                logicalName: recording.recordingID,
+                sha256: recording.audioChecksum,
+                size: recording.audioSize,
+                updatedAt: recording.updatedAt,
+                deleted: recording.deleted,
+                tombstone: recording.tombstone,
+                sourceDeviceID: recording.sourceDeviceID,
+                logicalPathToken: nil,
+                availability: recording.audioAvailability ?? (recording.audioAvailable ? .local : .missing),
+                transferState: nil,
+                transferProgress: nil,
+                conflictStatus: nil,
+                autoDownloadAllowed: false
             )
         }
         let folderObjects = folders.map { folder in
             LocalNetworkSyncObjectEntry(
                 objectID: "studyFolder:\(folder.folderID)",
                 objectKind: .studyFolder,
+                ownerID: folder.folderID,
                 displayTitle: folder.name,
                 fileName: nil,
                 logicalName: folder.path ?? folder.folderID,
@@ -1124,6 +1238,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 sourceDeviceID: nil,
                 logicalPathToken: folder.path,
                 availability: .local,
+                transferState: nil,
                 transferProgress: nil,
                 conflictStatus: nil,
                 autoDownloadAllowed: true
@@ -1133,6 +1248,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             LocalNetworkSyncObjectEntry(
                 objectID: "studyItem:\(item.itemID)",
                 objectKind: .studyItem,
+                ownerID: item.recordingID ?? item.itemID,
                 displayTitle: item.title,
                 fileName: nil,
                 logicalName: item.path ?? item.itemID,
@@ -1144,6 +1260,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 sourceDeviceID: nil,
                 logicalPathToken: item.path,
                 availability: .local,
+                transferState: nil,
                 transferProgress: nil,
                 conflictStatus: item.conflictStatus,
                 autoDownloadAllowed: true
@@ -1153,6 +1270,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             LocalNetworkSyncObjectEntry(
                 objectID: artifact.artifactID,
                 objectKind: objectKind(for: artifact.kind),
+                ownerID: artifact.ownerID,
                 displayTitle: artifact.ownerID,
                 fileName: fileName(artifact.logicalPathToken),
                 logicalName: artifact.logicalPathToken,
@@ -1164,12 +1282,13 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 sourceDeviceID: nil,
                 logicalPathToken: artifact.logicalPathToken,
                 availability: artifact.availability,
+                transferState: nil,
                 transferProgress: nil,
                 conflictStatus: nil,
                 autoDownloadAllowed: artifact.autoDownloadAllowed ?? artifact.kind.isAutoDownloadAllowed
             )
         }
-        return recordingObjects + folderObjects + studyItemObjects + artifactObjects
+        return recordingObjects + recordingAudioObjects + folderObjects + studyItemObjects + artifactObjects
     }
 
     private static func objectKind(for artifactKind: LocalNetworkSyncArtifactKind) -> LocalNetworkSyncObjectKind {
@@ -1186,7 +1305,9 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             return .noteMarkdown
         case .noteJSON:
             return .noteJSON
-        case .summaryMarkdown, .summaryJSON:
+        case .summaryMarkdown:
+            return .summaryMarkdown
+        case .summaryJSON:
             return .summaryJSON
         case .audio:
             return .recordingAudio
@@ -1218,6 +1339,73 @@ private struct LocalNetworkSyncInventoryChecksumPayload: Encodable {
     var studyItems: [LocalNetworkSyncStudyItemEntry]
     var artifacts: [LocalNetworkSyncArtifactEntry]
     var objects: [LocalNetworkSyncObjectEntry]
+}
+
+extension LocalNetworkSyncInventory {
+    var syncCoreInventory: SyncInventory {
+        SyncInventory.make(
+            schemaVersion: schemaVersion,
+            sourceDeviceID: sourceDeviceID,
+            sourcePlatform: sourcePlatform.rawValue,
+            generatedAt: generatedAt,
+            inventoryRevision: inventoryRevision,
+            lastKnownPeerRevision: lastKnownPeerRevision,
+            objects: objects.map(\.syncObject),
+            directories: folders.map(\.syncDirectory),
+            deviceSummary: [
+                "deviceName": device.deviceName,
+                "appSchemaVersion": String(device.appSchemaVersion)
+            ]
+        )
+    }
+}
+
+extension LocalNetworkSyncObjectEntry {
+    var syncObject: SyncObject {
+        SyncObject(
+            objectID: objectID,
+            objectKind: objectKind.rawValue,
+            ownerID: ownerID ?? inferredOwnerID,
+            displayTitle: displayTitle,
+            fileName: fileName,
+            logicalName: logicalName,
+            sha256: sha256,
+            size: size,
+            updatedAt: updatedAt,
+            tombstone: tombstone ?? deleted,
+            deleted: deleted,
+            sourceDeviceID: sourceDeviceID,
+            logicalPathToken: logicalPathToken,
+            availability: SyncObjectAvailability(rawValue: availability.rawValue) ?? .missing,
+            transferState: transferState.flatMap { SyncTransferState(rawValue: $0.rawValue) },
+            transferProgress: transferProgress,
+            conflictStatus: conflictStatus,
+            autoDownloadAllowed: autoDownloadAllowed ?? true,
+            metadata: [:]
+        )
+    }
+
+    private var inferredOwnerID: String {
+        if let logicalName, !logicalName.isEmpty {
+            return logicalName
+        }
+        return objectID.split(separator: ":", maxSplits: 1).last.map(String.init) ?? objectID
+    }
+}
+
+extension LocalNetworkSyncFolderEntry {
+    var syncDirectory: SyncDirectory {
+        SyncDirectory(
+            directoryID: folderID,
+            parentID: parentID,
+            pathComponents: path?.split(separator: "/").map(String.init) ?? [name],
+            name: name,
+            colorToken: colorToken,
+            updatedAt: updatedAt,
+            tombstone: deleted,
+            revisionHash: revisionHash
+        )
+    }
 }
 
 struct LocalNetworkSyncDeviceSection: Codable, Equatable {
@@ -1302,6 +1490,7 @@ struct LocalNetworkSyncInventoryRequest: Codable, Equatable {
     var deviceID: String
     var generatedAt: Date
     var localInventoryHash: String?
+    var syncRunID: String? = nil
 }
 
 struct LocalNetworkSyncInventoryResponse: Codable, Equatable {
@@ -1312,6 +1501,9 @@ struct LocalNetworkSyncInventoryResponse: Codable, Equatable {
 
 struct LocalNetworkSyncArtifactRequest: Codable, Equatable {
     var artifactID: String
+    var offset: Int64? = nil
+    var length: Int? = nil
+    var syncRunID: String? = nil
 }
 
 struct LocalNetworkSyncArtifactResponse: Codable, Equatable {
@@ -1322,6 +1514,9 @@ struct LocalNetworkSyncArtifactResponse: Codable, Equatable {
     var size: Int64?
     var logicalPathToken: String?
     var dataBase64: String?
+    var offset: Int64? = nil
+    var totalSize: Int64? = nil
+    var isFinalChunk: Bool? = nil
     var error: String?
 }
 
@@ -1334,6 +1529,11 @@ struct LocalNetworkSyncArtifactPutRequest: Codable, Equatable {
     var updatedAt: Date
     var logicalPathToken: String
     var dataBase64: String
+    var offset: Int64? = nil
+    var chunkSize: Int? = nil
+    var totalSize: Int64? = nil
+    var isFinalChunk: Bool? = nil
+    var syncRunID: String? = nil
 }
 
 struct LocalNetworkSyncArtifactPutResponse: Codable, Equatable {
@@ -1342,6 +1542,28 @@ struct LocalNetworkSyncArtifactPutResponse: Codable, Equatable {
     var disposition: String?
     var checksum: String?
     var size: Int64?
+    var confirmedBytes: Int64? = nil
+    var error: String?
+}
+
+struct LocalNetworkSyncArtifactStatusRequest: Codable, Equatable {
+    var artifactID: String
+    var kind: LocalNetworkSyncArtifactKind? = nil
+    var ownerID: String? = nil
+    var logicalPathToken: String? = nil
+    var checksum: String? = nil
+    var size: Int64? = nil
+    var syncRunID: String? = nil
+}
+
+struct LocalNetworkSyncArtifactStatusResponse: Codable, Equatable {
+    var ok: Bool
+    var artifactID: String?
+    var checksum: String?
+    var size: Int64?
+    var confirmedBytes: Int64?
+    var nextOffset: Int64?
+    var state: LocalNetworkTransferState?
     var error: String?
 }
 
@@ -1383,12 +1605,169 @@ struct LocalNetworkSyncDiffPlanner {
         peer: LocalNetworkSyncInventory,
         lastSuccessfulSyncAt: Date?
     ) -> LocalNetworkSyncDiffPlan {
-        var plan = LocalNetworkSyncDiffPlan()
-        compareRecordings(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
-        compareFolders(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
-        compareStudyItems(local: local, peer: peer, lastSuccessfulSyncAt: lastSuccessfulSyncAt, plan: &plan)
-        compareArtifacts(local: local, peer: peer, plan: &plan)
+        let corePlan = SyncDiffPlanner().plan(
+            local: local.syncCoreInventory,
+            peer: peer.syncCoreInventory,
+            lastSuccessfulSyncAt: lastSuccessfulSyncAt
+        )
+        var plan = makeCompatibilityPlan(from: corePlan)
+        appendRecordingReceiveStatusNoOps(local: local, peer: peer, plan: &plan)
         return plan
+    }
+
+    private func makeCompatibilityPlan(from corePlan: SyncDiffPlan) -> LocalNetworkSyncDiffPlan {
+        var plan = LocalNetworkSyncDiffPlan()
+        for action in corePlan.actions {
+            append(action, to: &plan)
+        }
+        return plan
+    }
+
+    private func append(_ action: SyncDiffAction, to plan: inout LocalNetworkSyncDiffPlan) {
+        guard let objectKind = LocalNetworkSyncObjectKind(rawValue: action.objectKind) else {
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: "object", entityID: action.objectID, reason: "unknown_object_kind"))
+            return
+        }
+
+        switch objectKind {
+        case .recordingAudio:
+            appendRecordingAudioAction(action, to: &plan)
+        case .recordingMetadata:
+            appendMetadataAction(action, entityKind: "recording", entityID: action.ownerID, to: &plan)
+        case .studyFolder:
+            appendMetadataAction(action, entityKind: "folder", entityID: action.ownerID, to: &plan)
+        case .studyItem:
+            appendMetadataAction(action, entityKind: "studyItem", entityID: action.ownerID, to: &plan)
+        case .receiveRecord, .transcriptMarkdown, .transcriptJSON, .noteMarkdown, .noteJSON, .summaryMarkdown, .summaryJSON:
+            appendArtifactAction(action, to: &plan)
+        }
+    }
+
+    private func appendRecordingAudioAction(_ action: SyncDiffAction, to plan: inout LocalNetworkSyncDiffPlan) {
+        switch action.kind {
+        case .uploadObject:
+            plan.uploadRecordingAudioActions.append(legacyAction(.uploadRecordingAudio, action: action, entityKind: "recording", entityID: action.ownerID, reason: "peer_missing_audio_use_existing_upload"))
+        case .downloadObject:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: "audio_auto_download_disabled"))
+        case .conflict:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: "audio_uses_recording_upload"))
+        case .noOp, .skip:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: action.reason))
+        case .applyTombstone:
+            appendMetadataAction(action, entityKind: "recording", entityID: action.ownerID, to: &plan)
+        case .updateMetadata, .useExistingUploadPath:
+            plan.uploadRecordingAudioActions.append(legacyAction(.uploadRecordingAudio, action: action, entityKind: "recording", entityID: action.ownerID, reason: "peer_missing_audio_use_existing_upload"))
+        }
+    }
+
+    private func appendMetadataAction(
+        _ action: SyncDiffAction,
+        entityKind: String,
+        entityID: String,
+        to plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        switch action.kind {
+        case .uploadObject, .updateMetadata:
+            plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: metadataReason(action.reason, entityKind: entityKind, uploading: true)))
+        case .downloadObject:
+            plan.downloadMetadataActions.append(legacyAction(.downloadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: metadataReason(action.reason, entityKind: entityKind, uploading: false)))
+        case .applyTombstone:
+            if action.direction == .upload {
+                plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+            } else {
+                plan.downloadMetadataActions.append(legacyAction(.downloadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+            }
+        case .conflict:
+            plan.conflictActions.append(legacyAction(.conflict, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+        case .noOp:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: entityKind, entityID: entityID, reason: entityKind == "recording" && action.reason == "checksum_equal" ? "metadata_equal" : action.reason))
+        case .skip:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+        case .useExistingUploadPath:
+            plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+        }
+    }
+
+    private func appendArtifactAction(_ action: SyncDiffAction, to plan: inout LocalNetworkSyncDiffPlan) {
+        switch action.kind {
+        case .uploadObject:
+            plan.uploadArtifactActions.append(legacyAction(.uploadArtifact, action: action, entityKind: "artifact", entityID: action.objectID, reason: artifactReason(action.reason, uploading: true)))
+        case .downloadObject:
+            plan.downloadArtifactActions.append(legacyAction(.downloadArtifact, action: action, entityKind: "artifact", entityID: action.objectID, reason: artifactReason(action.reason, uploading: false)))
+        case .conflict:
+            plan.conflictActions.append(legacyAction(.conflict, action: action, entityKind: "artifact", entityID: action.objectID, reason: "artifact_checksum_conflict"))
+        case .noOp:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: "artifact", entityID: action.objectID, reason: action.reason))
+        case .skip:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: "artifact", entityID: action.objectID, reason: action.reason))
+        case .applyTombstone, .updateMetadata, .useExistingUploadPath:
+            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: "artifact", entityID: action.objectID, reason: action.reason))
+        }
+    }
+
+    private func appendRecordingReceiveStatusNoOps(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        let localByID = Dictionary(uniqueKeysWithValues: local.recordings.map { ($0.recordingID, $0) })
+        for peerRecording in peer.recordings where peerRecording.audioAvailable == false {
+            guard localByID[peerRecording.recordingID]?.audioAvailable == true,
+                  !plan.uploadRecordingAudioActions.contains(where: { $0.entityID == peerRecording.recordingID }) else {
+                continue
+            }
+            plan.uploadRecordingAudioActions.append(action(.uploadRecordingAudio, entityKind: "recording", entityID: peerRecording.recordingID, reason: "peer_missing_audio_use_existing_upload"))
+        }
+    }
+
+    private func metadataReason(_ reason: String, entityKind: String, uploading: Bool) -> String {
+        switch reason {
+        case "peer_missing_object":
+            return entityKind == "recording" ? "peer_missing_recording" : "peer_missing"
+        case "local_missing_object":
+            return entityKind == "recording" ? "local_missing_recording_metadata" : "local_missing"
+        case "local_object_newer", "local_object_more_complete":
+            return entityKind == "recording" ? "local_recording_newer" : "local_newer"
+        case "peer_object_newer", "peer_object_more_complete":
+            return entityKind == "recording" ? "peer_recording_newer" : "peer_newer"
+        default:
+            return reason
+        }
+    }
+
+    private func artifactReason(_ reason: String, uploading: Bool) -> String {
+        switch reason {
+        case "peer_missing_object":
+            return "peer_missing_artifact"
+        case "local_missing_object":
+            return "local_missing_artifact"
+        case "local_object_newer", "local_object_more_complete":
+            return "local_artifact_newer"
+        case "peer_object_newer", "peer_object_more_complete":
+            return "peer_artifact_newer"
+        default:
+            return reason
+        }
+    }
+
+    private func legacyAction(
+        _ kind: LocalNetworkSyncDiffActionKind,
+        action: SyncDiffAction,
+        entityKind: String,
+        entityID: String,
+        reason: String
+    ) -> LocalNetworkSyncDiffAction {
+        LocalNetworkSyncDiffAction(
+            id: "\(kind.rawValue):\(entityKind):\(entityID):\(reason)",
+            kind: kind,
+            entityKind: entityKind,
+            entityID: entityID,
+            reason: reason
+        )
+    }
+
+    private func isArtifactID(_ objectID: String) -> Bool {
+        objectID.hasPrefix("artifact_")
     }
 
     private func compareRecordings(
@@ -1600,6 +1979,9 @@ struct LocalNetworkSyncState: Codable, Equatable {
     var lastPlanSummary: String?
     var lastConflictCount: Int?
     var activeTransfers: [LocalNetworkTransferProgress]
+    var activeSyncRunID: String?
+    var controlPlaneState: LocalNetworkSyncControlPlaneState?
+    var lastControlPlaneUpdatedAt: Date?
 
     static var empty: LocalNetworkSyncState {
         LocalNetworkSyncState(
@@ -1622,7 +2004,10 @@ struct LocalNetworkSyncState: Codable, Equatable {
             pendingDownloadCount: 0,
             lastPlanSummary: nil,
             lastConflictCount: nil,
-            activeTransfers: []
+            activeTransfers: [],
+            activeSyncRunID: nil,
+            controlPlaneState: .idle,
+            lastControlPlaneUpdatedAt: nil
         )
     }
 }

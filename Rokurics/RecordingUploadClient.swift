@@ -255,17 +255,54 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         progress: RecordingUploadProgressHandler? = nil,
         resumeContext: RecordingUploadResumeContext?
     ) async throws -> RecordingUploadResult {
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "uploadClientEntered",
+            recordingID: metadata.id,
+            eventResult: "begin",
+            uploadStatus: metadata.uploadStatus,
+            resolvedRelativePathToken: metadata.relativeAudioPath
+        )
         guard settings.isPaired else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "not_paired",
+                uploadStatus: metadata.uploadStatus
+            )
             throw RecordingUploadError.notPaired
         }
 
         let audioURL = try audioFileStore.audioURL(for: metadata)
         guard audioFileStore.fileExists(at: audioURL) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "audio_file_missing",
+                uploadStatus: metadata.uploadStatus,
+                fileExists: false,
+                resolvedRelativePathToken: metadata.relativeAudioPath
+            )
             throw RecordingUploadError.audioFileMissing
         }
 
         let audioSize = try audioFileStore.fileSize(at: audioURL)
         guard audioSize <= Self.resumableAudioMaxBytes else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "audio_file_too_large",
+                uploadStatus: metadata.uploadStatus,
+                fileExists: true,
+                fileSize: audioSize,
+                resolvedRelativePathToken: metadata.relativeAudioPath
+            )
             throw RecordingUploadError.fileTooLarge(limitBytes: Int(Self.resumableAudioMaxBytes))
         }
 
@@ -276,7 +313,27 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
             resumeContext: resumeContext
         )
 
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "audioUploadDecisionMade",
+            recordingID: metadata.id,
+            eventResult: "success",
+            reasonCode: audioSize >= resumableThresholdBytes ? RecordingUploadMode.resumableChunks.rawValue : RecordingUploadMode.singleRequest.rawValue,
+            uploadStatus: metadata.uploadStatus,
+            fileExists: true,
+            fileSize: audioSize,
+            totalBytes: audioSize
+        )
         if audioSize >= resumableThresholdBytes {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "resumableAudioUploadSelected",
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                fileSize: audioSize,
+                totalBytes: audioSize
+            )
             return try await uploadResumableAudio(
                 metadata: metadata,
                 settings: settings,
@@ -291,6 +348,26 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         let audioResponse: SecureUploadServerResponse
         do {
             try progress?(.audioStarted)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "smallAudioUploadSelected",
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio",
+                fileSize: audioSize,
+                totalBytes: audioSize
+            )
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadRequestBuilt",
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio",
+                fileSize: audioSize,
+                totalBytes: audioSize
+            )
             audioResponse = try await secureClient.uploadSignedFile(
                 settings: settings,
                 path: "/upload-recording-audio",
@@ -303,12 +380,45 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 resourceTimeout: 60 * 30
             )
         } catch let error as SecureMacUploadError {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "secure_upload_error",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio",
+                errorDomain: "SecureMacUploadError",
+                safeErrorMessage: error.localizedDescription
+            )
             throw RecordingUploadError.audioUploadFailed(error.localizedDescription)
         } catch {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "audio_upload_error",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio",
+                errorDomain: "RecordingUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw RecordingUploadError.audioUploadFailed(error.localizedDescription)
         }
 
         guard audioResponse.ok else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: audioResponse.error ?? "audio_upload_failed",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio",
+                macReceiveState: audioResponse.receiveStatus,
+                safeErrorMessage: audioResponse.error
+            )
             throw RecordingUploadError.audioUploadFailed(audioResponse.error ?? "audio_upload_failed")
         }
         try progress?(.audioSucceeded(disposition: audioResponse.disposition))
@@ -329,6 +439,15 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         resumeContext: RecordingUploadResumeContext?
     ) async throws -> SecureUploadServerResponse {
         if resumeContext?.metadataStage == .succeeded {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "metadataUploadCompleted",
+                recordingID: metadata.id,
+                eventResult: "success",
+                reasonCode: "resume_context_metadata_succeeded",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-metadata"
+            )
             return SecureUploadServerResponse(
                 ok: true,
                 message: "metadata already uploaded",
@@ -354,6 +473,15 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         let metadataResponse: SecureUploadServerResponse
         do {
             try progress?(.metadataStarted)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "metadataUploadStarted",
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-metadata",
+                bodyBytes: metadataBody.count
+            )
             metadataResponse = try await secureClient.uploadSignedData(
                 settings: settings,
                 path: "/upload-recording-metadata",
@@ -366,15 +494,58 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 resourceTimeout: 30
             )
         } catch let error as SecureMacUploadError {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "metadataUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "secure_upload_error",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-metadata",
+                errorDomain: "SecureMacUploadError",
+                safeErrorMessage: error.localizedDescription
+            )
             throw RecordingUploadError.metadataUploadFailed(error.localizedDescription)
         } catch {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "metadataUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "metadata_upload_error",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-metadata",
+                errorDomain: "RecordingUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw RecordingUploadError.metadataUploadFailed(error.localizedDescription)
         }
 
         guard metadataResponse.ok else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "metadataUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: metadataResponse.error ?? "metadata_upload_failed",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-metadata",
+                macReceiveState: metadataResponse.receiveStatus,
+                safeErrorMessage: metadataResponse.error
+            )
             throw RecordingUploadError.metadataUploadFailed(metadataResponse.error ?? "metadata_upload_failed")
         }
         try progress?(.metadataSucceeded(disposition: metadataResponse.disposition))
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "metadataUploadCompleted",
+            recordingID: metadata.id,
+            eventResult: "success",
+            reasonCode: metadataResponse.disposition,
+            uploadStatus: metadata.uploadStatus,
+            httpPath: "/upload-recording-metadata",
+            macReceiveState: metadataResponse.receiveStatus
+        )
         return metadataResponse
     }
 
@@ -402,6 +573,16 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         try progress?(.audioStarted)
 
         if let existingSessionID = sessionID {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "resumableStatusStarted",
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: metadata.uploadStatus,
+                sessionID: existingSessionID,
+                httpPath: "/upload-recording-audio-session/status",
+                totalBytes: audioSize
+            )
             let statusResponse = try await secureClient.fetchResumableAudioUploadStatus(
                 settings: settings,
                 request: ResumableAudioUploadStatusRequest(
@@ -411,6 +592,20 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 )
             )
             if statusResponse.completed || statusResponse.finalAudioExists == true {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "resumableStatusCompleted",
+                    recordingID: metadata.id,
+                    eventResult: "success",
+                    reasonCode: statusResponse.disposition,
+                    uploadStatus: metadata.uploadStatus,
+                    sessionID: existingSessionID,
+                    httpPath: "/upload-recording-audio-session/status",
+                    confirmedBytes: statusResponse.confirmedBytes,
+                    totalBytes: audioSize,
+                    macReceiveState: statusResponse.receiveStatus,
+                    audioRelativePathSet: statusResponse.finalAudioRelativePath != nil
+                )
                 try progress?(.audioSucceeded(disposition: statusResponse.disposition ?? "acceptedExisting"))
                 return RecordingUploadResult(
                     recordingID: metadata.id,
@@ -421,6 +616,18 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 )
             }
             if statusResponse.ok {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "resumableStatusCompleted",
+                    recordingID: metadata.id,
+                    eventResult: "success",
+                    reasonCode: statusResponse.disposition,
+                    uploadStatus: metadata.uploadStatus,
+                    sessionID: existingSessionID,
+                    httpPath: "/upload-recording-audio-session/status",
+                    confirmedBytes: statusResponse.confirmedBytes,
+                    totalBytes: audioSize
+                )
                 confirmedBytes = statusResponse.confirmedBytes
                 nextOffset = statusResponse.nextOffset
                 audioDisposition = statusResponse.disposition
@@ -437,6 +644,15 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         }
 
         if sessionID == nil {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "resumableStartStarted",
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: metadata.uploadStatus,
+                httpPath: "/upload-recording-audio-session/start",
+                totalBytes: audioSize
+            )
             let startResponse = try await secureClient.startResumableAudioUpload(
                 settings: settings,
                 request: ResumableAudioUploadStartRequest(
@@ -450,8 +666,30 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 )
             )
             guard startResponse.ok, let startedSessionID = startResponse.sessionID else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "audioUploadFailed",
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: startResponse.error ?? "resumable_start_failed",
+                    uploadStatus: metadata.uploadStatus,
+                    httpPath: "/upload-recording-audio-session/start",
+                    safeErrorMessage: startResponse.error
+                )
                 throw RecordingUploadError.audioUploadFailed(startResponse.error ?? "resumable_start_failed")
             }
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "resumableStartCompleted",
+                recordingID: metadata.id,
+                eventResult: "success",
+                reasonCode: startResponse.disposition,
+                uploadStatus: metadata.uploadStatus,
+                sessionID: startedSessionID,
+                httpPath: "/upload-recording-audio-session/start",
+                confirmedBytes: startResponse.confirmedBytes,
+                totalBytes: audioSize
+            )
             sessionID = startedSessionID
             confirmedBytes = startResponse.confirmedBytes
             nextOffset = startResponse.nextOffset
@@ -488,8 +726,32 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         while confirmedBytes < audioSize {
             let chunk = try readChunk(from: fileHandle, offset: nextOffset, maximumLength: normalizedChunkSize)
             guard !chunk.isEmpty else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "audioUploadFailed",
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: "audio_chunk_read_failed",
+                    uploadStatus: metadata.uploadStatus,
+                    sessionID: activeSessionID,
+                    chunkOffset: nextOffset,
+                    totalBytes: audioSize
+                )
                 throw RecordingUploadError.audioUploadFailed("audio_chunk_read_failed")
             }
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "resumableChunkStarted",
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: metadata.uploadStatus,
+                sessionID: activeSessionID,
+                httpPath: "/upload-recording-audio-session/chunk",
+                chunkOffset: nextOffset,
+                chunkLength: chunk.count,
+                confirmedBytes: confirmedBytes,
+                totalBytes: audioSize
+            )
             let chunkResponse = try await secureClient.uploadResumableAudioChunk(
                 settings: settings,
                 recordingID: metadata.id,
@@ -499,6 +761,19 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 chunk: chunk
             )
             guard chunkResponse.ok else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "audioUploadFailed",
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: chunkResponse.error ?? "resumable_chunk_failed",
+                    uploadStatus: metadata.uploadStatus,
+                    sessionID: activeSessionID,
+                    httpPath: "/upload-recording-audio-session/chunk",
+                    chunkOffset: nextOffset,
+                    chunkLength: chunk.count,
+                    safeErrorMessage: chunkResponse.error
+                )
                 throw RecordingUploadError.audioUploadFailed(chunkResponse.error ?? "resumable_chunk_failed")
             }
             confirmedBytes = chunkResponse.confirmedBytes
@@ -523,8 +798,35 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
             )
         )
         guard finalizeResponse.ok else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioUploadFailed",
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: finalizeResponse.error ?? "resumable_finalize_failed",
+                uploadStatus: metadata.uploadStatus,
+                sessionID: activeSessionID,
+                httpPath: "/upload-recording-audio-session/finalize",
+                confirmedBytes: confirmedBytes,
+                totalBytes: audioSize,
+                safeErrorMessage: finalizeResponse.error
+            )
             throw RecordingUploadError.audioUploadFailed(finalizeResponse.error ?? "resumable_finalize_failed")
         }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "resumableFinalizeCompleted",
+            recordingID: metadata.id,
+            eventResult: "success",
+            reasonCode: finalizeResponse.disposition ?? audioDisposition,
+            uploadStatus: metadata.uploadStatus,
+            sessionID: activeSessionID,
+            httpPath: "/upload-recording-audio-session/finalize",
+            confirmedBytes: finalizeResponse.confirmedBytes,
+            totalBytes: audioSize,
+            macReceiveState: finalizeResponse.receiveStatus,
+            audioRelativePathSet: finalizeResponse.finalAudioRelativePath != nil
+        )
         try progress?(.audioSucceeded(disposition: finalizeResponse.disposition ?? audioDisposition))
 
         return RecordingUploadResult(

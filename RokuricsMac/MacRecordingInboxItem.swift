@@ -28,6 +28,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     let studyFiling: StudyFilingPath?
     let isDeleted: Bool
     let deletedAt: Date?
+    let transferProgress: LocalNetworkTransferProgress?
 
     init(
         id: String,
@@ -49,7 +50,8 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         isDeleted: Bool = false,
         deletedAt: Date? = nil,
         noteRelativePath: String? = nil,
-        noteError: String? = nil
+        noteError: String? = nil,
+        transferProgress: LocalNetworkTransferProgress? = nil
     ) {
         self.id = id
         self.title = title
@@ -71,6 +73,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         self.studyFiling = studyFiling?.isEmpty == true ? nil : studyFiling
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
+        self.transferProgress = transferProgress
     }
 
     var statusText: String {
@@ -125,6 +128,10 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     var localNetworkReceiveTransferProgress: LocalNetworkTransferProgress? {
         guard !hasAudio, receiveStatus != "completed" else {
             return nil
+        }
+
+        if let transferProgress, transferProgress.isVisibleInActionArea {
+            return transferProgress
         }
 
         let state: LocalNetworkTransferState = receiveStatus == "failed" ? .failed : .pending

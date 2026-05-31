@@ -11,6 +11,100 @@ import Foundation
 
 @MainActor
 struct RokuricsTests {
+    @Test func sharedSyncCorePlansObjectDiffsWithoutFileTypeBranches() {
+        let date = Date(timeIntervalSince1970: 10)
+        let localAudio = SyncObject(
+            objectID: "recordingAudio:shared-core-audio",
+            objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+            ownerID: "shared-core-audio",
+            displayTitle: "Shared core audio",
+            fileName: "audio.m4a",
+            logicalName: "audio.m4a",
+            sha256: nil,
+            size: 5,
+            updatedAt: date,
+            tombstone: false,
+            deleted: false,
+            sourceDeviceID: "iphone-01",
+            logicalPathToken: nil,
+            availability: .local,
+            transferState: nil,
+            transferProgress: nil,
+            conflictStatus: nil,
+            autoDownloadAllowed: false,
+            metadata: [:]
+        )
+        var peerMissingAudio = localAudio
+        peerMissingAudio.size = nil
+        peerMissingAudio.availability = .missing
+        peerMissingAudio.sourceDeviceID = "mac-01"
+
+        let local = SyncInventory.make(
+            sourceDeviceID: "iphone-01",
+            sourcePlatform: "iPhone",
+            generatedAt: date,
+            inventoryRevision: "local",
+            objects: [localAudio]
+        )
+        let peer = SyncInventory.make(
+            sourceDeviceID: "mac-01",
+            sourcePlatform: "Mac",
+            generatedAt: date,
+            inventoryRevision: "peer",
+            objects: [peerMissingAudio]
+        )
+
+        let plan = SyncDiffPlanner().plan(local: local, peer: peer, lastSuccessfulSyncAt: nil)
+
+        #expect(plan.uploadObjectActions.map(\.objectID) == ["recordingAudio:shared-core-audio"])
+        #expect(plan.uploadObjectActions.first?.reason == "local_object_more_complete")
+    }
+
+    @Test func localNetworkInventoryBridgesToSharedSyncCoreObjects() {
+        let generatedAt = Date(timeIntervalSince1970: 11)
+        let recording = LocalNetworkSyncRecordingEntry(
+            recordingID: "shared-core-recording",
+            metadataHash: "metadata-hash",
+            audioAvailable: true,
+            audioChecksum: nil,
+            audioSize: 128,
+            uploadLedgerState: nil,
+            receiveStatus: nil,
+            processingStatus: nil,
+            updatedAt: generatedAt,
+            deleted: false,
+            title: "Shared core recording",
+            createdAt: generatedAt,
+            tombstone: false,
+            audioAvailability: .local,
+            uploadStatus: "localOnly",
+            transcriptionStatus: "notStarted",
+            noteStatus: "notStarted",
+            sourceDeviceID: "iphone-01",
+            artifactRefs: nil
+        )
+        let inventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "iphone-01",
+                deviceName: "iPhone",
+                platform: .iPhone,
+                generatedAt: generatedAt,
+                lastKnownPeerRevision: "peer-rev",
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            recordings: [recording]
+        )
+
+        let coreInventory = inventory.syncCoreInventory
+        let metadataObject = coreInventory.objects.first { $0.objectKind == LocalNetworkSyncObjectKind.recordingMetadata.rawValue }
+        let audioObject = coreInventory.objects.first { $0.objectID == "recordingAudio:shared-core-recording" }
+
+        #expect(coreInventory.hasValidInventoryHash)
+        #expect(coreInventory.lastKnownPeerRevision == "peer-rev")
+        #expect(metadataObject?.ownerID == "shared-core-recording")
+        #expect(audioObject?.size == 128)
+        #expect(audioObject?.autoDownloadAllowed == false)
+    }
 
     @Test func iphoneTypographyTokensExistAndChatStylesStaySeparate() {
         #expect(RokuricsTypographyToken.allCases == [
@@ -670,8 +764,48 @@ struct RokuricsTests {
         #expect(RecordingUploadCapsulePresentation.resolve(status: .localOnly, isMacPaired: true).isEnabled)
         #expect(RecordingUploadCapsulePresentation.resolve(status: .failed, isMacPaired: true).isEnabled)
         #expect(!RecordingUploadCapsulePresentation.resolve(status: .uploading, isMacPaired: true).isEnabled)
-        #expect(!RecordingUploadCapsulePresentation.resolve(status: .uploaded, isMacPaired: true).isEnabled)
+        #expect(RecordingUploadCapsulePresentation.resolve(status: .uploaded, isMacPaired: true).isEnabled)
         #expect(!RecordingUploadCapsulePresentation.resolve(status: .localOnly, isMacPaired: false).isEnabled)
+        #expect(!RecordingUploadCapsulePresentation.resolve(status: .uploaded, isMacPaired: false).isEnabled)
+    }
+
+    @Test func uploadFlightRecorderWritesSanitizedJSONLines() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RokuricsUploadTraceTests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            UploadFlightRecorder.configureLogURL(nil)
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        let traceURL = rootURL.appendingPathComponent("upload-trace.jsonl", isDirectory: false)
+        UploadFlightRecorder.configureLogURL(traceURL)
+
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadActionFired",
+            traceID: "upl-test-trace-iphone",
+            recordingID: "recording-sensitive-full-id",
+            eventResult: "begin",
+            httpPath: "/upload-recording-audio?token=secret",
+            fileExists: true,
+            fileSize: 5,
+            resolvedRelativePathToken: "/Users/vita/private/audio.m4a",
+            safeErrorMessage: "/Users/vita/private/audio.m4a"
+        )
+
+        let events = try UploadFlightRecorder.loadEvents(from: traceURL)
+        let event = try #require(events.first)
+        let rawText = try String(contentsOf: traceURL, encoding: .utf8)
+
+        #expect(event.traceID == "upl-test-trace-iphone")
+        #expect(event.side == .iPhone)
+        #expect(event.recordingIDPrefix == "recording-se")
+        #expect(event.httpPath == "/upload-recording-audio")
+        #expect(event.resolvedRelativePathToken == "absolute_path_redacted")
+        #expect(event.safeErrorMessage == "private_path_redacted")
+        #expect(rawText.contains(UploadFlightRecorder.logPrefix))
+        #expect(!rawText.contains("/Users/vita"))
+        #expect(!rawText.contains("recording-sensitive-full-id"))
     }
 
     @Test func staleUploadingStatusRecoversToFailedOnRecordingManagerLoad() throws {
@@ -885,6 +1019,144 @@ struct RokuricsTests {
         #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
         #expect(coordinator.errorMessage(for: metadata) == nil)
         #expect(fakeClient.lastMetadata?.id == metadata.id)
+    }
+
+    @Test func uploadedLocalStatusStillRunsMainAudioUploadWhenLedgerDidNotCompleteAudio() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(
+            id: "uploaded-but-mac-awaiting-audio",
+            title: "状态已上传但 Mac 缺音频",
+            store: store,
+            uploadStatus: RecordingUploadStatus.uploaded.rawValue
+        )
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let fakeClient = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedExisting",
+            audioDisposition: "acceptedNew"
+        )), events: [
+            .metadataStarted,
+            .metadataSucceeded(disposition: "acceptedExisting"),
+            .audioStarted,
+            .audioSucceeded(disposition: "acceptedNew")
+        ])
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager
+        )
+        let job = try #require(try jobStore.loadJob(recordingID: metadata.id))
+
+        #expect(status == .uploaded)
+        #expect(fakeClient.uploadRequestCount == 1)
+        #expect(fakeClient.lastMetadata?.id == metadata.id)
+        #expect(job.overallState == .succeeded)
+        #expect(job.metadataDisposition == .acceptedExisting)
+        #expect(job.audioDisposition == .acceptedNew)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
+    @Test func uploadedLocalStatusUploadEmitsFlightRecorderStages() async throws {
+        let (store, rootURL) = try makeStore()
+        defer {
+            UploadFlightRecorder.configureLogURL(nil)
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        let traceURL = rootURL.appendingPathComponent("upload-trace.jsonl", isDirectory: false)
+        UploadFlightRecorder.configureLogURL(traceURL)
+        let metadata = try saveRecording(
+            id: "uploaded-trace-redrive",
+            title: "状态已上传但需要重传",
+            store: store,
+            uploadStatus: RecordingUploadStatus.uploaded.rawValue
+        )
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let fakeClient = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedExisting",
+            audioDisposition: "acceptedNew"
+        )), events: [
+            .metadataStarted,
+            .metadataSucceeded(disposition: "acceptedExisting"),
+            .audioStarted,
+            .audioSucceeded(disposition: "acceptedNew")
+        ])
+        let coordinator = RecordingUploadCoordinator(uploadClient: fakeClient, jobStore: jobStore)
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager,
+            traceID: "upl-test-uploaded-redrive"
+        )
+        let stages = Set(try UploadFlightRecorder.loadEvents(from: traceURL).map(\.stage))
+
+        #expect(status == .uploaded)
+        #expect(fakeClient.uploadRequestCount == 1)
+        #expect(stages.contains("uploadCoordinatorEntered"))
+        #expect(stages.contains("uploadCoordinatorLedgerLoaded"))
+        #expect(stages.contains("uploadCoordinatorLedgerCompletedDetected"))
+        #expect(stages.contains("uploadCoordinatorAudioResolved"))
+        #expect(stages.contains("uploadCoordinatorFileSizeChecked"))
+        #expect(stages.contains("metadataUploadStarted"))
+        #expect(stages.contains("metadataUploadCompleted"))
+        #expect(stages.contains("audioUploadStarted"))
+        #expect(stages.contains("audioUploadCompleted"))
+        #expect(stages.contains("uploadCoordinatorClientCallCompleted"))
+    }
+
+    @Test func preparedSignedJSONRequestCarriesTraceHeaderWithoutChangingSignatureInputs() throws {
+        let traceID = "upl-test-prepared-json"
+        let client = SecureMacUploadClient()
+        let body = ResumableAudioUploadStartRequest(
+            recordingID: "prepared-json-recording",
+            fileName: "audio.m4a",
+            totalBytes: 5,
+            totalSHA256: String(repeating: "b", count: 64),
+            chunkSize: 3,
+            metadataHash: nil,
+            uploadJobID: "prepared-json-recording"
+        )
+
+        let prepared = try UploadFlightRecorder.$currentTraceID.withValue(traceID) {
+            try client.prepareSignedJSONRequest(
+                settings: makePairedMacSnapshot(),
+                path: "/upload-recording-audio-session/start",
+                body: body,
+                now: Date(timeIntervalSince1970: 2_000)
+            )
+        }
+        let bodyHash = SecureUploadUtilities.sha256Hex(prepared.body)
+        let timestamp = try #require(prepared.headers["X-Rokurics-Timestamp"])
+        let nonce = try #require(prepared.headers["X-Rokurics-Nonce"])
+        let payload = [
+            "POST",
+            "/upload-recording-audio-session/start",
+            timestamp,
+            nonce,
+            bodyHash
+        ].joined(separator: "\n")
+        let expectedSignature = try #require(SecureUploadUtilities.hmacSHA256Base64URL(
+            message: payload,
+            secretBase64URL: makePairedMacSnapshot().sharedSecretBase64URL
+        ))
+        let bodyText = String(data: prepared.body, encoding: .utf8) ?? ""
+
+        #expect(prepared.headers[UploadFlightRecorder.traceHeaderName] == traceID)
+        #expect(prepared.headers["X-Rokurics-Body-SHA256"] == bodyHash)
+        #expect(prepared.headers["X-Rokurics-Signature"] == expectedSignature)
+        #expect(prepared.url.path == "/upload-recording-audio-session/start")
+        #expect(!bodyText.contains(traceID))
+        #expect(!bodyText.localizedCaseInsensitiveContains("sharedSecret"))
     }
 
     @Test func metadataSuccessAndAudioTemporaryFailureLeavesRetryableJob() async throws {
@@ -1593,7 +1865,6 @@ struct RokuricsTests {
         #expect(manualResult == nil)
         #expect(!coordinator.isAutomaticSyncMonitoringActive)
         #expect(coordinator.syncSummary.statusText == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
-        #expect(coordinator.connectionStatus.lastSyncStatus == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
         #expect(syncStateStore.state.pendingLocalChanges == 5)
         #expect(syncStateStore.state.pendingUploads == 2)
         #expect(syncStateStore.state.failedChanges == 1)
@@ -1942,10 +2213,18 @@ struct RokuricsTests {
         #expect(try audioStore.loadMetadata(id: "state-corruption-audio").id == "state-corruption-audio")
     }
 
-    @Test func localNetworkSchedulerPreventsReentrantTicks() async {
+    @Test func localNetworkSchedulerQueuesOneTickWhenReentrant() async {
         var tickCount = 0
-        let scheduler = LocalNetworkSyncScheduler(interval: 0.01) { _ in
+        var triggers: [String] = []
+        var queuedTriggers: [String] = []
+        let scheduler = LocalNetworkSyncScheduler(
+            interval: 0.01,
+            onInFlightRequestQueued: { trigger in
+                queuedTriggers.append(trigger)
+            }
+        ) { trigger, _ in
             tickCount += 1
+            triggers.append(trigger)
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
@@ -1956,19 +2235,23 @@ struct RokuricsTests {
 
         #expect(firstResult)
         #expect(!second)
-        #expect(tickCount == 1)
+        #expect(tickCount == 2)
+        #expect(triggers == ["first", "second"])
+        #expect(queuedTriggers == ["second"])
     }
 
-    @Test func localNetworkSyncSchedulerAllowsTenThirtySixtySecondIntervals() {
-        let ten = LocalNetworkSyncScheduler(interval: 10) { _ in }
-        let thirty = LocalNetworkSyncScheduler(interval: 30) { _ in }
-        let sixty = LocalNetworkSyncScheduler(interval: 60) { _ in }
-        let fallback = LocalNetworkSyncScheduler(interval: 17) { _ in }
+    @Test func localNetworkSyncSchedulerDefaultsToSixtyAndAllowsTenThirtySixtySecondIntervals() {
+        let defaultScheduler = LocalNetworkSyncScheduler { _, _ in }
+        let ten = LocalNetworkSyncScheduler(interval: 10) { _, _ in }
+        let thirty = LocalNetworkSyncScheduler(interval: 30) { _, _ in }
+        let sixty = LocalNetworkSyncScheduler(interval: 60) { _, _ in }
+        let fallback = LocalNetworkSyncScheduler(interval: 17) { _, _ in }
 
+        #expect(defaultScheduler.configuredInterval == 60)
         #expect(ten.configuredInterval == 10)
         #expect(thirty.configuredInterval == 30)
         #expect(sixty.configuredInterval == 60)
-        #expect(fallback.configuredInterval == 30)
+        #expect(fallback.configuredInterval == 60)
     }
 
     @Test func localNetworkSyncStartGateRequiresActivePairedAndOnline() throws {
@@ -2248,6 +2531,68 @@ struct RokuricsTests {
         #expect(status.latencyMilliseconds != nil)
     }
 
+    @Test func heartbeatSyncRequestedHintInvokesQueuedSyncHandler() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let heartbeatClient = FakeLocalNetworkHeartbeatClient()
+        heartbeatClient.syncRequested = true
+        var syncRequestCount = 0
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: heartbeatClient,
+            statusStore: statusStore,
+            diagnosticsStore: diagnosticsStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+        monitor.onSyncRequested = { _ in
+            syncRequestCount += 1
+        }
+
+        let didSend = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(didSend)
+        #expect(syncRequestCount == 1)
+        #expect(phases.contains("syncRequestedHintReceived"))
+    }
+
+    @Test func heartbeatSyncStartSignalSendsAckAndQueuesSameRunID() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let heartbeatClient = FakeLocalNetworkHeartbeatClient()
+        heartbeatClient.syncStartSignal = LocalNetworkSyncStartSignal(
+            syncRunID: "signal-run-01",
+            initiatorDeviceID: "mac-test",
+            initiatorPlatform: .Mac,
+            requestedAt: Date(timeIntervalSince1970: 9),
+            reason: "manual"
+        )
+        var queuedSyncRunID: String?
+        let monitor = LocalNetworkHeartbeatMonitor(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            client: heartbeatClient,
+            statusStore: statusStore,
+            diagnosticsStore: diagnosticsStore,
+            configuration: LocalNetworkHeartbeatConfiguration(heartbeatInterval: 3, requestTimeout: 1, missedHeartbeatLimit: 3, staleAfter: 6, disconnectedAfter: 10)
+        )
+        monitor.onSyncRequested = { syncRunID in
+            queuedSyncRunID = syncRunID
+        }
+
+        let didSend = await monitor.performHeartbeat(now: Date(timeIntervalSince1970: 10))
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(didSend)
+        #expect(queuedSyncRunID == "signal-run-01")
+        #expect(heartbeatClient.ackRequests.map(\.syncRunID) == ["signal-run-01"])
+        #expect(phases.contains("syncStartSignalReceived"))
+        #expect(phases.contains("syncStartAckSent"))
+    }
+
     @Test func heartbeatMonitorSendsRepeatedSequencesAndRecordsTraceDiagnostics() async throws {
         let (_, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2356,11 +2701,12 @@ struct RokuricsTests {
             syncInterval: 0.01
         )
 
+        let now = Date()
         _ = statusStore.recordHeartbeatSuccess(
             deviceID: snapshot.deviceID,
             displayName: "Rokurics Mac",
-            sentAt: Date(timeIntervalSince1970: 9),
-            receivedAt: Date(timeIntervalSince1970: 10),
+            sentAt: now,
+            receivedAt: now,
             latencyMilliseconds: 4
         )
         coordinator.startForegroundMonitoring()
@@ -2369,25 +2715,28 @@ struct RokuricsTests {
         #expect(!coordinator.isAutomaticSyncMonitoringActive)
         #expect(coordinator.connectionStatus.presenceState == .online)
         #expect(coordinator.connectionStatus.state == .connected)
-        #expect(coordinator.connectionStatus.lastSeenAt == Date(timeIntervalSince1970: 10))
+        #expect(coordinator.connectionStatus.lastSeenAt == now)
 
         _ = statusStore.recordHeartbeatFailure(
             deviceID: snapshot.deviceID,
             displayName: "Rokurics Mac",
             errorCode: "heartbeat_timeout",
-            errorMessage: "Timed out"
+            errorMessage: "Timed out",
+            now: now.addingTimeInterval(1)
         )
         _ = statusStore.recordHeartbeatFailure(
             deviceID: snapshot.deviceID,
             displayName: "Rokurics Mac",
             errorCode: "heartbeat_timeout",
-            errorMessage: "Timed out"
+            errorMessage: "Timed out",
+            now: now.addingTimeInterval(2)
         )
         _ = statusStore.recordHeartbeatFailure(
             deviceID: snapshot.deviceID,
             displayName: "Rokurics Mac",
             errorCode: "heartbeat_timeout",
-            errorMessage: "Timed out"
+            errorMessage: "Timed out",
+            now: now.addingTimeInterval(3)
         )
         coordinator.refreshPairingState()
 
@@ -2395,7 +2744,7 @@ struct RokuricsTests {
         #expect(coordinator.connectionStatus.state == .offline)
     }
 
-    @Test func manualSyncInterruptedTriggersImmediateHeartbeatRetryBeforeSkippingDisabledSync() async throws {
+    @Test func manualSyncInterruptedTriggersImmediateHeartbeatRetryBeforeLocalNetworkSync() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let snapshot = makePairedMacSnapshot()
@@ -2424,8 +2773,63 @@ struct RokuricsTests {
         #expect(result == nil)
         #expect(heartbeatClient.requests.map(\.sequenceNumber) == [1])
         #expect(status.presenceSnapshot().isOnline)
-        #expect(status.lastSyncStatus == StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(status.lastSyncStatus != StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
         #expect(phases.contains("manualSyncTriggeredImmediateProbe"))
+        #expect(phases.contains("syncSkippedReason"))
+    }
+
+    @Test func disabledManualSyncRunsLocalNetworkEngineInsteadOfDisabledStatus() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let provider = FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let recordingManager = RecordingManager(fileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let uploadCoordinator = RecordingUploadCoordinator(jobStore: uploadJobStore)
+        let syncClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: provider,
+            studyLibraryStore: recordingManager.studyLibraryStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator,
+            localNetworkSyncClient: syncClient,
+            statusStore: statusStore,
+            syncStateStore: syncStateStore,
+            diagnosticsStore: diagnosticsStore,
+            runtimeConfiguration: .default,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+        let now = Date()
+        _ = statusStore.recordHeartbeatSuccess(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            sentAt: now,
+            receivedAt: now,
+            latencyMilliseconds: 4
+        )
+
+        let result = await coordinator.synchronizeNow()
+        let status = try #require(statusStore.status(for: snapshot.deviceID, now: Date()))
+        let entries = diagnosticsStore.loadEntries()
+        let phases = Set(entries.map(\.phase))
+
+        #expect(result == nil)
+        #expect(syncClient.inventoryRequestCount == 1)
+        #expect(syncClient.startRequests.count == 1)
+        #expect(syncClient.inventorySyncRunIDs == [syncClient.startRequests.first?.syncRunID])
+        #expect(status.lastSyncStatus != StudyLibrarySyncRuntimeConfiguration.disabledStatusText)
+        #expect(phases.contains("manualSyncTapped"))
+        #expect(phases.contains("manualSyncActionFired"))
+        #expect(phases.contains("syncStartSignalSent"))
+        #expect(phases.contains("syncStartAckReceived"))
+        #expect(phases.contains("syncRunStarted"))
+        #expect(phases.contains("localInventoryBuilt"))
+        #expect(phases.contains("peerInventoryFetched"))
+        #expect(entries.first { $0.phase == "syncRunStarted" }?.syncRunID != nil)
     }
 
     @Test func manualSyncDoesNotForceConnectionWhenUserIntentIsFalse() async throws {
@@ -2644,6 +3048,16 @@ struct RokuricsTests {
         )
 
         let withTransfer = item.withLocalNetworkTransferProgress(transferring)
+        let failed = item.withLocalNetworkTransferProgress(LocalNetworkTransferProgress(
+            objectID: "transfer-recording",
+            objectKind: LocalNetworkSyncObjectKind.transcriptMarkdown.rawValue,
+            state: .failed,
+            progressFraction: nil,
+            receivedBytes: 4,
+            totalBytes: 10,
+            sourceDeviceID: "mac-01",
+            statusText: "传输失败"
+        ))
         let restored = withTransfer.withLocalNetworkTransferProgress(LocalNetworkTransferProgress(
             objectID: "transfer-recording",
             objectKind: LocalNetworkSyncObjectKind.transcriptMarkdown.rawValue,
@@ -2658,6 +3072,8 @@ struct RokuricsTests {
         #expect(withTransfer.localNetworkTransferProgress?.state == .transferring)
         #expect(withTransfer.localNetworkTransferProgress?.progressFraction == 0.4)
         #expect(withTransfer.localNetworkTransferProgress?.isVisibleInActionArea == true)
+        #expect(failed.localNetworkTransferProgress?.state == .failed)
+        #expect(failed.localNetworkTransferProgress?.isVisibleInActionArea == true)
         #expect(restored.localNetworkTransferProgress == nil)
     }
 
@@ -2822,6 +3238,31 @@ struct RokuricsTests {
         #expect(fakeClient.inventoryRequestCount == 0)
     }
 
+    @Test func localNetworkSyncEngineManualTriggerBypassesNextAllowedSyncAt() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        var blockedState = LocalNetworkSyncState.empty
+        blockedState.nextAllowedSyncAt = Date(timeIntervalSince1970: 10_000)
+        stateStore.replace(blockedState)
+        let fakeClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: stateStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 1))
+
+        #expect(plan != nil)
+        #expect(fakeClient.inventoryRequestCount == 1)
+    }
+
     @Test func localNetworkSyncEngineSkipsWhenPresenceIsNotOnline() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2866,15 +3307,95 @@ struct RokuricsTests {
 
         _ = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 10))
         let rawLog = (try? String(contentsOf: diagnosticsStore.logURL, encoding: .utf8)) ?? ""
+        let entries = diagnosticsStore.loadEntries()
 
+        #expect(rawLog.contains("syncRunStarted"))
+        #expect(rawLog.contains("syncRunIDCreated"))
         #expect(rawLog.contains("syncTickStarted"))
         #expect(rawLog.contains("localInventoryBuilt"))
         #expect(rawLog.contains("peerInventoryFetched"))
         #expect(rawLog.contains("diffPlanCreated"))
+        #expect(rawLog.contains("bidirectionalDiffPlanCreated"))
+        #expect(rawLog.contains("noTransferNeeded"))
         #expect(rawLog.contains("syncTickCompleted"))
+        #expect(entries.first { $0.phase == "syncRunStarted" }?.syncRunID != nil)
         #expect(!rawLog.lowercased().contains("sharedsecret"))
         #expect(!rawLog.lowercased().contains("hmac"))
         #expect(!rawLog.contains("c3luYy1zZWNyZXQ"))
+    }
+
+    @Test func localNetworkSyncEngineRecordsConflictWinnerLoserHashAndTime() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let logicalPath = "transcripts/conflict-recording/transcript.md"
+        let localData = Data("local conflict".utf8)
+        let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
+        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try localData.write(to: localURL)
+        let item = StudyItemMetadata(
+            recordingID: "conflict-recording",
+            title: "冲突转写",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 5,
+            transcriptMarkdownRelativePath: logicalPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted"
+        )
+        _ = try studyStore.applySyncManifest(
+            StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(), items: [item], folders: []),
+            localDeviceID: makePairedMacSnapshot().deviceID
+        )
+        let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "conflict-recording", logicalPathToken: logicalPath)
+        let peerInventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            artifacts: [
+                LocalNetworkSyncArtifactEntry(
+                    artifactID: artifactID,
+                    kind: .transcriptMarkdown,
+                    ownerID: "conflict-recording",
+                    checksum: SecureUploadUtilities.sha256Hex(Data("peer conflict".utf8)),
+                    size: Int64(Data("peer conflict".utf8).count),
+                    updatedAt: Date(timeIntervalSince1970: 2_020),
+                    availability: .local,
+                    logicalPathToken: logicalPath
+                )
+            ]
+        )
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        var state = LocalNetworkSyncState.empty
+        state.lastSuccessfulSyncAt = Date(timeIntervalSince1970: 100)
+        stateStore.replace(state)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: FakeLocalNetworkSyncClient(peerInventory: peerInventory),
+            stateStore: stateStore,
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000))
+        let conflict = try #require(diagnosticsStore.loadEntries().first { $0.phase == "conflictDetected" })
+
+        #expect(plan?.conflictActions.contains { $0.entityID == artifactID } == true)
+        #expect(conflict.result?.contains("winner=") == true)
+        #expect(conflict.result?.contains("loser=") == true)
+        #expect(conflict.result?.contains("localHash=") == true)
+        #expect(conflict.result?.contains("peerHash=") == true)
+        #expect(conflict.result?.contains("localUpdatedAt=") == true)
+        #expect(conflict.result?.contains("peerUpdatedAt=") == true)
     }
 
     @Test func localNetworkSyncEngineDownloadsTranscriptArtifact() async throws {
@@ -2882,6 +3403,7 @@ struct RokuricsTests {
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
         let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
         let logicalPath = "transcripts/recording-remote/transcript.md"
         let receivePath = "incoming/recording-remote/receive.json"
         let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "recording-remote", logicalPathToken: logicalPath)
@@ -2985,7 +3507,8 @@ struct RokuricsTests {
             studyLibraryStore: studyStore,
             uploadJobStore: jobStore,
             client: fakeClient,
-            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL)
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore
         )
 
         let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
@@ -2999,6 +3522,14 @@ struct RokuricsTests {
         #expect(fakeClient.artifactRequestIDs == [receiveArtifactID, artifactID] || fakeClient.artifactRequestIDs == [artifactID, receiveArtifactID])
         #expect(observedTransferStates.contains(.transferring))
         #expect(studyStore.item(recordingID: "recording-remote")?.localNetworkTransferProgress == nil)
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+        #expect(phases.contains("transferJobStarted"))
+        #expect(phases.contains("fileTransferStarted"))
+        #expect(phases.contains("fileTransferProgressUpdated"))
+        #expect(phases.contains("checksumVerified"))
+        #expect(phases.contains("atomicReplaceCompleted"))
+        #expect(phases.contains("peerFileApplied"))
+        #expect(phases.contains("fileTransferCompleted"))
     }
 
     @Test func localNetworkSyncEngineUploadsSmallArtifactWhenPeerMissing() async throws {
@@ -3006,6 +3537,7 @@ struct RokuricsTests {
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
         let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
         let logicalPath = "transcripts/local-recording/transcript.md"
         let localData = Data("local transcript".utf8)
         let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
@@ -3033,18 +3565,28 @@ struct RokuricsTests {
         )
 
         let fakeClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        var observedUploadProgressStates: [LocalNetworkTransferState] = []
+        fakeClient.onArtifactPut = { _ in
+            if let progress = studyStore.item(recordingID: "local-recording")?.localNetworkTransferProgress {
+                observedUploadProgressStates.append(progress.state)
+            }
+        }
+        let transferJobStore = LocalNetworkSyncTransferJobStore(rootURL: rootURL)
         let engine = LocalNetworkSyncEngine(
             connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
             audioFileStore: audioStore,
             studyLibraryStore: studyStore,
             uploadJobStore: jobStore,
             client: fakeClient,
-            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL)
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            transferJobStore: transferJobStore,
+            diagnosticsStore: diagnosticsStore
         )
 
         let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
         let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "local-recording", logicalPathToken: logicalPath)
         let putRequest = try #require(fakeClient.artifactPutRequests.first)
+        let transferJob = try #require(try transferJobStore.loadJobs().first { $0.artifactID == artifactID })
 
         #expect(plan?.uploadArtifactActions.contains { $0.entityID == artifactID } == true)
         #expect(putRequest.artifactID == artifactID)
@@ -3052,6 +3594,365 @@ struct RokuricsTests {
         #expect(putRequest.logicalPathToken == logicalPath)
         #expect(putRequest.checksum == SecureUploadUtilities.sha256Hex(localData))
         #expect(Data(base64Encoded: putRequest.dataBase64) == localData)
+        #expect(observedUploadProgressStates.contains(.transferring))
+        #expect(studyStore.item(recordingID: "local-recording")?.localNetworkTransferProgress == nil)
+        #expect(transferJob.direction == .upload)
+        #expect(transferJob.state == .complete)
+        #expect(transferJob.transferredBytes == Int64(localData.count))
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+        #expect(phases.contains("transferJobStarted"))
+        #expect(phases.contains("fileTransferStarted"))
+        #expect(phases.contains("fileTransferProgressUpdated"))
+        #expect(phases.contains("checksumVerified"))
+        #expect(phases.contains("peerFileApplied"))
+        #expect(phases.contains("fileTransferCompleted"))
+    }
+
+    @Test func localNetworkSyncEngineUploadsLargeArtifactInChunksWhenPeerMissing() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let logicalPath = "transcripts/large-local-recording/transcript.md"
+        let localData = Data(repeating: 0x41, count: 4 * 1024 * 1024 + 17)
+        let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
+        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try localData.write(to: localURL)
+        let item = StudyItemMetadata(
+            recordingID: "large-local-recording",
+            title: "大转写",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 5,
+            transcriptMarkdownRelativePath: logicalPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted"
+        )
+        _ = try studyStore.applySyncManifest(
+            StudyLibrarySyncManifest.make(
+                deviceID: makePairedMacSnapshot().deviceID,
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                items: [item],
+                folders: []
+            ),
+            localDeviceID: makePairedMacSnapshot().deviceID
+        )
+        let fakeClient = FakeLocalNetworkSyncClient(peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac))
+        let transferJobStore = LocalNetworkSyncTransferJobStore(rootURL: rootURL)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            transferJobStore: transferJobStore,
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000))
+        let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "large-local-recording", logicalPathToken: logicalPath)
+        let transferJob = try #require(try transferJobStore.loadJobs().first { $0.artifactID == artifactID })
+        let requests = fakeClient.artifactPutRequests
+
+        #expect(plan?.uploadArtifactActions.contains { $0.entityID == artifactID } == true)
+        #expect(requests.count > 1)
+        #expect(requests.first?.offset == 0)
+        #expect(requests.allSatisfy { $0.totalSize == Int64(localData.count) })
+        #expect(requests.last?.isFinalChunk == true)
+        #expect(requests.allSatisfy { Data(base64Encoded: $0.dataBase64)?.count == $0.chunkSize })
+        #expect(transferJob.state == .complete)
+        #expect(transferJob.transferredBytes == Int64(localData.count))
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+        #expect(phases.contains("fileTransferProgressUpdated"))
+        #expect(phases.contains("fileTransferCompleted"))
+    }
+
+    @Test func localNetworkSyncEngineResumesLargeArtifactUploadFromPeerStatusOffset() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let logicalPath = "transcripts/resume-local-recording/transcript.md"
+        let localData = Data(repeating: 0x52, count: 4 * 1024 * 1024 + 11)
+        let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
+        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try localData.write(to: localURL)
+        let item = StudyItemMetadata(
+            recordingID: "resume-local-recording",
+            title: "续传转写",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 5,
+            transcriptMarkdownRelativePath: logicalPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted"
+        )
+        _ = try studyStore.applySyncManifest(
+            StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(timeIntervalSince1970: 2_020), items: [item], folders: []),
+            localDeviceID: makePairedMacSnapshot().deviceID
+        )
+        let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "resume-local-recording", logicalPathToken: logicalPath)
+        let resumeOffset = Int64(2 * 1024 * 1024)
+        let fakeClient = FakeLocalNetworkSyncClient(
+            peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac),
+            artifactStatusResponses: [
+                artifactID: LocalNetworkSyncArtifactStatusResponse(
+                    ok: true,
+                    artifactID: artifactID,
+                    checksum: SecureUploadUtilities.sha256Hex(localData),
+                    size: Int64(localData.count),
+                    confirmedBytes: resumeOffset,
+                    nextOffset: resumeOffset,
+                    state: .resuming,
+                    error: nil
+                )
+            ]
+        )
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            transferJobStore: LocalNetworkSyncTransferJobStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000), syncRunID: "resume-run")
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(plan?.uploadArtifactActions.contains { $0.entityID == artifactID } == true)
+        #expect(fakeClient.artifactStatusRequests.map(\.artifactID).contains(artifactID))
+        #expect(fakeClient.artifactPutRequests.first?.offset == resumeOffset)
+        #expect(phases.contains("transferSessionStatusFetched"))
+        #expect(phases.contains("transferResumeAttempted"))
+        #expect(phases.contains("transferResumed"))
+    }
+
+    @Test func localNetworkSyncEngineRejectsOutOfRangeResumeOffsetBeforeUploadingChunk() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let logicalPath = "transcripts/bad-offset-recording/transcript.md"
+        let localData = Data(repeating: 0x4F, count: 4 * 1024 * 1024 + 13)
+        let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
+        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try localData.write(to: localURL)
+        let item = StudyItemMetadata(
+            recordingID: "bad-offset-recording",
+            title: "错误 offset",
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            duration: 5,
+            transcriptMarkdownRelativePath: logicalPath,
+            updatedAt: Date(timeIntervalSince1970: 2_010),
+            transcriptionStatus: "transcribed",
+            noteStatus: "notStarted"
+        )
+        _ = try studyStore.applySyncManifest(
+            StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(timeIntervalSince1970: 2_020), items: [item], folders: []),
+            localDeviceID: makePairedMacSnapshot().deviceID
+        )
+        let artifactID = LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "bad-offset-recording", logicalPathToken: logicalPath)
+        let fakeClient = FakeLocalNetworkSyncClient(
+            peerInventory: emptyLocalNetworkInventory(deviceID: "mac-01", platform: .Mac),
+            artifactStatusResponses: [
+                artifactID: LocalNetworkSyncArtifactStatusResponse(
+                    ok: true,
+                    artifactID: artifactID,
+                    checksum: SecureUploadUtilities.sha256Hex(localData),
+                    size: Int64(localData.count),
+                    confirmedBytes: Int64(localData.count) + 1,
+                    nextOffset: Int64(localData.count) + 1,
+                    state: .resuming,
+                    error: nil
+                )
+            ]
+        )
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: jobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            transferJobStore: LocalNetworkSyncTransferJobStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000), syncRunID: "bad-offset-run")
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(plan == nil)
+        #expect(fakeClient.artifactPutRequests.isEmpty)
+        #expect(phases.contains("transferOffsetMismatch"))
+        #expect(phases.contains("syncTickFailed"))
+    }
+
+    @Test func localNetworkSyncEngineUploadsMissingRecordingAudioThroughExistingCoordinatorAndClearsCardProgress() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let audioData = Data("abcdefghi".utf8)
+        let metadata = try saveRecording(
+            id: "sync-audio-upload-success",
+            title: "本地音频",
+            store: audioStore,
+            uploadStatus: RecordingUploadStatus.uploaded.rawValue,
+            audioData: audioData
+        )
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let recordingManager = RecordingManager(fileStore: audioStore)
+        let transferJobStore = LocalNetworkSyncTransferJobStore(rootURL: rootURL)
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let uploadClient = FakeRecordingUploadClient(
+            result: .success(RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: "metadata.json",
+                audioFileName: "audio.m4a",
+                metadataDisposition: "acceptedExisting",
+                audioDisposition: "acceptedNew"
+            )),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedExisting"),
+                .audioStarted,
+                .audioResumableSessionStarted(
+                    sessionID: "session-success",
+                    totalBytes: Int64(audioData.count),
+                    chunkSize: 3,
+                    totalSHA256: SecureUploadUtilities.sha256Hex(audioData),
+                    confirmedBytes: 0
+                ),
+                .audioResumableProgress(
+                    sessionID: "session-success",
+                    confirmedBytes: Int64(audioData.count),
+                    totalBytes: Int64(audioData.count),
+                    nextOffset: Int64(audioData.count)
+                ),
+                .audioSucceeded(disposition: "acceptedNew")
+            ]
+        )
+        let uploadCoordinator = RecordingUploadCoordinator(uploadClient: uploadClient, jobStore: uploadJobStore)
+        let syncClient = FakeLocalNetworkSyncClient(peerInventory: peerInventoryMissingAudio(for: metadata))
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator,
+            uploadJobStore: uploadJobStore,
+            client: syncClient,
+            stateStore: stateStore,
+            transferJobStore: transferJobStore,
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
+        let transferJob = try #require(try transferJobStore.loadJobs().first { $0.artifactID == "recordingAudio:\(metadata.id)" })
+        let ledgerJSON = try String(
+            contentsOf: rootURL.appendingPathComponent("Sync/local-network-transfer-ledger.json"),
+            encoding: .utf8
+        )
+        let entries = diagnosticsStore.loadEntries()
+        let phases = Set(entries.map(\.phase))
+        let syncRunIDs = Set(entries.compactMap(\.syncRunID))
+
+        #expect(plan?.uploadRecordingAudioActions.contains { $0.entityID == metadata.id && $0.reason == "peer_missing_audio_use_existing_upload" } == true)
+        #expect(uploadClient.uploadRequestCount == 1)
+        #expect(uploadClient.lastMetadata?.id == metadata.id)
+        #expect(syncClient.artifactPutRequests.isEmpty)
+        #expect(try audioStore.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+        #expect(studyStore.item(recordingID: metadata.id)?.localNetworkTransferProgress == nil)
+        #expect(stateStore.state.activeTransfers.isEmpty)
+        #expect(transferJob.direction == .upload)
+        #expect(transferJob.ownerID == metadata.id)
+        #expect(transferJob.objectKind == LocalNetworkSyncObjectKind.recordingAudio.rawValue)
+        #expect(transferJob.state == .complete)
+        #expect(transferJob.transferredBytes == Int64(audioData.count))
+        #expect(transferJob.nextOffset == Int64(audioData.count))
+        #expect(transferJob.sha256 == SecureUploadUtilities.sha256Hex(audioData))
+        #expect(ledgerJSON.contains(#""version""#))
+        #expect(!ledgerJSON.lowercased().contains("sharedsecret"))
+        #expect(!ledgerJSON.contains(makePairedMacSnapshot().sharedSecretBase64URL))
+        #expect(phases.contains("existingUploadActionCreated"))
+        #expect(phases.contains("existingUploadActionQueued"))
+        #expect(phases.contains("existingUploadActionStarted"))
+        #expect(phases.contains("recordingUploadCoordinatorCalled"))
+        #expect(phases.contains("uploadJobCreated"))
+        #expect(phases.contains("uploadStarted"))
+        #expect(phases.contains("syncRunCompleted"))
+        #expect(syncRunIDs.count == 1)
+    }
+
+    @Test func localNetworkSyncEngineLeavesFailedAudioTransferInCardActionAreaForRetry() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let audioData = Data("abcdefghi".utf8)
+        let metadata = try saveRecording(id: "sync-audio-upload-failure", title: "失败音频", store: audioStore, audioData: audioData)
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let recordingManager = RecordingManager(fileStore: audioStore)
+        let transferJobStore = LocalNetworkSyncTransferJobStore(rootURL: rootURL)
+        let stateStore = LocalNetworkSyncStateStore(rootURL: rootURL)
+        let uploadClient = FakeRecordingUploadClient(
+            result: .failure(RecordingUploadError.networkFailed("network lost")),
+            events: [
+                .metadataStarted,
+                .metadataSucceeded(disposition: "acceptedExisting"),
+                .audioStarted,
+                .audioResumableSessionStarted(
+                    sessionID: "session-failure",
+                    totalBytes: Int64(audioData.count),
+                    chunkSize: 3,
+                    totalSHA256: SecureUploadUtilities.sha256Hex(audioData),
+                    confirmedBytes: 0
+                ),
+                .audioResumableProgress(
+                    sessionID: "session-failure",
+                    confirmedBytes: 3,
+                    totalBytes: Int64(audioData.count),
+                    nextOffset: 3
+                )
+            ]
+        )
+        let uploadCoordinator = RecordingUploadCoordinator(uploadClient: uploadClient, jobStore: uploadJobStore)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator,
+            uploadJobStore: uploadJobStore,
+            client: FakeLocalNetworkSyncClient(peerInventory: peerInventoryMissingAudio(for: metadata)),
+            stateStore: stateStore,
+            transferJobStore: transferJobStore
+        )
+
+        let plan = await engine.performTick(trigger: "foreground", now: Date(timeIntervalSince1970: 3_000))
+        let progress = try #require(studyStore.item(recordingID: metadata.id)?.localNetworkTransferProgress)
+        let transferJob = try #require(try transferJobStore.loadJobs().first { $0.artifactID == "recordingAudio:\(metadata.id)" })
+        let activeTransfer = try #require(stateStore.state.activeTransfers.first)
+
+        #expect(plan?.uploadRecordingAudioActions.contains { $0.entityID == metadata.id } == true)
+        #expect(try audioStore.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
+        #expect(progress.state == .failed)
+        #expect(progress.isVisibleInActionArea)
+        #expect(progress.receivedBytes == 3)
+        #expect(progress.totalBytes == Int64(audioData.count))
+        #expect(progress.statusText == "传输失败，可重试")
+        #expect(activeTransfer.state == .failed)
+        #expect(transferJob.state == .failed)
+        #expect(transferJob.transferredBytes == 3)
+        #expect(transferJob.nextOffset == 3)
+        #expect(transferJob.errorCode == "recording_audio_upload_failed")
+        #expect(transferJob.nextRetryAfter != nil)
     }
 
     @Test func localNetworkSyncEngineAppliesCompletedReceiveStatusToLocalMetadata() async throws {
@@ -3299,6 +4200,42 @@ struct RokuricsTests {
     private func decodeSecureUploadResponse(_ json: String) throws -> SecureUploadServerResponse {
         try JSONDecoder().decode(SecureUploadServerResponse.self, from: Data(json.utf8))
     }
+
+    private func peerInventoryMissingAudio(for metadata: RecordingMetadata) -> LocalNetworkSyncInventory {
+        LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            recordings: [
+                LocalNetworkSyncRecordingEntry(
+                    recordingID: metadata.id,
+                    metadataHash: LocalNetworkSyncMetadataHash.hash(metadata),
+                    audioAvailable: false,
+                    audioChecksum: nil,
+                    audioSize: nil,
+                    uploadLedgerState: nil,
+                    receiveStatus: "metadataReceived",
+                    processingStatus: "awaitingAudio",
+                    updatedAt: metadata.endedAt,
+                    deleted: false,
+                    title: metadata.title,
+                    createdAt: metadata.createdAt,
+                    tombstone: false,
+                    audioAvailability: .missing,
+                    uploadStatus: nil,
+                    transcriptionStatus: metadata.transcriptionStatus,
+                    noteStatus: metadata.noteStatus,
+                    sourceDeviceID: nil,
+                    artifactRefs: nil
+                )
+            ]
+        )
+    }
 }
 
 @MainActor
@@ -3321,6 +4258,7 @@ private final class FakeRecordingUploadClient: RecordingUploadClientProtocol {
     let result: ResultMode
     let events: [RecordingUploadProgressEvent]
     private(set) var lastMetadata: RecordingMetadata?
+    private(set) var uploadRequestCount = 0
 
     init(result: ResultMode, events: [RecordingUploadProgressEvent] = []) {
         self.result = result
@@ -3332,6 +4270,7 @@ private final class FakeRecordingUploadClient: RecordingUploadClientProtocol {
         settings: SecureMacConnectionSnapshot,
         progress: RecordingUploadProgressHandler?
     ) async throws -> RecordingUploadResult {
+        uploadRequestCount += 1
         lastMetadata = metadata
         for event in events {
             try progress?(event)
@@ -3531,18 +4470,27 @@ private final class FakeRecordingSecureUploadTransport: RecordingSecureUploadTra
 private final class FakeLocalNetworkSyncClient: LocalNetworkSyncClientProtocol {
     let peerInventory: LocalNetworkSyncInventory
     var artifactResponses: [String: LocalNetworkSyncArtifactResponse]
+    var artifactStatusResponses: [String: LocalNetworkSyncArtifactStatusResponse]
     var onArtifactRequest: ((String) -> Void)?
+    var onArtifactPut: ((LocalNetworkSyncArtifactPutRequest) -> Void)?
+    var onStartSignal: ((LocalNetworkSyncStartRequest) -> Void)?
     private(set) var inventoryRequestCount = 0
     private(set) var applyMetadataCount = 0
     private(set) var artifactRequestIDs: [String] = []
     private(set) var artifactPutRequests: [LocalNetworkSyncArtifactPutRequest] = []
+    private(set) var inventorySyncRunIDs: [String?] = []
+    private(set) var startRequests: [LocalNetworkSyncStartRequest] = []
+    private(set) var ackRequests: [LocalNetworkSyncStartAckRequest] = []
+    private(set) var artifactStatusRequests: [LocalNetworkSyncArtifactStatusRequest] = []
 
     init(
         peerInventory: LocalNetworkSyncInventory,
-        artifactResponses: [String: LocalNetworkSyncArtifactResponse] = [:]
+        artifactResponses: [String: LocalNetworkSyncArtifactResponse] = [:],
+        artifactStatusResponses: [String: LocalNetworkSyncArtifactStatusResponse] = [:]
     ) {
         self.peerInventory = peerInventory
         self.artifactResponses = artifactResponses
+        self.artifactStatusResponses = artifactStatusResponses
     }
 
     func sendDeviceStatus(
@@ -3554,10 +4502,42 @@ private final class FakeLocalNetworkSyncClient: LocalNetworkSyncClientProtocol {
 
     func fetchLocalNetworkSyncInventory(
         settings: SecureMacConnectionSnapshot,
-        localInventory: LocalNetworkSyncInventory
+        localInventory: LocalNetworkSyncInventory,
+        syncRunID: String?
     ) async throws -> LocalNetworkSyncInventoryResponse {
         inventoryRequestCount += 1
+        inventorySyncRunIDs.append(syncRunID)
         return LocalNetworkSyncInventoryResponse(ok: true, inventory: peerInventory, error: nil)
+    }
+
+    func sendLocalNetworkSyncStartSignal(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncStartRequest
+    ) async throws -> LocalNetworkSyncStartResponse {
+        onStartSignal?(request)
+        startRequests.append(request)
+        return LocalNetworkSyncStartResponse(
+            ok: true,
+            syncRunID: request.syncRunID,
+            peerDeviceID: "mac-01",
+            ackAt: Date(),
+            disposition: "ack",
+            error: nil
+        )
+    }
+
+    func sendLocalNetworkSyncStartAck(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncStartAckRequest
+    ) async throws -> LocalNetworkSyncStartAckResponse {
+        ackRequests.append(request)
+        return LocalNetworkSyncStartAckResponse(
+            ok: true,
+            syncRunID: request.syncRunID,
+            peerDeviceID: "mac-01",
+            ackReceivedAt: Date(),
+            error: nil
+        )
     }
 
     func applyLocalNetworkSyncMetadata(
@@ -3583,24 +4563,64 @@ private final class FakeLocalNetworkSyncClient: LocalNetworkSyncClientProtocol {
         settings: SecureMacConnectionSnapshot,
         artifactID: String
     ) async throws -> LocalNetworkSyncArtifactResponse {
-        artifactRequestIDs.append(artifactID)
-        onArtifactRequest?(artifactID)
-        return artifactResponses[artifactID] ?? LocalNetworkSyncArtifactResponse(
-            ok: false,
-            artifactID: nil,
-            kind: nil,
-            checksum: nil,
-            size: nil,
-            logicalPathToken: nil,
-            dataBase64: nil,
-            error: "missing_fake_artifact"
+        try await requestLocalNetworkSyncArtifact(
+            settings: settings,
+            request: LocalNetworkSyncArtifactRequest(artifactID: artifactID)
         )
+    }
+
+    func requestLocalNetworkSyncArtifact(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncArtifactRequest
+    ) async throws -> LocalNetworkSyncArtifactResponse {
+        artifactRequestIDs.append(request.artifactID)
+        onArtifactRequest?(request.artifactID)
+        guard var response = artifactResponses[request.artifactID] else {
+            return LocalNetworkSyncArtifactResponse(
+                ok: false,
+                artifactID: nil,
+                kind: nil,
+                checksum: nil,
+                size: nil,
+                logicalPathToken: nil,
+                dataBase64: nil,
+                error: "missing_fake_artifact"
+            )
+        }
+        if let offset = request.offset,
+           let length = request.length,
+           let base64 = response.dataBase64,
+           let data = Data(base64Encoded: base64) {
+            let start = Int(offset)
+            let end = min(start + length, data.count)
+            guard start >= 0, start < data.count, end >= start else {
+                return LocalNetworkSyncArtifactResponse(
+                    ok: false,
+                    artifactID: nil,
+                    kind: nil,
+                    checksum: nil,
+                    size: nil,
+                    logicalPathToken: nil,
+                    dataBase64: nil,
+                    error: "missing_fake_artifact_chunk"
+                )
+            }
+            let chunk = data.subdata(in: start..<end)
+            response.size = Int64(chunk.count)
+            response.checksum = SecureUploadUtilities.sha256Hex(chunk)
+            response.dataBase64 = chunk.base64EncodedString()
+            response.offset = offset
+            response.totalSize = Int64(data.count)
+            response.isFinalChunk = end == data.count
+        }
+        return response
     }
 
     func putLocalNetworkSyncArtifact(
         settings: SecureMacConnectionSnapshot,
         request: LocalNetworkSyncArtifactPutRequest
     ) async throws -> LocalNetworkSyncArtifactPutResponse {
+        onArtifactPut?(request)
         artifactPutRequests.append(request)
         return LocalNetworkSyncArtifactPutResponse(
             ok: true,
@@ -3608,6 +4628,27 @@ private final class FakeLocalNetworkSyncClient: LocalNetworkSyncClientProtocol {
             disposition: "acceptedNew",
             checksum: request.checksum,
             size: request.size,
+            confirmedBytes: request.offset.map { $0 + Int64(request.chunkSize ?? 0) } ?? request.size,
+            error: nil
+        )
+    }
+
+    func fetchLocalNetworkSyncArtifactStatus(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncArtifactStatusRequest
+    ) async throws -> LocalNetworkSyncArtifactStatusResponse {
+        artifactStatusRequests.append(request)
+        if let response = artifactStatusResponses[request.artifactID] {
+            return response
+        }
+        return LocalNetworkSyncArtifactStatusResponse(
+            ok: true,
+            artifactID: request.artifactID,
+            checksum: request.checksum,
+            size: request.size,
+            confirmedBytes: 0,
+            nextOffset: 0,
+            state: .pending,
             error: nil
         )
     }
@@ -3619,6 +4660,9 @@ private final class FakeLocalNetworkHeartbeatClient: LocalNetworkHeartbeatClient
     private var inFlightRequests = 0
     var error: Error?
     var delayNanoseconds: UInt64
+    var syncRequested = false
+    var syncStartSignal: LocalNetworkSyncStartSignal?
+    private(set) var ackRequests: [LocalNetworkSyncStartAckRequest] = []
 
     init(error: Error? = nil, delayNanoseconds: UInt64 = 0) {
         self.error = error
@@ -3650,7 +4694,23 @@ private final class FakeLocalNetworkHeartbeatClient: LocalNetworkHeartbeatClient
             receivedSequenceNumber: request.sequenceNumber,
             connectionStatusRevision: request.lastKnownPeerStatusRevision ?? 0,
             minimumSuggestedInterval: nil,
+            syncRequested: syncRequested,
+            syncStartSignal: syncStartSignal,
             status: nil,
+            error: nil
+        )
+    }
+
+    func sendLocalNetworkSyncStartAck(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncStartAckRequest
+    ) async throws -> LocalNetworkSyncStartAckResponse {
+        ackRequests.append(request)
+        return LocalNetworkSyncStartAckResponse(
+            ok: true,
+            syncRunID: request.syncRunID,
+            peerDeviceID: "mac-01",
+            ackReceivedAt: Date(),
             error: nil
         )
     }

@@ -209,14 +209,51 @@ final class MacRecordingFileStore {
         rootURL.path
     }
 
-    func saveMetadata(_ metadata: IncomingRecordingMetadata, sourceDevice: PairedDevice) throws -> RecordingReceiveResult {
+    func saveMetadata(
+        _ metadata: IncomingRecordingMetadata,
+        sourceDevice: PairedDevice,
+        uploadTraceID: String? = nil
+    ) throws -> RecordingReceiveResult {
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordLookupStarted",
+            traceID: uploadTraceID,
+            recordingID: metadata.id,
+            eventResult: "begin",
+            uploadStatus: metadata.uploadStatus,
+            fileSize: metadata.fileSize,
+            resolvedRelativePathToken: metadata.relativeAudioPath
+        )
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordIDMappingChecked",
+            traceID: uploadTraceID,
+            recordingID: metadata.id,
+            eventResult: "begin"
+        )
         guard metadataDataSizeIsAllowed(metadata) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordConflictDetected",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "metadata_too_large"
+            )
             throw MacRecordingFileStoreError.fileTooLarge
         }
 
         try ensureLibraryDirectories()
         let sanitizedID = sanitizedPathComponent(metadata.id)
         guard !sanitizedID.isEmpty else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordConflictDetected",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "invalid_recording_id"
+            )
             throw MacRecordingFileStoreError.invalidRecordingID
         }
 
@@ -224,7 +261,8 @@ final class MacRecordingFileStore {
             return try handleExistingMetadataUpload(
                 metadata,
                 sourceDevice: sourceDevice,
-                recordingDirectoryURL: existingDirectoryURL
+                recordingDirectoryURL: existingDirectoryURL,
+                uploadTraceID: uploadTraceID
             )
         }
 
@@ -280,6 +318,25 @@ final class MacRecordingFileStore {
                 lastUploadAttemptAt: nextUploadAttemptDate(after: nil)
             )
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordCreated",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                resolvedRelativePathToken: record.metadataRelativePath,
+                macReceiveState: record.status,
+                audioRelativePathSet: false
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordWaitingForAudio",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                macReceiveState: record.status,
+                audioRelativePathSet: false
+            )
 
             var index = loadIndex()
             index.directoriesByRecordingID[metadata.id] = try relativePath(for: recordingDirectoryURL)
@@ -287,6 +344,16 @@ final class MacRecordingFileStore {
             try appendReceiveLog(recordingID: metadata.id, event: "metadata_received", sourceDeviceID: sourceDevice.id, status: record.status)
             postInboxChanged()
             print("[RokuricsRecordingStore] metadata saved: \(metadataURL.path)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordSaved",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                resolvedRelativePathToken: try? relativePath(for: receiveURL),
+                macReceiveState: record.status,
+                audioRelativePathSet: false
+            )
             return RecordingReceiveResult(
                 recordingID: metadata.id,
                 directoryURL: recordingDirectoryURL,
@@ -301,12 +368,44 @@ final class MacRecordingFileStore {
             throw error
         } catch {
             print("[RokuricsRecordingStore][ERROR] metadata save failed: \(error)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordConflictDetected",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "metadata_storage_failed",
+                safeErrorMessage: error.localizedDescription
+            )
             throw MacRecordingFileStoreError.storageFailed("metadata_storage_failed")
         }
     }
 
-    func saveAudio(body: Data, recordingID: String, requestedFileName: String?, sourceDevice: PairedDevice) throws -> RecordingReceiveResult {
+    func saveAudio(
+        body: Data,
+        recordingID: String,
+        requestedFileName: String?,
+        sourceDevice: PairedDevice,
+        uploadTraceID: String? = nil
+    ) throws -> RecordingReceiveResult {
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioReceiveRecordLookupStarted",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "begin",
+            bodyBytes: body.count
+        )
         guard body.count <= Self.audioMaxBytes else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "file_too_large",
+                bodyBytes: body.count
+            )
             throw MacRecordingFileStoreError.fileTooLarge
         }
 
@@ -316,8 +415,25 @@ final class MacRecordingFileStore {
         }
 
         guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveRecordMissing",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "metadata_missing",
+                bodyBytes: body.count
+            )
             throw MacRecordingFileStoreError.metadataMissing
         }
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioReceiveRecordMatched",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            bodyBytes: body.count
+        )
 
         let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
         let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
@@ -332,6 +448,15 @@ final class MacRecordingFileStore {
         }
 
         let incomingChecksum = MacSecurityUtilities.sha256Hex(body)
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioChecksumComputed",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            fileSize: Int64(body.count),
+            bodyBytes: body.count
+        )
         if fileManager.fileExists(atPath: audioURL.path) {
             return try handleExistingAudioUpload(
                 recordingID: recordingID,
@@ -341,7 +466,8 @@ final class MacRecordingFileStore {
                 requestedFileName: requestedFileName,
                 sourceDevice: sourceDevice,
                 incomingChecksum: incomingChecksum,
-                incomingFileSize: Int64(body.count)
+                incomingFileSize: Int64(body.count),
+                uploadTraceID: uploadTraceID
             )
         }
 
@@ -355,7 +481,25 @@ final class MacRecordingFileStore {
 
         do {
             let sanitizedOriginalName = sanitizedFileName(requestedFileName)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioFileWriteStarted",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "begin",
+                fileSize: Int64(body.count),
+                bodyBytes: body.count
+            )
             try body.write(to: audioURL, options: .atomic)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioFileWriteCompleted",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                fileExists: fileManager.fileExists(atPath: audioURL.path),
+                fileSize: Int64(body.count)
+            )
             var record = try loadReceiveRecord(at: receiveURL)
             record.updatedAt = Date()
             record.sourceDeviceID = sourceDevice.id
@@ -371,10 +515,44 @@ final class MacRecordingFileStore {
             record.fileSize = Int64(body.count)
             record.lastUploadError = nil
             record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+            record.localNetworkTransferState = nil
+            record.localNetworkTransferProgressFraction = nil
+            record.localNetworkTransferReceivedBytes = nil
+            record.localNetworkTransferTotalBytes = nil
+            record.localNetworkTransferStatusText = nil
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordAudioPathUpdated",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                resolvedRelativePathToken: record.audioRelativePath,
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordAudioStatusUpdated",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
             try appendReceiveLog(recordingID: recordingID, event: "audio_received", sourceDeviceID: sourceDevice.id, status: record.status)
             postInboxChanged()
             print("[RokuricsRecordingStore] audio saved: \(audioURL.path)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordSavedAfterAudio",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                resolvedRelativePathToken: try? relativePath(for: receiveURL),
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
             return RecordingReceiveResult(
                 recordingID: recordingID,
                 directoryURL: recordingDirectoryURL,
@@ -389,6 +567,15 @@ final class MacRecordingFileStore {
             throw error
         } catch {
             print("[RokuricsRecordingStore][ERROR] audio save failed: \(error)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "audio_storage_failed",
+                safeErrorMessage: error.localizedDescription
+            )
             throw MacRecordingFileStoreError.storageFailed("audio_storage_failed")
         }
     }
@@ -430,9 +617,27 @@ final class MacRecordingFileStore {
         requestedFileName: String?,
         sourceDevice: PairedDevice,
         checksum: String,
-        fileSize: Int64
+        fileSize: Int64,
+        uploadTraceID: String? = nil
     ) throws -> RecordingReceiveResult {
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioReceiveRecordLookupStarted",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "begin",
+            fileSize: fileSize
+        )
         guard fileSize <= Int64(Self.audioMaxBytes) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "file_too_large",
+                fileSize: fileSize
+            )
             throw MacRecordingFileStoreError.fileTooLarge
         }
 
@@ -442,8 +647,25 @@ final class MacRecordingFileStore {
         }
 
         guard let recordingDirectoryURL = recordingDirectoryURL(for: recordingID) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveRecordMissing",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "metadata_missing",
+                fileSize: fileSize
+            )
             throw MacRecordingFileStoreError.metadataMissing
         }
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioReceiveRecordMatched",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            fileSize: fileSize
+        )
 
         let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false).standardizedFileURL
         let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
@@ -461,6 +683,14 @@ final class MacRecordingFileStore {
         guard fileManager.fileExists(atPath: metadataURL.path) else {
             throw MacRecordingFileStoreError.metadataMissing
         }
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioChecksumComputed",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            fileSize: fileSize
+        )
 
         if fileManager.fileExists(atPath: audioURL.path) {
             let result = try handleExistingAudioUpload(
@@ -471,7 +701,8 @@ final class MacRecordingFileStore {
                 requestedFileName: requestedFileName,
                 sourceDevice: sourceDevice,
                 incomingChecksum: checksum,
-                incomingFileSize: fileSize
+                incomingFileSize: fileSize,
+                uploadTraceID: uploadTraceID
             )
             discardTemporaryUpload(at: tempURL)
             return result
@@ -487,7 +718,24 @@ final class MacRecordingFileStore {
 
         do {
             let sanitizedOriginalName = sanitizedFileName(requestedFileName)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioAtomicReplaceStarted",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "begin",
+                fileSize: fileSize
+            )
             try fileManager.moveItem(at: tempURL, to: audioURL)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioAtomicReplaceCompleted",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                fileExists: fileManager.fileExists(atPath: audioURL.path),
+                fileSize: fileSize
+            )
             var record = try loadReceiveRecord(at: receiveURL)
             record.updatedAt = Date()
             record.sourceDeviceID = sourceDevice.id
@@ -503,10 +751,44 @@ final class MacRecordingFileStore {
             record.fileSize = fileSize
             record.lastUploadError = nil
             record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+            record.localNetworkTransferState = nil
+            record.localNetworkTransferProgressFraction = nil
+            record.localNetworkTransferReceivedBytes = nil
+            record.localNetworkTransferTotalBytes = nil
+            record.localNetworkTransferStatusText = nil
             try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordAudioPathUpdated",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                resolvedRelativePathToken: record.audioRelativePath,
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordAudioStatusUpdated",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
             try appendReceiveLog(recordingID: recordingID, event: "audio_received", sourceDeviceID: sourceDevice.id, status: record.status)
             postInboxChanged()
             print("[RokuricsRecordingStore] audio saved: \(audioURL.path)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordSavedAfterAudio",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                resolvedRelativePathToken: try? relativePath(for: receiveURL),
+                macReceiveState: record.status,
+                audioRelativePathSet: record.audioRelativePath != nil
+            )
             return RecordingReceiveResult(
                 recordingID: recordingID,
                 directoryURL: recordingDirectoryURL,
@@ -521,6 +803,16 @@ final class MacRecordingFileStore {
             throw error
         } catch {
             print("[RokuricsRecordingStore][ERROR] audio save failed: \(error)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "audio_storage_failed",
+                fileSize: fileSize,
+                safeErrorMessage: error.localizedDescription
+            )
             throw MacRecordingFileStoreError.storageFailed("audio_storage_failed")
         }
     }
@@ -562,6 +854,15 @@ final class MacRecordingFileStore {
                 throw MacRecordingFileStoreError.sessionConflict
             }
 
+            try updateReceiveTransferProgress(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: request.recordingID,
+                sourceDeviceID: sourceDevice.id,
+                state: .transferring,
+                receivedBytes: existingSession.receivedBytes,
+                totalBytes: existingSession.expectedTotalBytes,
+                statusText: transferStatusText(receivedBytes: existingSession.receivedBytes, totalBytes: existingSession.expectedTotalBytes)
+            )
             return resumableResponse(
                 disposition: .acceptedExisting,
                 session: existingSession,
@@ -597,6 +898,15 @@ final class MacRecordingFileStore {
                 throw MacRecordingFileStoreError.sessionConflict
             }
 
+            try updateReceiveTransferProgress(
+                receiveURL: recordingResources.receiveURL,
+                recordingID: request.recordingID,
+                sourceDeviceID: sourceDevice.id,
+                state: .transferring,
+                receivedBytes: session.receivedBytes,
+                totalBytes: session.expectedTotalBytes,
+                statusText: transferStatusText(receivedBytes: session.receivedBytes, totalBytes: session.expectedTotalBytes)
+            )
             return resumableResponse(
                 disposition: .acceptedExisting,
                 session: session,
@@ -628,6 +938,15 @@ final class MacRecordingFileStore {
             lastError: nil
         )
         try saveResumableSession(session)
+        try updateReceiveTransferProgress(
+            receiveURL: recordingResources.receiveURL,
+            recordingID: request.recordingID,
+            sourceDeviceID: sourceDevice.id,
+            state: .transferring,
+            receivedBytes: 0,
+            totalBytes: request.totalBytes,
+            statusText: "传输中 0%"
+        )
         try appendReceiveLog(recordingID: request.recordingID, event: "audio_session_started", sourceDeviceID: sourceDevice.id, status: "active")
 
         return resumableResponse(
@@ -694,6 +1013,15 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.sessionConflict
         }
 
+        try updateReceiveTransferProgress(
+            receiveURL: recordingResources.receiveURL,
+            recordingID: request.recordingID,
+            sourceDeviceID: sourceDevice.id,
+            state: .transferring,
+            receivedBytes: session.receivedBytes,
+            totalBytes: session.expectedTotalBytes,
+            statusText: transferStatusText(receivedBytes: session.receivedBytes, totalBytes: session.expectedTotalBytes)
+        )
         return resumableResponse(
             disposition: .acceptedExisting,
             session: session,
@@ -803,6 +1131,15 @@ final class MacRecordingFileStore {
         session.updatedAt = Date()
         session.lastError = nil
         try saveResumableSession(session)
+        try updateReceiveTransferProgress(
+            receiveURL: recordingResources.receiveURL,
+            recordingID: recordingID,
+            sourceDeviceID: sourceDevice.id,
+            state: .transferring,
+            receivedBytes: session.receivedBytes,
+            totalBytes: session.expectedTotalBytes,
+            statusText: transferStatusText(receivedBytes: session.receivedBytes, totalBytes: session.expectedTotalBytes)
+        )
 
         return resumableResponse(
             disposition: .acceptedNew,
@@ -906,6 +1243,11 @@ final class MacRecordingFileStore {
             record.fileSize = request.totalBytes
             record.lastUploadError = nil
             record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+            record.localNetworkTransferState = nil
+            record.localNetworkTransferProgressFraction = nil
+            record.localNetworkTransferReceivedBytes = nil
+            record.localNetworkTransferTotalBytes = nil
+            record.localNetworkTransferStatusText = nil
             try Self.jsonEncoder.encode(record).write(to: recordingResources.receiveURL, options: .atomic)
 
             session.updatedAt = Date()
@@ -1360,7 +1702,8 @@ final class MacRecordingFileStore {
     private func handleExistingMetadataUpload(
         _ metadata: IncomingRecordingMetadata,
         sourceDevice: PairedDevice,
-        recordingDirectoryURL: URL
+        recordingDirectoryURL: URL,
+        uploadTraceID: String? = nil
     ) throws -> RecordingReceiveResult {
         let metadataURL = recordingDirectoryURL.appendingPathComponent("metadata.json", isDirectory: false).standardizedFileURL
         let receiveURL = recordingDirectoryURL.appendingPathComponent("receive.json", isDirectory: false).standardizedFileURL
@@ -1380,6 +1723,14 @@ final class MacRecordingFileStore {
 
         let existingMetadata = try loadIncomingMetadata(at: metadataURL)
         guard metadataMatchesCoreIdentity(existingMetadata, metadata) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordConflictDetected",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "metadata_conflict"
+            )
             try? markUploadConflict(
                 receiveURL: receiveURL,
                 recordingID: metadata.id,
@@ -1399,8 +1750,39 @@ final class MacRecordingFileStore {
         record.lastUploadError = nil
         record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
         try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordUpdatedMetadata",
+            traceID: uploadTraceID,
+            recordingID: metadata.id,
+            eventResult: "success",
+            resolvedRelativePathToken: record.metadataRelativePath,
+            macReceiveState: record.status,
+            audioRelativePathSet: record.audioRelativePath != nil
+        )
+        if record.audioRelativePath == nil {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "receiveRecordWaitingForAudio",
+                traceID: uploadTraceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                macReceiveState: record.status,
+                audioRelativePathSet: false
+            )
+        }
         try appendReceiveLog(recordingID: metadata.id, event: "metadata_idempotent", sourceDeviceID: sourceDevice.id, status: record.status)
         postInboxChanged()
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordSaved",
+            traceID: uploadTraceID,
+            recordingID: metadata.id,
+            eventResult: "success",
+            resolvedRelativePathToken: try? relativePath(for: receiveURL),
+            macReceiveState: record.status,
+            audioRelativePathSet: record.audioRelativePath != nil
+        )
 
         return RecordingReceiveResult(
             recordingID: metadata.id,
@@ -1422,7 +1804,8 @@ final class MacRecordingFileStore {
         requestedFileName: String?,
         sourceDevice: PairedDevice,
         incomingChecksum: String,
-        incomingFileSize: Int64
+        incomingFileSize: Int64,
+        uploadTraceID: String? = nil
     ) throws -> RecordingReceiveResult {
         guard isInsideRoot(recordingDirectoryURL),
               isInsideRoot(audioURL),
@@ -1439,6 +1822,15 @@ final class MacRecordingFileStore {
         let existingChecksum = try MacSecurityUtilities.sha256Hex(fileURL: audioURL)
         guard existingFileSize == incomingFileSize,
               MacSecurityUtilities.constantTimeEquals(existingChecksum, incomingChecksum) else {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: uploadTraceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "audio_conflict",
+                fileSize: incomingFileSize
+            )
             try? markUploadConflict(
                 receiveURL: receiveURL,
                 recordingID: recordingID,
@@ -1464,7 +1856,34 @@ final class MacRecordingFileStore {
         normalizeUploadState(&record, hasAudio: true)
         record.lastUploadError = nil
         record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        record.localNetworkTransferState = nil
+        record.localNetworkTransferProgressFraction = nil
+        record.localNetworkTransferReceivedBytes = nil
+        record.localNetworkTransferTotalBytes = nil
+        record.localNetworkTransferStatusText = nil
         try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordAudioPathUpdated",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            reasonCode: "acceptedExisting",
+            resolvedRelativePathToken: record.audioRelativePath,
+            macReceiveState: record.status,
+            audioRelativePathSet: record.audioRelativePath != nil
+        )
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiveRecordSavedAfterAudio",
+            traceID: uploadTraceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            reasonCode: "acceptedExisting",
+            resolvedRelativePathToken: try? relativePath(for: receiveURL),
+            macReceiveState: record.status,
+            audioRelativePathSet: record.audioRelativePath != nil
+        )
         try appendReceiveLog(recordingID: recordingID, event: "audio_idempotent", sourceDeviceID: sourceDevice.id, status: record.status)
         postInboxChanged()
 
@@ -1580,6 +1999,11 @@ final class MacRecordingFileStore {
         normalizeUploadState(&record, hasAudio: true)
         record.lastUploadError = nil
         record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        record.localNetworkTransferState = nil
+        record.localNetworkTransferProgressFraction = nil
+        record.localNetworkTransferReceivedBytes = nil
+        record.localNetworkTransferTotalBytes = nil
+        record.localNetworkTransferStatusText = nil
         try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
 
         return ResumableAudioUploadSessionResponse.accepted(
@@ -1765,6 +2189,11 @@ final class MacRecordingFileStore {
             if record.processingStatus == "awaitingAudio" {
                 record.processingStatus = "notStarted"
             }
+            record.localNetworkTransferState = nil
+            record.localNetworkTransferProgressFraction = nil
+            record.localNetworkTransferReceivedBytes = nil
+            record.localNetworkTransferTotalBytes = nil
+            record.localNetworkTransferStatusText = nil
         } else {
             record.status = "metadataReceived"
             record.processingStatus = "awaitingAudio"
@@ -1788,9 +2217,58 @@ final class MacRecordingFileStore {
         record.updatedAt = Date()
         record.lastUploadError = error
         record.lastUploadAttemptAt = nextUploadAttemptDate(after: record.lastUploadAttemptAt)
+        record.localNetworkTransferState = error.contains("conflict")
+            ? LocalNetworkTransferState.conflict.rawValue
+            : LocalNetworkTransferState.failed.rawValue
+        record.localNetworkTransferStatusText = error.contains("conflict") ? "传输冲突" : "传输失败，可重试"
+        record.localNetworkTransferTotalBytes = record.localNetworkTransferTotalBytes ?? (record.fileSize > 0 ? record.fileSize : nil)
         try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
         try appendReceiveLog(recordingID: recordingID, event: error, sourceDeviceID: sourceDeviceID, status: record.status)
         postInboxChanged()
+    }
+
+    private func updateReceiveTransferProgress(
+        receiveURL: URL,
+        recordingID: String,
+        sourceDeviceID: String,
+        state: LocalNetworkTransferState,
+        receivedBytes: Int64,
+        totalBytes: Int64,
+        statusText: String?
+    ) throws {
+        guard isInsideRoot(receiveURL), fileManager.fileExists(atPath: receiveURL.path) else {
+            return
+        }
+
+        var record = try loadReceiveRecord(at: receiveURL)
+        record.updatedAt = Date()
+        record.sourceDeviceID = sourceDeviceID
+        if state == .complete {
+            record.localNetworkTransferState = nil
+            record.localNetworkTransferProgressFraction = nil
+            record.localNetworkTransferReceivedBytes = nil
+            record.localNetworkTransferTotalBytes = nil
+            record.localNetworkTransferStatusText = nil
+        } else {
+            let clampedReceivedBytes = min(max(receivedBytes, 0), totalBytes)
+            record.localNetworkTransferState = state.rawValue
+            record.localNetworkTransferProgressFraction = totalBytes > 0
+                ? min(max(Double(clampedReceivedBytes) / Double(totalBytes), 0), 1)
+                : nil
+            record.localNetworkTransferReceivedBytes = clampedReceivedBytes
+            record.localNetworkTransferTotalBytes = totalBytes
+            record.localNetworkTransferStatusText = statusText
+        }
+        try Self.jsonEncoder.encode(record).write(to: receiveURL, options: .atomic)
+        postInboxChanged()
+    }
+
+    private func transferStatusText(receivedBytes: Int64, totalBytes: Int64) -> String {
+        guard totalBytes > 0 else {
+            return "传输中"
+        }
+        let percent = Int((Double(receivedBytes) / Double(totalBytes) * 100).rounded())
+        return "传输中 \(min(max(percent, 0), 100))%"
     }
 
     private func nextUploadAttemptDate(after previous: Date?) -> Date {
@@ -1929,7 +2407,27 @@ final class MacRecordingFileStore {
             isDeleted: record.isDeleted,
             deletedAt: record.deletedAt,
             noteRelativePath: record.noteRelativePath,
-            noteError: record.noteError
+            noteError: record.noteError,
+            transferProgress: receiveTransferProgress(from: record)
+        )
+    }
+
+    private func receiveTransferProgress(from record: RecordingReceiveRecord) -> LocalNetworkTransferProgress? {
+        guard let stateRaw = record.localNetworkTransferState,
+              let state = LocalNetworkTransferState(rawValue: stateRaw),
+              state.isVisibleInActionArea else {
+            return nil
+        }
+
+        return LocalNetworkTransferProgress(
+            objectID: "recordingAudio:\(record.recordingID)",
+            objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+            state: state,
+            progressFraction: record.localNetworkTransferProgressFraction,
+            receivedBytes: record.localNetworkTransferReceivedBytes,
+            totalBytes: record.localNetworkTransferTotalBytes,
+            sourceDeviceID: record.sourceDeviceID,
+            statusText: record.localNetworkTransferStatusText
         )
     }
 

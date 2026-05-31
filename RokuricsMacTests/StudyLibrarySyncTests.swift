@@ -11,6 +11,91 @@ import Testing
 @testable import RokuricsMac
 
 struct StudyLibrarySyncTests {
+    @Test func sharedSyncCorePlansObjectDiffsWithoutFileTypeBranches() {
+        let date = Date(timeIntervalSince1970: 10)
+        let localSummary = SyncObject(
+            objectID: "summaryJSON:shared-core-note",
+            objectKind: LocalNetworkSyncObjectKind.summaryJSON.rawValue,
+            ownerID: "shared-core-note",
+            displayTitle: "Shared core note",
+            fileName: "summary.json",
+            logicalName: "notes/shared-core-note/summary.json",
+            sha256: "local-summary",
+            size: 20,
+            updatedAt: Date(timeIntervalSince1970: 20),
+            tombstone: false,
+            deleted: false,
+            sourceDeviceID: "mac-01",
+            logicalPathToken: "notes/shared-core-note/summary.json",
+            availability: .local,
+            transferState: nil,
+            transferProgress: nil,
+            conflictStatus: nil,
+            autoDownloadAllowed: true,
+            metadata: [:]
+        )
+        var peerSummary = localSummary
+        peerSummary.sha256 = "peer-summary"
+        peerSummary.size = 19
+        peerSummary.updatedAt = date
+        peerSummary.sourceDeviceID = "iphone-01"
+
+        let local = SyncInventory.make(
+            sourceDeviceID: "mac-01",
+            sourcePlatform: "Mac",
+            generatedAt: date,
+            inventoryRevision: "local",
+            objects: [localSummary]
+        )
+        let peer = SyncInventory.make(
+            sourceDeviceID: "iphone-01",
+            sourcePlatform: "iPhone",
+            generatedAt: date,
+            inventoryRevision: "peer",
+            objects: [peerSummary]
+        )
+
+        let plan = SyncDiffPlanner().plan(local: local, peer: peer, lastSuccessfulSyncAt: nil)
+
+        #expect(plan.uploadObjectActions.map(\.objectID) == ["summaryJSON:shared-core-note"])
+        #expect(plan.uploadObjectActions.first?.reason == "local_object_newer")
+    }
+
+    @Test func localNetworkInventoryBridgesToSharedSyncCoreObjects() {
+        let generatedAt = Date(timeIntervalSince1970: 11)
+        let folder = LocalNetworkSyncFolderEntry(
+            folderID: "folder-shared-core",
+            parentID: nil,
+            path: "Course/Chapter",
+            name: "Chapter",
+            colorToken: "blue",
+            updatedAt: generatedAt,
+            revisionHash: "folder-hash",
+            deleted: false
+        )
+        let inventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: generatedAt,
+                lastKnownPeerRevision: "peer-rev",
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            folders: [folder]
+        )
+
+        let coreInventory = inventory.syncCoreInventory
+        let directory = coreInventory.directories.first
+        let folderObject = coreInventory.objects.first { $0.objectID == "studyFolder:folder-shared-core" }
+
+        #expect(coreInventory.hasValidInventoryHash)
+        #expect(coreInventory.sourcePlatform == "Mac")
+        #expect(directory?.pathComponents == ["Course", "Chapter"])
+        #expect(folderObject?.ownerID == "folder-shared-core")
+        #expect(folderObject?.sha256 == "folder-hash")
+    }
+
     @Test func gitBackedStudySyncRuntimeDefaultsToDisabled() {
         #expect(!StudyLibrarySyncRuntimeConfiguration.default.gitBackedSyncEnabled)
         #expect(!StudyLibrarySyncRuntimeConfiguration.disabled.gitBackedSyncEnabled)
@@ -445,6 +530,79 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
+    @Test func localNetworkSyncArtifactPutRequiresPairedSignedRequest() throws {
+        let device = makePairedDevice(id: "sync-artifact-put-device")
+        let request = LocalNetworkSyncArtifactPutRequest(
+            artifactID: LocalNetworkSyncArtifactID.make(
+                kind: .transcriptMarkdown,
+                ownerID: "artifact-put-recording",
+                logicalPathToken: "transcripts/artifact-put-recording/transcript.md"
+            ),
+            kind: .transcriptMarkdown,
+            ownerID: "artifact-put-recording",
+            checksum: MacSecurityUtilities.sha256Hex(Data("artifact put".utf8)),
+            size: Int64(Data("artifact put".utf8).count),
+            updatedAt: Date(timeIntervalSince1970: 2_500),
+            logicalPathToken: "transcripts/artifact-put-recording/transcript.md",
+            dataBase64: Data("artifact put".utf8).base64EncodedString()
+        )
+        let body = try JSONEncoder.syncTestEncoder.encode(request)
+        let verifier = RequestVerifier(pairedDeviceProvider: { id in id == device.id ? device : nil })
+
+        let accepted = verifier.verify(
+            method: "POST",
+            path: "/sync/artifact-put",
+            headers: try signedSyncHeaders(device: device, path: "/sync/artifact-put", body: body, nonce: "nonce-artifact-put-good"),
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+        var badHeaders = try signedSyncHeaders(device: device, path: "/sync/artifact-put", body: body, nonce: "nonce-artifact-put-bad")
+        badHeaders["X-Rokurics-Signature"] = "bad-signature"
+        let badSignature = verifier.verify(
+            method: "POST",
+            path: "/sync/artifact-put",
+            headers: badHeaders,
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+        var missingBodyHashHeaders = try signedSyncHeaders(device: device, path: "/sync/artifact-put", body: body, nonce: "nonce-artifact-put-missing-hash")
+        missingBodyHashHeaders.removeValue(forKey: "X-Rokurics-Body-SHA256")
+        let missingBodyHash = verifier.verify(
+            method: "POST",
+            path: "/sync/artifact-put",
+            headers: missingBodyHashHeaders,
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+        let unpairedVerifier = RequestVerifier(pairedDeviceProvider: { _ in nil })
+        let unpaired = unpairedVerifier.verify(
+            method: "POST",
+            path: "/sync/artifact-put",
+            headers: try signedSyncHeaders(device: device, path: "/sync/artifact-put", body: body, nonce: "nonce-artifact-put-unpaired"),
+            body: body,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        if case .accepted = accepted {
+        } else {
+            Issue.record("Expected signed artifact-put request to be accepted")
+        }
+        if case .rejected("signature_mismatch") = badSignature {
+        } else {
+            Issue.record("Expected bad artifact-put signature to be rejected")
+        }
+        if case .rejected("missing_security_headers") = missingBodyHash {
+        } else {
+            Issue.record("Expected artifact-put without body hash to be rejected")
+        }
+        if case .rejected("unknown_device") = unpaired {
+        } else {
+            Issue.record("Expected unpaired artifact-put request to be rejected")
+        }
+        #expect(verifier.lastTrace?.verifierFailedReason != device.sharedSecretBase64URL)
+    }
+
+    @MainActor
     @Test func localNetworkSyncInventoryReturnsReceiveAndTranscriptMetadataWithoutSecretsOrPaths() throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
@@ -652,6 +810,141 @@ struct StudyLibrarySyncTests {
         #expect(wrongKind.error == "unsupported_artifact_kind")
         #expect(!audio.ok)
         #expect(audio.error == "unsupported_artifact_kind")
+    }
+
+    @MainActor
+    @Test func localNetworkSyncArtifactPutStoresLargeArtifactInChunks() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let transcriptPath = "transcripts/chunked-recording/transcript.md"
+        let transcriptData = Data(repeating: 0x42, count: 4 * 1024 * 1024 + 23)
+        let artifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: "chunked-recording",
+            logicalPathToken: transcriptPath
+        )
+        let checksum = MacSecurityUtilities.sha256Hex(transcriptData)
+        let chunkSize = 2 * 1024 * 1024
+        var offset = 0
+        var responses: [LocalNetworkSyncArtifactPutResponse] = []
+        while offset < transcriptData.count {
+            let end = min(offset + chunkSize, transcriptData.count)
+            let chunk = transcriptData.subdata(in: offset..<end)
+            let request = LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: "chunked-recording",
+                checksum: checksum,
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: transcriptPath,
+                dataBase64: chunk.base64EncodedString(),
+                offset: Int64(offset),
+                chunkSize: chunk.count,
+                totalSize: Int64(transcriptData.count),
+                isFinalChunk: end == transcriptData.count
+            )
+            responses.append(server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+                makePairedDevice(),
+                requestBody: try JSONEncoder.syncTestEncoder.encode(request)
+            ))
+            offset = end
+        }
+
+        let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+
+        #expect(responses.count > 1)
+        #expect(responses.dropLast().allSatisfy { $0.ok && $0.disposition == "acceptedChunk" })
+        #expect(responses.last?.ok == true)
+        #expect(responses.last?.disposition == "acceptedNew")
+        #expect(responses.last?.confirmedBytes == Int64(transcriptData.count))
+        #expect(try Data(contentsOf: storedURL) == transcriptData)
+    }
+
+    @MainActor
+    @Test func localNetworkSyncArtifactStatusReportsIncomingTempOffsetAndPutRejectsOffsetMismatch() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let transcriptPath = "transcripts/status-recording/transcript.md"
+        let transcriptData = Data(repeating: 0x53, count: 3 * 1024 * 1024 + 9)
+        let artifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: "status-recording",
+            logicalPathToken: transcriptPath
+        )
+        let checksum = MacSecurityUtilities.sha256Hex(transcriptData)
+        let firstChunk = transcriptData.subdata(in: 0..<(2 * 1024 * 1024))
+        let firstPut = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: "status-recording",
+                checksum: checksum,
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: transcriptPath,
+                dataBase64: firstChunk.base64EncodedString(),
+                offset: 0,
+                chunkSize: firstChunk.count,
+                totalSize: Int64(transcriptData.count),
+                isFinalChunk: false,
+                syncRunID: "mac-status-run"
+            ))
+        )
+        let status = server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactStatusRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: "status-recording",
+                logicalPathToken: transcriptPath,
+                checksum: checksum,
+                size: Int64(transcriptData.count),
+                syncRunID: "mac-status-run"
+            ))
+        )
+        let badOffset = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: "status-recording",
+                checksum: checksum,
+                size: Int64(transcriptData.count),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: transcriptPath,
+                dataBase64: Data("bad".utf8).base64EncodedString(),
+                offset: Int64(firstChunk.count + 1),
+                chunkSize: 3,
+                totalSize: Int64(transcriptData.count),
+                isFinalChunk: false,
+                syncRunID: "mac-status-run"
+            ))
+        )
+
+        #expect(firstPut.ok)
+        #expect(firstPut.confirmedBytes == Int64(firstChunk.count))
+        #expect(status.ok)
+        #expect(status.nextOffset == Int64(firstChunk.count))
+        #expect(status.state == .resuming)
+        #expect(!badOffset.ok)
+        #expect(badOffset.error == "sync_artifact_offset_mismatch")
+        #expect(!FileManager.default.fileExists(atPath: appRootURL.appendingPathComponent(transcriptPath, isDirectory: false).path))
     }
 
     @MainActor

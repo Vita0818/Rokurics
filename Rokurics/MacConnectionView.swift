@@ -1077,7 +1077,7 @@ private struct ConnectedDeviceCardView: View {
                 Button {
                     onSyncNow()
                 } label: {
-                    Label(isSyncing ? "同步中" : "立即同步", systemImage: isSyncing ? "arrow.triangle.2.circlepath" : "arrow.triangle.2.circlepath.circle")
+                    Text(isSyncing ? "同步中" : "立即同步")
                 }
                 .buttonStyle(.rokuricsPrimary)
                 .disabled(isSyncing || !snapshot.isPaired)

@@ -42,8 +42,80 @@ final class AudioInboxStore: ObservableObject {
     }
 
     func refreshRecordingInbox() {
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "audioInboxRefreshStarted",
+            traceID: recordingFileStore.loadInboxItems().compactMap { UploadFlightRecorder.traceID(forRecordingID: $0.id) }.first,
+            eventResult: "begin"
+        )
         let items = recordingFileStore.loadInboxItems()
         let deletedItems = recordingFileStore.loadTrashedInboxItems()
+        for item in items {
+            let traceID = UploadFlightRecorder.traceID(forRecordingID: item.id)
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioInboxRecordLoaded",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: "success",
+                fileSize: item.fileSize,
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioInboxAudioPathChecked",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: item.hasAudio ? "success" : "fail",
+                fileExists: item.hasAudio,
+                fileSize: item.fileSize,
+                resolvedRelativePathToken: item.audioRelativePath,
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: item.hasAudio ? "audioInboxAudioFileExists" : "audioInboxAudioFileMissing",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: item.hasAudio ? "success" : "fail",
+                fileExists: item.hasAudio,
+                fileSize: item.fileSize,
+                resolvedRelativePathToken: item.audioRelativePath
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: item.hasAudio ? "audioInboxItemMarkedAvailable" : "audioInboxItemMarkedWaiting",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: "success",
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil,
+                inboxItemState: item.hasAudio ? "available" : "waiting"
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "macUIWaitingReasonComputed",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: "success",
+                reasonCode: item.hasAudio ? "audio_available" : "audio_missing",
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil,
+                inboxItemState: item.hasAudio ? "available" : "waiting"
+            )
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "macUICardStateUpdated",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: "success",
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil,
+                inboxItemState: item.hasAudio ? "available" : "waiting"
+            )
+        }
         recordingItems = items
         trashItems = deletedItems
         pendingCount = items.filter(\.hasAudio).count

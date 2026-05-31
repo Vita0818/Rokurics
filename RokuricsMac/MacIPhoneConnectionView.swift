@@ -640,7 +640,7 @@ struct MacConnectedDeviceCardView: View {
             VStack(spacing: 10) {
                 if let onSyncNow {
                     Button(action: onSyncNow) {
-                        Label("立即同步", systemImage: "arrow.triangle.2.circlepath.circle")
+                        Text("立即同步")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(MacConnectionPrimaryButtonStyle(verticalPadding: isCompact ? 8 : 10))

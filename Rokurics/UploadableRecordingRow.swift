@@ -122,7 +122,7 @@ struct RecordingUploadCapsulePresentation: Equatable {
     let fillOpacity: Double
 
     static func resolve(status: RecordingUploadStatus, isMacPaired: Bool) -> RecordingUploadCapsulePresentation {
-        let isEnabled = isMacPaired && status != .uploading && status != .uploaded
+        let isEnabled = isMacPaired && status != .uploading
 
         switch status {
         case .localOnly:

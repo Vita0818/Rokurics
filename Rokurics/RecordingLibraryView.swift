@@ -224,7 +224,90 @@ struct RecordingLibraryView: View {
         IPhoneStudyRecordingCardActions.actions(
             for: item,
             status: uploadStatus(for: item),
-            isMacPaired: macConnectionStore.isPaired
+            isMacPaired: macConnectionStore.isPaired,
+            uploadAction: {
+                uploadRecording(from: item, source: "recordingCard")
+            }
+        )
+    }
+
+    private func uploadRecording(from item: StudyItemMetadata, source: String) {
+        let traceID = UploadFlightRecorder.makeTraceID()
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadButtonTapped",
+            traceID: traceID,
+            recordingID: item.recordingID,
+            eventResult: "begin",
+            reasonCode: source
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadActionFired",
+            traceID: traceID,
+            recordingID: item.recordingID,
+            eventResult: "begin",
+            reasonCode: source
+        )
+
+        guard macConnectionStore.isPaired else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadSkippedWithReason",
+                traceID: traceID,
+                recordingID: item.recordingID,
+                eventResult: "skip",
+                reasonCode: "mac_not_paired"
+            )
+            return
+        }
+
+        recordingManager.reloadRecordings()
+        guard let recordingID = item.recordingID,
+              let latestMetadata = recordingManager.recordings.first(where: { $0.id == recordingID }) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadSkippedWithReason",
+                traceID: traceID,
+                recordingID: item.recordingID,
+                eventResult: "skip",
+                reasonCode: "recording_metadata_missing"
+            )
+            return
+        }
+
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadRecordingResolved",
+            traceID: traceID,
+            recordingID: latestMetadata.id,
+            eventResult: "success",
+            uploadStatus: latestMetadata.uploadStatus,
+            fileSize: latestMetadata.fileSize,
+            resolvedRelativePathToken: latestMetadata.relativeAudioPath
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadCoordinatorCallStarted",
+            traceID: traceID,
+            recordingID: latestMetadata.id,
+            eventResult: "begin",
+            uploadStatus: latestMetadata.uploadStatus
+        )
+
+        uploadCoordinator.upload(
+            metadata: latestMetadata,
+            settings: macConnectionStore.snapshot,
+            recordingManager: recordingManager,
+            traceID: traceID
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadCoordinatorCallReturned",
+            traceID: traceID,
+            recordingID: latestMetadata.id,
+            eventResult: "success",
+            uploadStatus: latestMetadata.uploadStatus
         )
     }
 
@@ -425,7 +508,8 @@ private enum IPhoneStudyRecordingCardActions {
     static func actions(
         for item: StudyItemMetadata,
         status: RecordingUploadStatus,
-        isMacPaired: Bool
+        isMacPaired: Bool,
+        uploadAction: @escaping () -> Void
     ) -> [StudyRecordingCardActionModel] {
         let uploadPresentation = RecordingUploadCapsulePresentation.resolve(
             status: status,
@@ -437,7 +521,8 @@ private enum IPhoneStudyRecordingCardActions {
                 systemImage: uploadPresentation.systemImage,
                 tint: uploadPresentation.tint.color,
                 accessibilityLabel: uploadPresentation.label,
-                isEnabled: uploadPresentation.isEnabled
+                isEnabled: uploadPresentation.isEnabled,
+                action: uploadAction
             ),
             StudyRecordingStatusPresentation.transcriptAction(for: item),
             StudyRecordingStatusPresentation.noteAction(for: item),

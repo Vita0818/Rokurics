@@ -43,6 +43,7 @@ struct SecureConnectionDiagnosticEvent: Sendable {
     let pairedDeviceLastSeenAfter: Date?
     let connectionStatusStoreUpdated: Bool?
     let uiObservedLastSeenAt: Date?
+    let syncRunID: String?
     let errorCode: String?
     let errorMessage: String?
     let errorCategory: String?
@@ -80,17 +81,59 @@ struct RecordingUploadRouteHandler {
         body: Data
     ) -> SecureLocalHTTPRouteResponse {
         print("[RokuricsRecordingUpload] metadata upload request received")
+        let traceID = UploadFlightRecorder.traceID(from: headers)
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "uploadRouteHandlerEntered",
+            traceID: traceID,
+            recordingID: Self.normalizedHeaders(headers)["x-rokurics-recording-id"],
+            eventResult: "begin",
+            httpPath: path,
+            bodyBytes: body.count
+        )
 
         switch requestVerifier.verify(method: method, path: path, headers: headers, body: body) {
         case .accepted(let device):
             do {
                 let metadata = try Self.recordingMetadataDecoder.decode(IncomingRecordingMetadata.self, from: body)
-                let result = try recordingFileStore.saveMetadata(metadata, sourceDevice: device)
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "metadataPayloadDecoded",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "success",
+                    httpPath: path,
+                    bodyBytes: body.count
+                )
+                let result = try recordingFileStore.saveMetadata(metadata, sourceDevice: device, uploadTraceID: traceID)
                 onRecordingAccepted(result.recordingID)
                 print("[RokuricsRecordingUpload] metadata accepted: \(result.recordingID)")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "uploadRouteHandlerResponded",
+                    traceID: traceID,
+                    recordingID: result.recordingID,
+                    eventResult: "success",
+                    httpPath: path,
+                    httpStatus: 200,
+                    macReceiveState: result.receiveStatus,
+                    audioRelativePathSet: result.audioFileName != nil
+                )
                 return Self.successResponse(message: "recording metadata received", result: result)
             } catch let error as MacRecordingFileStoreError {
                 print("[RokuricsRecordingUpload] metadata rejected: \(error.localizedDescription)")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "uploadRouteHandlerResponded",
+                    traceID: traceID,
+                    recordingID: Self.normalizedHeaders(headers)["x-rokurics-recording-id"],
+                    eventResult: "fail",
+                    reasonCode: error.localizedDescription,
+                    httpPath: path,
+                    httpStatus: error.responseStatusCode,
+                    errorDomain: "MacRecordingFileStoreError",
+                    safeErrorMessage: error.localizedDescription
+                )
                 return Self.errorResponse(
                     statusCode: error.responseStatusCode,
                     reason: error.responseReason,
@@ -98,10 +141,32 @@ struct RecordingUploadRouteHandler {
                 )
             } catch {
                 print("[RokuricsRecordingUpload] metadata rejected: bad_metadata")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "uploadRouteHandlerResponded",
+                    traceID: traceID,
+                    recordingID: Self.normalizedHeaders(headers)["x-rokurics-recording-id"],
+                    eventResult: "fail",
+                    reasonCode: "bad_metadata",
+                    httpPath: path,
+                    httpStatus: 400,
+                    errorDomain: "RecordingUploadRouteHandler"
+                )
                 return Self.errorResponse(statusCode: 400, reason: "Bad Request", error: "bad_metadata")
             }
         case .rejected(let reason):
             print("[RokuricsRecordingUpload] metadata rejected: \(reason)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "uploadRouteHandlerResponded",
+                traceID: traceID,
+                recordingID: Self.normalizedHeaders(headers)["x-rokurics-recording-id"],
+                eventResult: "fail",
+                reasonCode: reason,
+                httpPath: path,
+                httpStatus: reason == "body_too_large" ? 413 : 400,
+                verifierResult: "rejected"
+            )
             return Self.errorResponse(
                 statusCode: reason == "body_too_large" ? 413 : 400,
                 reason: reason == "body_too_large" ? "Payload Too Large" : "Bad Request",
@@ -117,27 +182,70 @@ struct RecordingUploadRouteHandler {
         body: Data
     ) -> SecureLocalHTTPRouteResponse {
         print("[RokuricsRecordingUpload] audio upload request received")
+        let traceID = UploadFlightRecorder.traceID(from: headers)
+        let normalizedHeaders = Self.normalizedHeaders(headers)
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "uploadRouteHandlerEntered",
+            traceID: traceID,
+            recordingID: normalizedHeaders["x-rokurics-recording-id"],
+            eventResult: "begin",
+            httpPath: path,
+            bodyBytes: body.count
+        )
 
         switch requestVerifier.verify(method: method, path: path, headers: headers, body: body) {
         case .accepted(let device):
             do {
-                let normalizedHeaders = Self.normalizedHeaders(headers)
                 guard let recordingID = normalizedHeaders["x-rokurics-recording-id"],
                       !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return Self.errorResponse(statusCode: 400, reason: "Bad Request", error: "missing_recording_id")
                 }
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "audioRouteRecordingIDParsed",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "success",
+                    httpPath: path,
+                    bodyBytes: body.count
+                )
 
                 let result = try recordingFileStore.saveAudio(
                     body: body,
                     recordingID: recordingID,
                     requestedFileName: normalizedHeaders["x-rokurics-filename"],
-                    sourceDevice: device
+                    sourceDevice: device,
+                    uploadTraceID: traceID
                 )
                 onRecordingAccepted(result.recordingID)
                 print("[RokuricsRecordingUpload] audio accepted: \(result.recordingID)")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "uploadRouteHandlerResponded",
+                    traceID: traceID,
+                    recordingID: result.recordingID,
+                    eventResult: "success",
+                    httpPath: path,
+                    httpStatus: 200,
+                    macReceiveState: result.receiveStatus,
+                    audioRelativePathSet: result.audioFileName != nil
+                )
                 return Self.successResponse(message: "recording audio received", result: result)
             } catch let error as MacRecordingFileStoreError {
                 print("[RokuricsRecordingUpload] audio rejected: \(error.localizedDescription)")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "audioReceiveFailedWithReason",
+                    traceID: traceID,
+                    recordingID: normalizedHeaders["x-rokurics-recording-id"],
+                    eventResult: "fail",
+                    reasonCode: error.localizedDescription,
+                    httpPath: path,
+                    httpStatus: error.responseStatusCode,
+                    errorDomain: "MacRecordingFileStoreError",
+                    safeErrorMessage: error.localizedDescription
+                )
                 return Self.errorResponse(
                     statusCode: error.responseStatusCode,
                     reason: error.responseReason,
@@ -145,10 +253,32 @@ struct RecordingUploadRouteHandler {
                 )
             } catch {
                 print("[RokuricsRecordingUpload] audio rejected: audio_storage_failed")
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "audioReceiveFailedWithReason",
+                    traceID: traceID,
+                    recordingID: normalizedHeaders["x-rokurics-recording-id"],
+                    eventResult: "fail",
+                    reasonCode: "audio_storage_failed",
+                    httpPath: path,
+                    httpStatus: 500,
+                    errorDomain: "RecordingUploadRouteHandler"
+                )
                 return Self.errorResponse(statusCode: 500, reason: "Internal Server Error", error: "audio_storage_failed")
             }
         case .rejected(let reason):
             print("[RokuricsRecordingUpload] audio rejected: \(reason)")
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioReceiveFailedWithReason",
+                traceID: traceID,
+                recordingID: normalizedHeaders["x-rokurics-recording-id"],
+                eventResult: "fail",
+                reasonCode: reason,
+                httpPath: path,
+                httpStatus: reason == "body_too_large" ? 413 : 400,
+                verifierResult: "rejected"
+            )
             return Self.errorResponse(
                 statusCode: reason == "body_too_large" ? 413 : 400,
                 reason: reason == "body_too_large" ? "Payload Too Large" : "Bad Request",
@@ -408,6 +538,8 @@ struct ConnectionHeartbeatRouteHandler {
                     receivedAt: now,
                     latencyMilliseconds: max(0, now.timeIntervalSince(request.sentAt) * 1_000)
                 )
+                let syncStartSignal = statusStore.consumePendingSyncStartSignal(deviceID: device.id)
+                let syncRequested = syncStartSignal != nil
                 let response = ConnectionHeartbeatResponse(
                     ok: true,
                     disposition: "ok",
@@ -416,6 +548,8 @@ struct ConnectionHeartbeatRouteHandler {
                     receivedSequenceNumber: request.sequenceNumber,
                     connectionStatusRevision: status.connectionStatusRevision ?? 0,
                     minimumSuggestedInterval: minimumSuggestedInterval,
+                    syncRequested: syncRequested,
+                    syncStartSignal: syncStartSignal,
                     status: status,
                     error: nil
                 )
@@ -481,6 +615,8 @@ struct ConnectionProbeRouteHandler {
         let echoedClientPayload: String
         let serverPayload: String
         let serverTime: Date
+        let syncRequested: Bool?
+        let syncStartSignal: LocalNetworkSyncStartSignal?
     }
 
     private struct ErrorResponse: Encodable {
@@ -513,13 +649,17 @@ struct ConnectionProbeRouteHandler {
                     displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
                     now: now
                 )
+                let syncStartSignal = statusStore?.consumePendingSyncStartSignal(deviceID: device.id)
+                let syncRequested = syncStartSignal != nil
                 let response = ProbeResponse(
                     ok: true,
                     disposition: "ok",
                     receivedSequenceNumber: request.sequenceNumber,
                     echoedClientPayload: request.clientPayload,
                     serverPayload: "rokurics-probe-ok",
-                    serverTime: now
+                    serverTime: now,
+                    syncRequested: syncRequested,
+                    syncStartSignal: syncStartSignal
                 )
                 return Self.jsonResponse(statusCode: 200, reason: "OK", body: response)
             } catch {
@@ -787,6 +927,7 @@ final class SecureLocalHTTPSServer {
     private let queue = DispatchQueue(label: "RokuricsMac.SecureLocalHTTPSServer")
     private let maxHeaderBytes = 16 * 1024
     private let maxAllowedBodyBytes = MacRecordingFileStore.audioMaxBytes
+    private let syncArtifactChunkBytes = 2 * 1024 * 1024
     private var listener: NWListener?
     private var activeConnections: [UUID: NWConnection] = [:]
     private let listenerStateLock = NSLock()
@@ -941,6 +1082,7 @@ final class SecureLocalHTTPSServer {
         pairedDeviceLastSeenAfter: Date? = nil,
         connectionStatusStoreUpdated: Bool? = nil,
         uiObservedLastSeenAt: Date? = nil,
+        syncRunID: String? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
         errorCategory: String? = nil
@@ -962,6 +1104,7 @@ final class SecureLocalHTTPSServer {
                 pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
                 connectionStatusStoreUpdated: connectionStatusStoreUpdated,
                 uiObservedLastSeenAt: uiObservedLastSeenAt,
+                syncRunID: syncRunID,
                 errorCode: errorCode,
                 errorMessage: errorMessage,
                 errorCategory: errorCategory
@@ -1175,10 +1318,21 @@ final class SecureLocalHTTPSServer {
 
     private func startStreamingRecordingAudioBody(_ request: HTTPHeaderRequest, initialBuffer: Data, on connection: NWConnection) {
         let headers = Self.normalizedHeaders(request.headers)
+        let traceID = UploadFlightRecorder.traceID(from: request.headers)
         guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             sendError(statusCode: 400, reason: "Bad Request", error: "missing_recording_id", on: connection)
             return
         }
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "uploadAudioRouteMatched",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: request.path,
+            routeMatched: true,
+            bodyBytes: request.contentLength
+        )
 
         guard request.contentLength > 0 else {
             sendError(statusCode: 400, reason: "Bad Request", error: "empty_body", on: connection)
@@ -1193,6 +1347,15 @@ final class SecureLocalHTTPSServer {
 
             do {
                 let temporaryURL = try recordingFileStore.temporaryAudioUploadURL(recordingID: recordingID)
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "audioTempFileCreated",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "success",
+                    httpPath: request.path,
+                    bodyBytes: request.contentLength
+                )
                 let writer = try StreamingBodyWriter(fileURL: temporaryURL)
                 let initialEnd = min(initialBuffer.count, request.bodyStart + request.contentLength)
                 let initialBody = initialEnd > request.bodyStart ? Data(initialBuffer[request.bodyStart..<initialEnd]) : Data()
@@ -1278,6 +1441,19 @@ final class SecureLocalHTTPSServer {
                 connection.cancel()
                 return
             }
+            let traceID = UploadFlightRecorder.traceID(from: request.headers)
+            let headers = Self.normalizedHeaders(request.headers)
+            let recordingIDForTrace = headers["x-rokurics-recording-id"]
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "audioChecksumComputed",
+                traceID: traceID,
+                recordingID: recordingIDForTrace,
+                eventResult: "success",
+                httpPath: request.path,
+                fileSize: Int64(writer.bytesWritten),
+                bodyBytes: writer.bytesWritten
+            )
 
             switch requestVerifier.verify(
                 method: request.method,
@@ -1288,7 +1464,6 @@ final class SecureLocalHTTPSServer {
             ) {
             case .accepted(let device):
                 do {
-                    let headers = Self.normalizedHeaders(request.headers)
                     guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         recordingFileStore.discardTemporaryUpload(at: writer.fileURL)
                         sendError(statusCode: 400, reason: "Bad Request", error: "missing_recording_id", on: connection)
@@ -1301,7 +1476,8 @@ final class SecureLocalHTTPSServer {
                         requestedFileName: headers["x-rokurics-filename"],
                         sourceDevice: device,
                         checksum: bodySHA256,
-                        fileSize: Int64(writer.bytesWritten)
+                        fileSize: Int64(writer.bytesWritten),
+                        uploadTraceID: traceID
                     )
                     onRecordingAccepted(result.recordingID)
                     print("[RokuricsRecordingUpload] streaming audio accepted: \(result.recordingID)")
@@ -1336,6 +1512,19 @@ final class SecureLocalHTTPSServer {
     }
 
     private func handleRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        let traceID = UploadFlightRecorder.traceID(from: request.headers)
+        let traceRecordingID = Self.normalizedHeaders(request.headers)["x-rokurics-recording-id"]
+        if traceID != nil {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "httpRequestReceived",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "begin",
+                httpPath: request.path,
+                bodyBytes: request.body.count
+            )
+        }
         switch (request.method, request.path) {
         case ("GET", "/health"):
             sendJSON(
@@ -1362,26 +1551,86 @@ final class SecureLocalHTTPSServer {
                 self?.handleSecureUploadRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-metadata"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "uploadMetadataRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleRecordingMetadataUploadRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-audio"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "uploadAudioRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleRecordingAudioUploadRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-audio-session/start"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "resumableStartRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleResumableAudioStartRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-audio-session/status"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "resumableStatusRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleResumableAudioStatusRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-audio-session/chunk"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "resumableChunkRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleResumableAudioChunkRequest(request, on: connection)
             }
         case ("POST", "/upload-recording-audio-session/finalize"):
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "resumableFinalizeRouteMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "success",
+                httpPath: request.path,
+                routeMatched: true,
+                bodyBytes: request.body.count
+            )
             Task { @MainActor [weak self] in
                 self?.handleResumableAudioFinalizeRequest(request, on: connection)
             }
@@ -1425,6 +1674,18 @@ final class SecureLocalHTTPSServer {
             Task { @MainActor [weak self] in
                 self?.handleLocalNetworkSyncApplyMetadataRequest(request, on: connection)
             }
+        case ("POST", "/sync/start"):
+            Task { @MainActor [weak self] in
+                self?.handleLocalNetworkSyncStartRequest(request, on: connection)
+            }
+        case ("POST", "/sync/start-ack"):
+            Task { @MainActor [weak self] in
+                self?.handleLocalNetworkSyncStartAckRequest(request, on: connection)
+            }
+        case ("POST", "/sync/artifact-status"):
+            Task { @MainActor [weak self] in
+                self?.handleLocalNetworkSyncArtifactStatusRequest(request, on: connection)
+            }
         case ("POST", "/sync/artifact-request"):
             Task { @MainActor [weak self] in
                 self?.handleLocalNetworkSyncArtifactRequest(request, on: connection)
@@ -1434,6 +1695,16 @@ final class SecureLocalHTTPSServer {
                 self?.handleLocalNetworkSyncArtifactPutRequest(request, on: connection)
             }
         default:
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "uploadRouteNotMatched",
+                traceID: traceID,
+                recordingID: traceRecordingID,
+                eventResult: "fail",
+                reasonCode: "route_not_matched",
+                httpPath: request.path,
+                routeMatched: false
+            )
             if request.method != "GET" && request.method != "POST" {
                 sendError(statusCode: 405, reason: "Method Not Allowed", error: "method_not_allowed", on: connection)
             } else {
@@ -1896,9 +2167,15 @@ final class SecureLocalHTTPSServer {
     }
 
     @MainActor
-    func localNetworkSyncInventoryResponseForVerifiedDevice(_ device: PairedDevice) -> LocalNetworkSyncInventoryResponse {
+    func localNetworkSyncInventoryResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        syncRunID: String? = nil
+    ) -> LocalNetworkSyncInventoryResponse {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "inventory")
-        emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort)
+        if let syncRunID {
+            syncStateStore.recordControlPlane(deviceID: device.id, syncRunID: syncRunID, state: .inventoryExchanging)
+        }
+        emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         return LocalNetworkSyncInventoryResponse(
             ok: true,
             inventory: makeLocalNetworkSyncInventory(),
@@ -1964,6 +2241,79 @@ final class SecureLocalHTTPSServer {
     }
 
     @MainActor
+    func localNetworkSyncStartResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        requestBody: Data
+    ) -> LocalNetworkSyncStartResponse {
+        do {
+            let request = try Self.syncJSONDecoder.decode(LocalNetworkSyncStartRequest.self, from: requestBody)
+            guard request.deviceID == device.id else {
+                throw NSError(domain: "RokuricsSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "device_id_mismatch"])
+            }
+            syncStateStore.recordControlPlane(
+                deviceID: device.id,
+                syncRunID: request.syncRunID,
+                state: .syncStartAcked
+            )
+            _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "sync-start")
+            emitConnectionDiagnostic(phase: "syncStartSignalReceived", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
+            emitConnectionDiagnostic(phase: "syncStartAckSent", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
+            return LocalNetworkSyncStartResponse(
+                ok: true,
+                syncRunID: request.syncRunID,
+                peerDeviceID: localSyncDeviceID,
+                ackAt: Date(),
+                disposition: "ack",
+                error: nil
+            )
+        } catch {
+            return LocalNetworkSyncStartResponse(
+                ok: false,
+                syncRunID: nil,
+                peerDeviceID: localSyncDeviceID,
+                ackAt: nil,
+                disposition: "rejected",
+                error: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    func localNetworkSyncStartAckResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        requestBody: Data
+    ) -> LocalNetworkSyncStartAckResponse {
+        do {
+            let request = try Self.syncJSONDecoder.decode(LocalNetworkSyncStartAckRequest.self, from: requestBody)
+            guard request.deviceID == device.id else {
+                throw NSError(domain: "RokuricsSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "device_id_mismatch"])
+            }
+            syncStateStore.recordControlPlane(
+                deviceID: device.id,
+                syncRunID: request.syncRunID,
+                state: .syncStartAcked
+            )
+            _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "sync-ack")
+            emitConnectionDiagnostic(phase: "syncStartAckReceived", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
+            return LocalNetworkSyncStartAckResponse(
+                ok: true,
+                syncRunID: request.syncRunID,
+                peerDeviceID: localSyncDeviceID,
+                ackReceivedAt: Date(),
+                error: nil
+            )
+        } catch {
+            return LocalNetworkSyncStartAckResponse(
+                ok: false,
+                syncRunID: nil,
+                peerDeviceID: localSyncDeviceID,
+                ackReceivedAt: nil,
+                error: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
     func localNetworkSyncArtifactResponseForVerifiedDevice(
         _ device: PairedDevice,
         requestBody: Data
@@ -1990,22 +2340,34 @@ final class SecureLocalHTTPSServer {
             guard FileManager.default.fileExists(atPath: artifactURL.path) else {
                 throw LocalNetworkSyncArtifactValidationError.artifactNotFound
             }
-            if let size = LocalNetworkSyncArtifactFileService.metadata(for: artifactURL)?.size,
-               size > 4 * 1024 * 1024 {
+            let fileMetadata = try requireArtifactFileMetadata(for: artifactURL)
+            let isChunkRequest = request.offset != nil || request.length != nil
+            let maxResponseBytes = isChunkRequest ? syncArtifactChunkBytes : 4 * 1024 * 1024
+            let offset = request.offset ?? 0
+            let length = request.length ?? Int(fileMetadata.size)
+            guard offset >= 0,
+                  length > 0,
+                  length <= maxResponseBytes,
+                  offset < fileMetadata.size else {
                 throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
             }
-
-            let data = try Data(contentsOf: artifactURL)
+            let data = try readArtifactChunk(fileURL: artifactURL, offset: offset, length: length)
             emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "checksumVerified", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "fileTransferStarted", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "fileTransferProgressUpdated", listenerState: "ready", activePort: activePort)
             emitConnectionDiagnostic(phase: "downloadActionCompleted", listenerState: "ready", activePort: activePort)
             return LocalNetworkSyncArtifactResponse(
                 ok: true,
                 artifactID: artifact.artifactID,
                 kind: artifact.kind,
-                checksum: try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: artifactURL),
+                checksum: MacSecurityUtilities.sha256Hex(data),
                 size: Int64(data.count),
                 logicalPathToken: artifact.logicalPathToken,
                 dataBase64: data.base64EncodedString(),
+                offset: offset,
+                totalSize: fileMetadata.size,
+                isFinalChunk: offset + Int64(data.count) >= fileMetadata.size,
                 error: nil
             )
         } catch {
@@ -2024,6 +2386,101 @@ final class SecureLocalHTTPSServer {
                 size: nil,
                 logicalPathToken: nil,
                 dataBase64: nil,
+                error: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    func localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+        _ device: PairedDevice,
+        requestBody: Data
+    ) -> LocalNetworkSyncArtifactStatusResponse {
+        _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "artifact-status")
+        do {
+            let request = try Self.syncJSONDecoder.decode(LocalNetworkSyncArtifactStatusRequest.self, from: requestBody)
+            try LocalNetworkSyncArtifactID.validate(request.artifactID)
+            emitConnectionDiagnostic(phase: "transferSessionStatusFetched", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
+
+            if let kind = request.kind,
+               let ownerID = request.ownerID,
+               let logicalPathToken = request.logicalPathToken {
+                try LocalNetworkSyncArtifactID.validateLogicalPathToken(logicalPathToken, for: kind)
+                guard kind.isAutoDownloadAllowed,
+                      request.artifactID == LocalNetworkSyncArtifactID.make(kind: kind, ownerID: ownerID, logicalPathToken: logicalPathToken) else {
+                    throw LocalNetworkSyncArtifactValidationError.invalidArtifactID
+                }
+                let finalURL = try LocalNetworkSyncArtifactFileService.safeFileURL(
+                    rootURL: recordingFileStore.libraryRootURL,
+                    logicalPathToken: logicalPathToken,
+                    kind: kind
+                )
+                if let finalMetadata = LocalNetworkSyncArtifactFileService.metadata(for: finalURL),
+                   request.size == nil || request.size == finalMetadata.size {
+                    let finalChecksum = try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: finalURL)
+                    if request.checksum == nil || request.checksum == finalChecksum {
+                        return LocalNetworkSyncArtifactStatusResponse(
+                            ok: true,
+                            artifactID: request.artifactID,
+                            checksum: finalChecksum,
+                            size: finalMetadata.size,
+                            confirmedBytes: finalMetadata.size,
+                            nextOffset: finalMetadata.size,
+                            state: .complete,
+                            error: nil
+                        )
+                    }
+                }
+                let tempURL = try syncArtifactIncomingTempURL(artifactID: request.artifactID)
+                let confirmedBytes = LocalNetworkSyncArtifactFileService.metadata(for: tempURL)?.size ?? 0
+                return LocalNetworkSyncArtifactStatusResponse(
+                    ok: true,
+                    artifactID: request.artifactID,
+                    checksum: request.checksum,
+                    size: request.size,
+                    confirmedBytes: confirmedBytes,
+                    nextOffset: confirmedBytes,
+                    state: confirmedBytes > 0 ? .resuming : .pending,
+                    error: nil
+                )
+            }
+
+            let inventory = makeLocalNetworkSyncInventory()
+            guard let artifact = inventory.artifacts.first(where: { $0.artifactID == request.artifactID }) else {
+                throw LocalNetworkSyncArtifactValidationError.artifactNotFound
+            }
+            let artifactURL = try LocalNetworkSyncArtifactFileService.safeFileURL(
+                rootURL: recordingFileStore.libraryRootURL,
+                logicalPathToken: artifact.logicalPathToken,
+                kind: artifact.kind
+            )
+            let metadata = try requireArtifactFileMetadata(for: artifactURL)
+            return LocalNetworkSyncArtifactStatusResponse(
+                ok: true,
+                artifactID: artifact.artifactID,
+                checksum: try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: artifactURL),
+                size: metadata.size,
+                confirmedBytes: metadata.size,
+                nextOffset: metadata.size,
+                state: .complete,
+                error: nil
+            )
+        } catch {
+            emitConnectionDiagnostic(
+                phase: "transferSessionStatusFailed",
+                listenerState: "ready",
+                activePort: activePort,
+                errorCode: "sync_artifact_status_failed",
+                errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+            return LocalNetworkSyncArtifactStatusResponse(
+                ok: false,
+                artifactID: nil,
+                checksum: nil,
+                size: nil,
+                confirmedBytes: nil,
+                nextOffset: nil,
+                state: nil,
                 error: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             )
         }
@@ -2051,13 +2508,8 @@ final class SecureLocalHTTPSServer {
             ) else {
                 throw LocalNetworkSyncArtifactValidationError.invalidArtifactID
             }
-            guard request.size >= 0, request.size <= 4 * 1024 * 1024,
-                  let data = Data(base64Encoded: request.dataBase64),
-                  data.count == Int(request.size) else {
-                throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
-            }
-            let checksum = MacSecurityUtilities.sha256Hex(data)
-            guard checksum == request.checksum else {
+            guard request.size >= 0,
+                  let data = Data(base64Encoded: request.dataBase64) else {
                 throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
             }
 
@@ -2066,21 +2518,96 @@ final class SecureLocalHTTPSServer {
                 logicalPathToken: request.logicalPathToken,
                 kind: request.kind
             )
-            let existingChecksum = (try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: artifactURL))
-            let disposition = existingChecksum == checksum ? "acceptedExisting" : "acceptedNew"
-            try FileManager.default.createDirectory(at: artifactURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if existingChecksum != checksum {
-                try data.write(to: artifactURL, options: .atomic)
+            let isChunked = request.offset != nil || request.chunkSize != nil || request.totalSize != nil || request.isFinalChunk != nil
+            let disposition: String
+            let confirmedBytes: Int64
+            if isChunked {
+                let offset = request.offset ?? 0
+                let chunkSize = request.chunkSize ?? data.count
+                guard offset >= 0,
+                      chunkSize == data.count,
+                      data.count <= syncArtifactChunkBytes,
+                      request.totalSize == request.size,
+                      offset + Int64(data.count) <= request.size else {
+                    throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+                }
+                let tempURL = try syncArtifactIncomingTempURL(artifactID: request.artifactID)
+                try FileManager.default.createDirectory(at: tempURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if offset == 0, FileManager.default.fileExists(atPath: tempURL.path) {
+                    try FileManager.default.removeItem(at: tempURL)
+                }
+                if offset > 0 {
+                    guard let tempSize = LocalNetworkSyncArtifactFileService.metadata(for: tempURL)?.size,
+                          tempSize == offset else {
+                        emitConnectionDiagnostic(
+                            phase: "transferOffsetMismatch",
+                            listenerState: "ready",
+                            activePort: activePort,
+                            requestDeviceIDPrefix: device.idPrefix,
+                            syncRunID: request.syncRunID,
+                            errorCode: "sync_artifact_offset_mismatch"
+                        )
+                        throw NSError(domain: "RokuricsSync", code: 409, userInfo: [NSLocalizedDescriptionKey: "sync_artifact_offset_mismatch"])
+                    }
+                }
+                if !FileManager.default.fileExists(atPath: tempURL.path) {
+                    _ = FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+                }
+                let handle = try FileHandle(forWritingTo: tempURL)
+                defer {
+                    try? handle.close()
+                }
+                try handle.seek(toOffset: UInt64(offset))
+                try handle.write(contentsOf: data)
+                confirmedBytes = offset + Int64(data.count)
+                emitConnectionDiagnostic(phase: "fileTransferStarted", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "fileTransferProgressUpdated", listenerState: "ready", activePort: activePort)
+                if request.isFinalChunk == true {
+                    guard confirmedBytes == request.size,
+                          LocalNetworkSyncArtifactFileService.metadata(for: tempURL)?.size == request.size,
+                          try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: tempURL) == request.checksum else {
+                        throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+                    }
+                    disposition = try applySyncedArtifact(tempURL: tempURL, artifactURL: artifactURL, checksum: request.checksum)
+                    emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
+                    emitConnectionDiagnostic(phase: "checksumVerified", listenerState: "ready", activePort: activePort)
+                    emitConnectionDiagnostic(phase: "atomicReplaceCompleted", listenerState: "ready", activePort: activePort)
+                    emitConnectionDiagnostic(phase: "peerFileApplied", listenerState: "ready", activePort: activePort)
+                    emitConnectionDiagnostic(phase: "fileTransferCompleted", listenerState: "ready", activePort: activePort)
+                } else {
+                    disposition = "acceptedChunk"
+                }
+            } else {
+                guard request.size <= 4 * 1024 * 1024,
+                      data.count == Int(request.size),
+                      MacSecurityUtilities.sha256Hex(data) == request.checksum else {
+                    throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+                }
+                let tempURL = try syncArtifactIncomingTempURL(artifactID: request.artifactID)
+                if FileManager.default.fileExists(atPath: tempURL.path) {
+                    try FileManager.default.removeItem(at: tempURL)
+                }
+                try FileManager.default.createDirectory(at: tempURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: tempURL, options: .atomic)
+                disposition = try applySyncedArtifact(tempURL: tempURL, artifactURL: artifactURL, checksum: request.checksum)
+                confirmedBytes = Int64(data.count)
+                emitConnectionDiagnostic(phase: "fileTransferStarted", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "fileTransferProgressUpdated", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "checksumVerified", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "atomicReplaceCompleted", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "peerFileApplied", listenerState: "ready", activePort: activePort)
+                emitConnectionDiagnostic(phase: "fileTransferCompleted", listenerState: "ready", activePort: activePort)
             }
 
-            emitConnectionDiagnostic(phase: "artifactChecksumVerified", listenerState: "ready", activePort: activePort)
             emitConnectionDiagnostic(phase: "uploadActionCompleted", listenerState: "ready", activePort: activePort)
             return LocalNetworkSyncArtifactPutResponse(
                 ok: true,
                 artifactID: request.artifactID,
                 disposition: disposition,
-                checksum: checksum,
-                size: Int64(data.count),
+                checksum: request.checksum,
+                size: request.size,
+                confirmedBytes: confirmedBytes,
                 error: nil
             )
         } catch {
@@ -2102,18 +2629,61 @@ final class SecureLocalHTTPSServer {
         }
     }
 
+    private func requireArtifactFileMetadata(for url: URL) throws -> (size: Int64, updatedAt: Date) {
+        guard let metadata = LocalNetworkSyncArtifactFileService.metadata(for: url) else {
+            throw LocalNetworkSyncArtifactValidationError.artifactNotFound
+        }
+        return metadata
+    }
+
+    private func readArtifactChunk(fileURL: URL, offset: Int64, length: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer {
+            try? handle.close()
+        }
+        try handle.seek(toOffset: UInt64(offset))
+        let data = try handle.read(upToCount: length) ?? Data()
+        guard !data.isEmpty else {
+            throw LocalNetworkSyncArtifactValidationError.artifactNotFound
+        }
+        return data
+    }
+
+    private func syncArtifactIncomingTempURL(artifactID: String) throws -> URL {
+        try LocalNetworkSyncArtifactID.validate(artifactID)
+        return recordingFileStore.libraryRootURL
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("Incoming", isDirectory: true)
+            .appendingPathComponent("\(artifactID).part", isDirectory: false)
+    }
+
+    private func applySyncedArtifact(tempURL: URL, artifactURL: URL, checksum: String) throws -> String {
+        let existingChecksum = (try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: artifactURL))
+        let disposition = existingChecksum == checksum ? "acceptedExisting" : "acceptedNew"
+        try FileManager.default.createDirectory(at: artifactURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if existingChecksum == checksum {
+            try? FileManager.default.removeItem(at: tempURL)
+        } else if FileManager.default.fileExists(atPath: artifactURL.path) {
+            _ = try FileManager.default.replaceItemAt(artifactURL, withItemAt: tempURL)
+        } else {
+            try FileManager.default.moveItem(at: tempURL, to: artifactURL)
+        }
+        return disposition
+    }
+
     @MainActor
     private func handleLocalNetworkSyncInventoryRequest(_ request: HTTPRequest, on connection: NWConnection) {
         switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
         case .accepted(let device):
-            emitConnectionDiagnostic(phase: "syncTickStarted", listenerState: "ready", activePort: activePort)
+            let syncRunID = (try? Self.syncJSONDecoder.decode(LocalNetworkSyncInventoryRequest.self, from: request.body))?.syncRunID
+            emitConnectionDiagnostic(phase: "syncTickStarted", listenerState: "ready", activePort: activePort, syncRunID: syncRunID)
             sendJSON(
                 statusCode: 200,
                 reason: "OK",
-                body: localNetworkSyncInventoryResponseForVerifiedDevice(device),
+                body: localNetworkSyncInventoryResponseForVerifiedDevice(device, syncRunID: syncRunID),
                 on: connection
             )
-            emitConnectionDiagnostic(phase: "peerInventoryFetched", listenerState: "ready", activePort: activePort)
+            emitConnectionDiagnostic(phase: "peerInventoryFetched", listenerState: "ready", activePort: activePort, syncRunID: syncRunID)
         case .rejected(let reason):
             emitConnectionDiagnostic(phase: "syncTickFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
@@ -2136,6 +2706,57 @@ final class SecureLocalHTTPSServer {
             }
         case .rejected(let reason):
             emitConnectionDiagnostic(phase: "uploadActionFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleLocalNetworkSyncStartRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            let response = localNetworkSyncStartResponseForVerifiedDevice(device, requestBody: request.body)
+            sendJSON(
+                statusCode: response.ok ? 200 : 400,
+                reason: response.ok ? "OK" : "Bad Request",
+                body: response,
+                on: connection
+            )
+        case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "syncStartSignalRejected", listenerState: "ready", activePort: activePort, errorCode: reason)
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleLocalNetworkSyncStartAckRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            let response = localNetworkSyncStartAckResponseForVerifiedDevice(device, requestBody: request.body)
+            sendJSON(
+                statusCode: response.ok ? 200 : 400,
+                reason: response.ok ? "OK" : "Bad Request",
+                body: response,
+                on: connection
+            )
+        case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "syncStartAckRejected", listenerState: "ready", activePort: activePort, errorCode: reason)
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    @MainActor
+    private func handleLocalNetworkSyncArtifactStatusRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            let response = localNetworkSyncArtifactStatusResponseForVerifiedDevice(device, requestBody: request.body)
+            sendJSON(
+                statusCode: response.ok ? 200 : 400,
+                reason: response.ok ? "OK" : "Bad Request",
+                body: response,
+                on: connection
+            )
+        case .rejected(let reason):
+            emitConnectionDiagnostic(phase: "transferSessionStatusFailed", listenerState: "ready", activePort: activePort, errorCode: reason)
             sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
         }
     }
@@ -2358,6 +2979,10 @@ final class SecureLocalHTTPSServer {
             return 256 * 1024
         case "/sync/apply", "/sync/apply-metadata":
             return 4 * 1024 * 1024
+        case "/sync/start", "/sync/start-ack":
+            return 64 * 1024
+        case "/sync/artifact-status":
+            return 256 * 1024
         case "/sync/artifact-request":
             return 256 * 1024
         case "/sync/artifact-put":

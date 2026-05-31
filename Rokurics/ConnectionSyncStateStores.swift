@@ -556,6 +556,7 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     var result: String?
     var latencyMs: Double?
     var heartbeatMissCount: Int?
+    var syncRunID: String?
     var uploadTestBlockedReason: String?
     var pendingUploadCount: Int?
     var pendingDownloadCount: Int?
@@ -588,6 +589,7 @@ final class ConnectionDiagnosticsStore {
         requestPath: String? = nil,
         responseReceivedAt: Date? = nil,
         responseSequence: UInt64? = nil,
+        syncRunID: String? = nil,
         result: String? = nil,
         latencyMs: Double? = nil,
         heartbeatMissCount: Int? = nil,
@@ -610,6 +612,7 @@ final class ConnectionDiagnosticsStore {
             result: sanitized(result),
             latencyMs: latencyMs,
             heartbeatMissCount: heartbeatMissCount,
+            syncRunID: sanitized(syncRunID),
             uploadTestBlockedReason: sanitized(uploadTestBlockedReason),
             pendingUploadCount: pendingUploadCount,
             pendingDownloadCount: pendingDownloadCount,
@@ -713,6 +716,25 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         }
         state.failedChanges = max(state.failedChanges, failedChanges)
         state.lastError = error
+        save()
+    }
+
+    func recordControlPlane(
+        deviceID: String,
+        syncRunID: String,
+        state controlPlaneState: LocalNetworkSyncControlPlaneState,
+        at date: Date = Date()
+    ) {
+        state.deviceID = deviceID
+        state.activeSyncRunID = syncRunID
+        state.syncControlPlaneState = controlPlaneState
+        state.syncControlPlaneUpdatedAt = date
+        if controlPlaneState == .completed {
+            state.lastSuccessfulSyncAt = date
+        }
+        if controlPlaneState != .failed {
+            state.lastError = nil
+        }
         save()
     }
 
@@ -838,6 +860,26 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         save()
     }
 
+    func recordControlPlane(
+        syncRunID: String,
+        state controlPlaneState: LocalNetworkSyncControlPlaneState,
+        at date: Date = Date()
+    ) {
+        state.activeSyncRunID = syncRunID
+        state.controlPlaneState = controlPlaneState
+        state.lastControlPlaneUpdatedAt = date
+        if controlPlaneState == .completed {
+            state.lastSyncCompletedAt = date
+            state.lastSuccessfulSyncAt = date
+        } else if controlPlaneState == .failed {
+            state.lastSyncCompletedAt = date
+        } else if controlPlaneState == .syncStartAcked || controlPlaneState == .inventoryExchanging {
+            state.lastSyncStartedAt = state.lastSyncStartedAt ?? date
+            state.lastSyncAt = date
+        }
+        save()
+    }
+
     func recordFailure(
         code: String,
         message: String,
@@ -901,6 +943,185 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private static func syncDirectoryURL(fileManager: FileManager, rootURL: URL?) -> URL {
+        if let rootURL {
+            return rootURL.appendingPathComponent("Sync", isDirectory: true)
+        }
+        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        return applicationSupportURL
+            .appendingPathComponent("Rokurics", isDirectory: true)
+            .appendingPathComponent("Sync", isDirectory: true)
+    }
+}
+
+enum LocalNetworkSyncTransferDirection: String, Codable, Equatable {
+    case upload
+    case download
+}
+
+struct LocalNetworkSyncTransferJob: Codable, Equatable, Identifiable {
+    var id: String { transferID }
+
+    var transferID: String
+    var direction: LocalNetworkSyncTransferDirection
+    var ownerID: String
+    var artifactID: String
+    var objectKind: String
+    var fileName: String?
+    var logicalName: String?
+    var totalBytes: Int64?
+    var transferredBytes: Int64
+    var sha256: String?
+    var chunkSize: Int?
+    var nextOffset: Int64
+    var state: LocalNetworkTransferState
+    var createdAt: Date
+    var updatedAt: Date
+    var lastAttemptAt: Date?
+    var nextRetryAfter: Date?
+    var errorCode: String?
+    var errorMessage: String?
+    var peerDeviceID: String?
+    var localTempPath: String?
+    var syncRunID: String? = nil
+    var objectID: String? = nil
+    var logicalPathToken: String? = nil
+    var relativePathToken: String? = nil
+    var senderDeviceID: String? = nil
+    var receiverDeviceID: String? = nil
+    var confirmedBytes: Int64? = nil
+    var retryCount: Int? = nil
+    var sessionID: String? = nil
+}
+
+struct LocalNetworkSyncTransferLedger: Codable, Equatable {
+    static let currentVersion = 1
+
+    var version: Int
+    var jobs: [LocalNetworkSyncTransferJob]
+
+    static var empty: LocalNetworkSyncTransferLedger {
+        LocalNetworkSyncTransferLedger(version: currentVersion, jobs: [])
+    }
+}
+
+final class LocalNetworkSyncTransferJobStore {
+    private let fileManager: FileManager
+    private let storeURL: URL
+    private(set) var lastError: String?
+
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
+        self.fileManager = fileManager
+        storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
+            .appendingPathComponent("local-network-transfer-ledger.json", isDirectory: false)
+            .standardizedFileURL
+    }
+
+    func loadJobs() throws -> [LocalNetworkSyncTransferJob] {
+        try loadLedger().jobs
+    }
+
+    @discardableResult
+    func upsert(_ job: LocalNetworkSyncTransferJob) throws -> LocalNetworkSyncTransferJob {
+        var ledger = try loadLedger()
+        ledger.jobs.removeAll { $0.transferID == job.transferID }
+        ledger.jobs.append(job)
+        ledger.jobs.sort { $0.updatedAt > $1.updatedAt }
+        try saveLedger(ledger)
+        return job
+    }
+
+    @discardableResult
+    func update(
+        transferID: String,
+        now: Date = Date(),
+        _ update: (inout LocalNetworkSyncTransferJob) -> Void
+    ) throws -> LocalNetworkSyncTransferJob {
+        var ledger = try loadLedger()
+        guard let index = ledger.jobs.firstIndex(where: { $0.transferID == transferID }) else {
+            throw StudyLibraryStoreError.writeFailed("sync_transfer_job_missing")
+        }
+        update(&ledger.jobs[index])
+        ledger.jobs[index].updatedAt = now
+        let job = ledger.jobs[index]
+        try saveLedger(ledger)
+        return job
+    }
+
+    @discardableResult
+    func markComplete(transferID: String, now: Date = Date()) throws -> LocalNetworkSyncTransferJob {
+        try update(transferID: transferID, now: now) { job in
+            job.state = .complete
+            job.transferredBytes = job.totalBytes ?? job.transferredBytes
+            job.nextOffset = job.totalBytes ?? job.nextOffset
+            job.confirmedBytes = job.totalBytes ?? job.confirmedBytes ?? job.transferredBytes
+            job.nextRetryAfter = nil
+            job.errorCode = nil
+            job.errorMessage = nil
+        }
+    }
+
+    private func loadLedger() throws -> LocalNetworkSyncTransferLedger {
+        guard fileManager.fileExists(atPath: storeURL.path) else {
+            lastError = nil
+            return .empty
+        }
+
+        do {
+            let data = try Data(contentsOf: storeURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let ledger = try decoder.decode(LocalNetworkSyncTransferLedger.self, from: data)
+            lastError = nil
+            return LocalNetworkSyncTransferLedger(
+                version: LocalNetworkSyncTransferLedger.currentVersion,
+                jobs: deduplicated(ledger.jobs)
+            )
+        } catch {
+            lastError = error.localizedDescription
+            return .empty
+        }
+    }
+
+    private func saveLedger(_ ledger: LocalNetworkSyncTransferLedger) throws {
+        try fileManager.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let normalized = LocalNetworkSyncTransferLedger(
+            version: LocalNetworkSyncTransferLedger.currentVersion,
+            jobs: deduplicated(ledger.jobs)
+        )
+        let data = try encoder.encode(normalized)
+        let temporaryURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent(".local-network-transfer-ledger-\(UUID().uuidString)")
+            .appendingPathExtension("tmp")
+        do {
+            try data.write(to: temporaryURL, options: .atomic)
+            if fileManager.fileExists(atPath: storeURL.path) {
+                _ = try fileManager.replaceItemAt(storeURL, withItemAt: temporaryURL)
+            } else {
+                try fileManager.moveItem(at: temporaryURL, to: storeURL)
+            }
+            lastError = nil
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            lastError = error.localizedDescription
+            throw error
+        }
+    }
+
+    private func deduplicated(_ jobs: [LocalNetworkSyncTransferJob]) -> [LocalNetworkSyncTransferJob] {
+        var latestByID: [String: LocalNetworkSyncTransferJob] = [:]
+        for job in jobs {
+            if latestByID[job.transferID].map({ job.updatedAt >= $0.updatedAt }) ?? true {
+                latestByID[job.transferID] = job
+            }
+        }
+        return latestByID.values.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     private static func syncDirectoryURL(fileManager: FileManager, rootURL: URL?) -> URL {

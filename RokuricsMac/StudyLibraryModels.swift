@@ -447,7 +447,8 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             transcriptionError: nil,
             studyFiling: studyFiling,
             noteRelativePath: noteRelativePath,
-            noteError: nil
+            noteError: nil,
+            transferProgress: localNetworkTransferProgress
         )
     }
 

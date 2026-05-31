@@ -1899,20 +1899,30 @@ struct StudyRecordingTransferProgressView: View {
             return "等待传输"
         case .transferring:
             return "\(Int(clampedProgress * 100))%"
+        case .paused:
+            return "等待重试"
+        case .pausedDisconnected:
+            return "连接中断"
+        case .retryPending:
+            return "等待重试"
+        case .resuming:
+            return "续传中"
         case .verifying:
             return "校验中"
         case .complete:
             return "已完成"
         case .failed:
             return "传输失败"
+        case .conflict:
+            return "传输冲突"
         }
     }
 
     private var tint: Color {
         switch transfer.state {
-        case .failed:
+        case .failed, .conflict:
             return RokuricsSharedStyle.coral
-        case .pending, .transferring, .verifying, .complete:
+        case .pending, .transferring, .paused, .pausedDisconnected, .retryPending, .resuming, .verifying, .complete:
             return RokuricsSharedStyle.aqua
         }
     }

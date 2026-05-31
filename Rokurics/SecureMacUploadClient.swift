@@ -64,6 +64,8 @@ struct ConnectionProbeResponse: Codable, Equatable {
     var echoedClientPayload: String
     var serverPayload: String
     var serverTime: Date
+    var syncRequested: Bool?
+    var syncStartSignal: LocalNetworkSyncStartSignal? = nil
 }
 
 enum SecureMacUploadError: LocalizedError {
@@ -409,7 +411,8 @@ final class SecureMacUploadClient: ObservableObject {
 
     func fetchLocalNetworkSyncInventory(
         settings: SecureMacConnectionSnapshot,
-        localInventory: LocalNetworkSyncInventory
+        localInventory: LocalNetworkSyncInventory,
+        syncRunID: String? = nil
     ) async throws -> LocalNetworkSyncInventoryResponse {
         try await postSignedJSON(
             settings: settings,
@@ -417,10 +420,37 @@ final class SecureMacUploadClient: ObservableObject {
             body: LocalNetworkSyncInventoryRequest(
                 deviceID: localInventory.device.deviceID,
                 generatedAt: Date(),
-                localInventoryHash: localInventory.inventoryHash
+                localInventoryHash: localInventory.inventoryHash,
+                syncRunID: syncRunID
             ),
             requestTimeout: 10,
             resourceTimeout: 20
+        )
+    }
+
+    func sendLocalNetworkSyncStartSignal(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncStartRequest
+    ) async throws -> LocalNetworkSyncStartResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/start",
+            body: request,
+            requestTimeout: 5,
+            resourceTimeout: 8
+        )
+    }
+
+    func sendLocalNetworkSyncStartAck(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncStartAckRequest
+    ) async throws -> LocalNetworkSyncStartAckResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/start-ack",
+            body: request,
+            requestTimeout: 5,
+            resourceTimeout: 8
         )
     }
 
@@ -441,12 +471,35 @@ final class SecureMacUploadClient: ObservableObject {
         settings: SecureMacConnectionSnapshot,
         artifactID: String
     ) async throws -> LocalNetworkSyncArtifactResponse {
+        try await requestLocalNetworkSyncArtifact(
+            settings: settings,
+            request: LocalNetworkSyncArtifactRequest(artifactID: artifactID)
+        )
+    }
+
+    func requestLocalNetworkSyncArtifact(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncArtifactRequest
+    ) async throws -> LocalNetworkSyncArtifactResponse {
         try await postSignedJSON(
             settings: settings,
             path: "/sync/artifact-request",
-            body: LocalNetworkSyncArtifactRequest(artifactID: artifactID),
+            body: request,
             requestTimeout: 10,
             resourceTimeout: 30
+        )
+    }
+
+    func fetchLocalNetworkSyncArtifactStatus(
+        settings: SecureMacConnectionSnapshot,
+        request: LocalNetworkSyncArtifactStatusRequest
+    ) async throws -> LocalNetworkSyncArtifactStatusResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/sync/artifact-status",
+            body: request,
+            requestTimeout: 10,
+            resourceTimeout: 20
         )
     }
 
@@ -482,6 +535,33 @@ final class SecureMacUploadClient: ObservableObject {
         let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
         let now = Date()
         let bodySHA256 = SecureUploadUtilities.sha256Hex(body)
+        let traceID = UploadFlightRecorder.currentTraceID
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureUploadClientEntered",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "begin",
+            httpPath: path,
+            bodyBytes: body.count
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureConnectionSettingsLoaded",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBodyHashComputed",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path,
+            bodyBytes: body.count
+        )
         let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
         let nonce = SecureUploadUtilities.randomBase64URLToken()
         let signaturePayload = [
@@ -496,12 +576,40 @@ final class SecureMacUploadClient: ObservableObject {
             message: signaturePayload,
             secretBase64URL: settings.sharedSecretBase64URL
         ) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureCredentialMissing",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "invalid_secret",
+                httpPath: path
+            )
             throw SecureMacUploadError.invalidSecret
         }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureCredentialLoaded",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestSigned",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
 
         let pinnedSession = makePinnedSession(
             expectedFingerprint: expectedFingerprint,
             diagnostics: nil,
+            traceID: traceID,
+            recordingID: recordingID,
+            httpPath: path,
             requestTimeout: requestTimeout,
             resourceTimeout: resourceTimeout
         )
@@ -520,27 +628,92 @@ final class SecureMacUploadClient: ObservableObject {
         request.setValue(recordingID, forHTTPHeaderField: "X-Rokurics-Recording-ID")
         request.setValue(fileName, forHTTPHeaderField: "X-Rokurics-Filename")
         request.setValue(uploadType, forHTTPHeaderField: "X-Rokurics-Upload-Type")
+        if let traceID {
+            request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
+        }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBuilt",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path,
+            bodyBytes: body.count
+        )
 
         print("[RokuricsRecordingUpload] target URL: \(url.absoluteString)")
         print("[RokuricsRecordingUpload] uploadType=\(uploadType), bodySize=\(body.count), recordingIDPrefix=\(String(recordingID.prefix(12)))")
 
         do {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestStarted",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "begin",
+                httpPath: path,
+                bodyBytes: body.count
+            )
             let (data, response) = try await pinnedSession.session.upload(for: request, from: body)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestResponseReceived",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: (200..<300).contains(statusCode) ? "success" : "fail",
+                httpPath: path,
+                httpStatus: statusCode,
+                bodyBytes: data.count
+            )
             print("[RokuricsRecordingUpload] response status code: \(statusCode)")
             print("[RokuricsRecordingUpload] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
 
             let uploadResponse = try JSONDecoder().decode(SecureUploadServerResponse.self, from: data)
             guard uploadResponse.ok else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "fail",
+                    reasonCode: uploadResponse.error ?? "recording_upload_failed",
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    macReceiveState: uploadResponse.receiveStatus,
+                    safeErrorMessage: uploadResponse.error
+                )
                 throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "recording_upload_failed")
             }
 
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestCompleted",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                reasonCode: uploadResponse.disposition,
+                httpPath: path,
+                httpStatus: statusCode,
+                macReceiveState: uploadResponse.receiveStatus
+            )
             return uploadResponse
         } catch {
             if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
             print("[RokuricsRecordingUpload] errors: \(error.localizedDescription)")
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestFailed",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "network_or_decode_error",
+                httpPath: path,
+                errorDomain: "SecureMacUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw error
         }
     }
@@ -564,6 +737,35 @@ final class SecureMacUploadClient: ObservableObject {
         let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
         let now = Date()
         let bodySHA256 = try SecureUploadUtilities.sha256Hex(fileURL: fileURL)
+        let traceID = UploadFlightRecorder.currentTraceID
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? -1
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureUploadClientEntered",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "begin",
+            httpPath: path,
+            fileExists: FileManager.default.fileExists(atPath: fileURL.path),
+            fileSize: fileSize
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureConnectionSettingsLoaded",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBodyHashComputed",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path,
+            fileSize: fileSize
+        )
         let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
         let nonce = SecureUploadUtilities.randomBase64URLToken()
         let signaturePayload = [
@@ -578,12 +780,40 @@ final class SecureMacUploadClient: ObservableObject {
             message: signaturePayload,
             secretBase64URL: settings.sharedSecretBase64URL
         ) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureCredentialMissing",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "invalid_secret",
+                httpPath: path
+            )
             throw SecureMacUploadError.invalidSecret
         }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureCredentialLoaded",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestSigned",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path
+        )
 
         let pinnedSession = makePinnedSession(
             expectedFingerprint: expectedFingerprint,
             diagnostics: nil,
+            traceID: traceID,
+            recordingID: recordingID,
+            httpPath: path,
             requestTimeout: requestTimeout,
             resourceTimeout: resourceTimeout
         )
@@ -602,28 +832,92 @@ final class SecureMacUploadClient: ObservableObject {
         request.setValue(recordingID, forHTTPHeaderField: "X-Rokurics-Recording-ID")
         request.setValue(fileName, forHTTPHeaderField: "X-Rokurics-Filename")
         request.setValue(uploadType, forHTTPHeaderField: "X-Rokurics-Upload-Type")
+        if let traceID {
+            request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
+        }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBuilt",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            httpPath: path,
+            fileSize: fileSize
+        )
 
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? -1
         print("[RokuricsRecordingUpload] target URL: \(url.absoluteString)")
         print("[RokuricsRecordingUpload] uploadType=\(uploadType), fileSize=\(fileSize), recordingIDPrefix=\(String(recordingID.prefix(12)))")
 
         do {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestStarted",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "begin",
+                httpPath: path,
+                fileSize: fileSize
+            )
             let (data, response) = try await pinnedSession.session.upload(for: request, fromFile: fileURL)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestResponseReceived",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: (200..<300).contains(statusCode) ? "success" : "fail",
+                httpPath: path,
+                httpStatus: statusCode,
+                bodyBytes: data.count
+            )
             print("[RokuricsRecordingUpload] response status code: \(statusCode)")
             print("[RokuricsRecordingUpload] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
 
             let uploadResponse = try JSONDecoder().decode(SecureUploadServerResponse.self, from: data)
             guard uploadResponse.ok else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "fail",
+                    reasonCode: uploadResponse.error ?? "recording_upload_failed",
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    macReceiveState: uploadResponse.receiveStatus,
+                    safeErrorMessage: uploadResponse.error
+                )
                 throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "recording_upload_failed")
             }
 
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestCompleted",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "success",
+                reasonCode: uploadResponse.disposition,
+                httpPath: path,
+                httpStatus: statusCode,
+                macReceiveState: uploadResponse.receiveStatus
+            )
             return uploadResponse
         } catch {
             if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
             print("[RokuricsRecordingUpload] errors: \(error.localizedDescription)")
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestFailed",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "network_or_decode_error",
+                httpPath: path,
+                errorDomain: "SecureMacUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw error
         }
     }
@@ -671,6 +965,31 @@ final class SecureMacUploadClient: ObservableObject {
         let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
         let now = Date()
         let bodySHA256 = SecureUploadUtilities.sha256Hex(chunk)
+        let traceID = UploadFlightRecorder.currentTraceID
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureUploadClientEntered",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "begin",
+            sessionID: sessionID,
+            httpPath: path,
+            bodyBytes: chunk.count,
+            chunkOffset: offset,
+            chunkLength: chunk.count
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBodyHashComputed",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            sessionID: sessionID,
+            httpPath: path,
+            bodyBytes: chunk.count,
+            chunkOffset: offset,
+            chunkLength: chunk.count
+        )
         let timestamp = String(format: "%.0f", now.timeIntervalSince1970)
         let nonce = SecureUploadUtilities.randomBase64URLToken()
         let signaturePayload = [
@@ -685,12 +1004,43 @@ final class SecureMacUploadClient: ObservableObject {
             message: signaturePayload,
             secretBase64URL: settings.sharedSecretBase64URL
         ) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureCredentialMissing",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "invalid_secret",
+                sessionID: sessionID,
+                httpPath: path
+            )
             throw SecureMacUploadError.invalidSecret
         }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureCredentialLoaded",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            sessionID: sessionID,
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestSigned",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            sessionID: sessionID,
+            httpPath: path
+        )
 
         let pinnedSession = makePinnedSession(
             expectedFingerprint: expectedFingerprint,
             diagnostics: nil,
+            traceID: traceID,
+            recordingID: recordingID,
+            httpPath: path,
             requestTimeout: 30,
             resourceTimeout: 60
         )
@@ -714,33 +1064,139 @@ final class SecureMacUploadClient: ObservableObject {
         request.setValue(String(chunk.count), forHTTPHeaderField: "X-Rokurics-Chunk-Length")
         request.setValue(bodySHA256, forHTTPHeaderField: "X-Rokurics-Chunk-SHA256")
         request.setValue(totalSHA256, forHTTPHeaderField: "X-Rokurics-Total-SHA256")
+        if let traceID {
+            request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
+        }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBuilt",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            sessionID: sessionID,
+            httpPath: path,
+            bodyBytes: chunk.count,
+            chunkOffset: offset,
+            chunkLength: chunk.count
+        )
 
         print("[RokuricsRecordingUpload] POST \(path), chunkSize=\(chunk.count), offset=\(offset), recordingIDPrefix=\(String(recordingID.prefix(12)))")
 
         do {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestStarted",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "begin",
+                sessionID: sessionID,
+                httpPath: path,
+                bodyBytes: chunk.count,
+                chunkOffset: offset,
+                chunkLength: chunk.count
+            )
             let (data, response) = try await pinnedSession.session.upload(for: request, from: chunk)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             print("[RokuricsRecordingUpload] chunk response status code: \(statusCode)")
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestResponseReceived",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: (200..<300).contains(statusCode) ? "success" : "fail",
+                sessionID: sessionID,
+                httpPath: path,
+                httpStatus: statusCode,
+                bodyBytes: data.count,
+                chunkOffset: offset,
+                chunkLength: chunk.count
+            )
 
             guard (200..<300).contains(statusCode) else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "fail",
+                    reasonCode: Self.serverErrorMessage(from: data) ?? "resumable_chunk_failed",
+                    sessionID: sessionID,
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    chunkOffset: offset,
+                    chunkLength: chunk.count
+                )
                 throw SecureMacUploadError.serverRejected(Self.serverErrorMessage(from: data) ?? "resumable_chunk_failed")
             }
 
             do {
                 let uploadResponse = try Self.jsonDecoder.decode(ResumableAudioUploadSessionResponse.self, from: data)
                 guard uploadResponse.ok else {
+                    UploadFlightRecorder.record(
+                        side: .iPhone,
+                        stage: "secureRequestFailed",
+                        traceID: traceID,
+                        recordingID: recordingID,
+                        eventResult: "fail",
+                        reasonCode: uploadResponse.error ?? "resumable_chunk_failed",
+                        sessionID: sessionID,
+                        httpPath: path,
+                        httpStatus: statusCode,
+                        chunkOffset: offset,
+                        chunkLength: chunk.count,
+                        safeErrorMessage: uploadResponse.error
+                    )
                     throw SecureMacUploadError.serverRejected(uploadResponse.error ?? "resumable_chunk_failed")
                 }
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestCompleted",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "success",
+                    reasonCode: uploadResponse.disposition,
+                    sessionID: sessionID,
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    chunkOffset: offset,
+                    chunkLength: chunk.count,
+                    confirmedBytes: uploadResponse.confirmedBytes,
+                    totalBytes: uploadResponse.fileSize
+                )
                 return uploadResponse
             } catch let error as SecureMacUploadError {
                 throw error
             } catch {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    recordingID: recordingID,
+                    eventResult: "fail",
+                    reasonCode: "invalid_response",
+                    sessionID: sessionID,
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    safeErrorMessage: error.localizedDescription
+                )
                 throw SecureMacUploadError.invalidResponse
             }
         } catch {
             if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestFailed",
+                traceID: traceID,
+                recordingID: recordingID,
+                eventResult: "fail",
+                reasonCode: "network_or_decode_error",
+                sessionID: sessionID,
+                httpPath: path,
+                errorDomain: "SecureMacUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw error
         }
     }
@@ -804,8 +1260,12 @@ final class SecureMacUploadClient: ObservableObject {
             "X-Rokurics-Body-SHA256": bodySHA256,
             "X-Rokurics-Signature": signature
         ]
+        var tracedHeaders = headers
+        if let traceID = UploadFlightRecorder.currentTraceID {
+            tracedHeaders[UploadFlightRecorder.traceHeaderName] = traceID
+        }
 
-        return SecureUploadPreparedRequest(url: url, body: bodyData, headers: headers)
+        return SecureUploadPreparedRequest(url: url, body: bodyData, headers: tracedHeaders)
     }
 
     private func postSignedJSON<Body: Encodable, Response: Decodable>(
@@ -817,9 +1277,36 @@ final class SecureMacUploadClient: ObservableObject {
     ) async throws -> Response {
         let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
         let preparedRequest = try prepareSignedJSONRequest(settings: settings, path: path, body: body)
+        let traceID = UploadFlightRecorder.currentTraceID
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureUploadClientEntered",
+            traceID: traceID,
+            eventResult: "begin",
+            httpPath: path,
+            bodyBytes: preparedRequest.body.count
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureConnectionSettingsLoaded",
+            traceID: traceID,
+            eventResult: "success",
+            httpPath: path
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureRequestBuilt",
+            traceID: traceID,
+            eventResult: "success",
+            httpPath: path,
+            bodyBytes: preparedRequest.body.count
+        )
         let pinnedSession = makePinnedSession(
             expectedFingerprint: expectedFingerprint,
             diagnostics: nil,
+            traceID: traceID,
+            recordingID: nil,
+            httpPath: path,
             requestTimeout: requestTimeout,
             resourceTimeout: resourceTimeout
         )
@@ -836,23 +1323,78 @@ final class SecureMacUploadClient: ObservableObject {
         print("[RokuricsSync] POST \(path), bodySize=\(preparedRequest.body.count), deviceIDPrefix=\(String(settings.deviceID.prefix(12)))")
 
         do {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestStarted",
+                traceID: traceID,
+                eventResult: "begin",
+                httpPath: path,
+                bodyBytes: preparedRequest.body.count
+            )
             let (data, response) = try await pinnedSession.session.upload(for: request, from: preparedRequest.body)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             print("[RokuricsSync] response status code: \(statusCode)")
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestResponseReceived",
+                traceID: traceID,
+                eventResult: (200..<300).contains(statusCode) ? "success" : "fail",
+                httpPath: path,
+                httpStatus: statusCode,
+                bodyBytes: data.count
+            )
 
             guard (200..<300).contains(statusCode) else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    eventResult: "fail",
+                    reasonCode: Self.serverErrorMessage(from: data) ?? "signed_json_request_failed",
+                    httpPath: path,
+                    httpStatus: statusCode
+                )
                 throw SecureMacUploadError.serverRejected(Self.serverErrorMessage(from: data) ?? "sync_request_failed")
             }
 
             do {
-                return try Self.jsonDecoder.decode(Response.self, from: data)
+                let decoded = try Self.jsonDecoder.decode(Response.self, from: data)
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestCompleted",
+                    traceID: traceID,
+                    eventResult: "success",
+                    httpPath: path,
+                    httpStatus: statusCode
+                )
+                return decoded
             } catch {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "secureRequestFailed",
+                    traceID: traceID,
+                    eventResult: "fail",
+                    reasonCode: "invalid_response",
+                    httpPath: path,
+                    httpStatus: statusCode,
+                    safeErrorMessage: error.localizedDescription
+                )
                 throw SecureMacUploadError.invalidResponse
             }
         } catch {
             if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureRequestFailed",
+                traceID: traceID,
+                eventResult: "fail",
+                reasonCode: "network_or_decode_error",
+                httpPath: path,
+                errorDomain: "SecureMacUploadClient",
+                safeErrorMessage: error.localizedDescription
+            )
             throw error
         }
     }
@@ -860,6 +1402,9 @@ final class SecureMacUploadClient: ObservableObject {
     private func makePinnedSession(
         expectedFingerprint: String,
         diagnostics: ((String) -> Void)?,
+        traceID: String? = nil,
+        recordingID: String? = nil,
+        httpPath: String? = nil,
         requestTimeout: TimeInterval = 10,
         resourceTimeout: TimeInterval = 15
     ) -> PinnedSession {
@@ -870,7 +1415,10 @@ final class SecureMacUploadClient: ObservableObject {
 
         let context = PinnedRequestContext(
             expectedFingerprint: expectedFingerprint,
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            traceID: traceID,
+            recordingID: recordingID,
+            httpPath: httpPath
         )
         let delegate = PinnedURLSessionDelegate(context: context)
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
@@ -956,12 +1504,24 @@ private final class PinnedRequestContext {
     private let lock = NSLock()
     private let expectedFingerprint: String
     private let diagnosticHandler: ((String) -> Void)?
+    private let traceID: String?
+    private let recordingID: String?
+    private let httpPath: String?
     private var pinningError: SecureMacUploadError?
     private var receivedServerTrustChallenge = false
 
-    init(expectedFingerprint: String, diagnostics: ((String) -> Void)?) {
+    init(
+        expectedFingerprint: String,
+        diagnostics: ((String) -> Void)?,
+        traceID: String?,
+        recordingID: String?,
+        httpPath: String?
+    ) {
         self.expectedFingerprint = expectedFingerprint
         self.diagnosticHandler = diagnostics
+        self.traceID = traceID
+        self.recordingID = recordingID
+        self.httpPath = httpPath
     }
 
     var currentExpectedFingerprint: String {
@@ -1000,6 +1560,18 @@ private final class PinnedRequestContext {
         lock.unlock()
         handler?(step)
     }
+
+    func recordPinning(stage: String, eventResult: String, reasonCode: String? = nil) {
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: stage,
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: eventResult,
+            reasonCode: reasonCode,
+            httpPath: httpPath
+        )
+    }
 }
 
 private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
@@ -1033,6 +1605,7 @@ private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLS
         print("[RokuricsPinning] challenge received")
         print("[RokuricsPinning] authentication method: \(challenge.protectionSpace.authenticationMethod)")
         print("[RokuricsPinning] serverTrust exists: \(challenge.protectionSpace.serverTrust != nil)")
+        context.recordPinning(stage: "secureRequestTLSChallengeReceived", eventResult: "begin")
 
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
             print("[RokuricsPinning] completionHandler default handling")
@@ -1048,6 +1621,7 @@ private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLS
             print("[RokuricsPinning] fingerprint mismatch: no_server_trust")
             print("[RokuricsPinning] completionHandler cancel")
             context.emitDiagnosticStep("失败：未收到 serverTrust")
+            context.recordPinning(stage: "secureRequestPinningRejected", eventResult: "fail", reasonCode: "no_server_trust")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -1060,6 +1634,7 @@ private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLS
             print("[RokuricsPinning] fingerprint mismatch: no_server_certificate")
             print("[RokuricsPinning] completionHandler cancel")
             context.emitDiagnosticStep("失败：未收到服务器证书")
+            context.recordPinning(stage: "secureRequestPinningRejected", eventResult: "fail", reasonCode: "no_server_certificate")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -1080,6 +1655,7 @@ private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLS
             print("[RokuricsPinning] fingerprint mismatch")
             print("[RokuricsPinning] completionHandler cancel")
             context.emitDiagnosticStep("指纹不匹配")
+            context.recordPinning(stage: "secureRequestPinningRejected", eventResult: "fail", reasonCode: "fingerprint_mismatch")
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -1087,6 +1663,7 @@ private final class PinnedURLSessionDelegate: NSObject, URLSessionDelegate, URLS
         print("[RokuricsPinning] fingerprint match")
         print("[RokuricsPinning] completionHandler useCredential")
         context.emitDiagnosticStep("指纹匹配")
+        context.recordPinning(stage: "secureRequestPinningAccepted", eventResult: "success")
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 }

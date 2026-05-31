@@ -19,6 +19,8 @@ final class DeviceConnectionStatusStore: ObservableObject {
     private let staleAfter: TimeInterval
     private let disconnectedAfter: TimeInterval
     private let missedHeartbeatLimit: Int
+    private var pendingSyncRequestDeviceIDs: Set<String> = []
+    private var pendingSyncStartSignalsByDeviceID: [String: LocalNetworkSyncStartSignal] = [:]
 
     init(
         fileManager: FileManager = .default,
@@ -213,6 +215,55 @@ final class DeviceConnectionStatusStore: ObservableObject {
         statusesByDeviceID[deviceID] = status
         save()
         return evaluatedStatus(status, now: date)
+    }
+
+    @discardableResult
+    func recordPendingSyncRequest(
+        deviceID: String,
+        displayName: String,
+        statusText: String = "已请求 iPhone 同步",
+        syncRunID: String = UUID().uuidString,
+        initiatorDeviceID: String = "mac-local",
+        at date: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connected,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        pendingSyncRequestDeviceIDs.insert(deviceID)
+        pendingSyncStartSignalsByDeviceID[deviceID] = LocalNetworkSyncStartSignal(
+            syncRunID: syncRunID,
+            initiatorDeviceID: initiatorDeviceID,
+            initiatorPlatform: .Mac,
+            requestedAt: date,
+            reason: "manual"
+        )
+        status.displayName = displayName
+        status.state = .connected
+        status.presenceState = status.presenceState == .disconnected ? .connecting : (status.presenceState ?? .connecting)
+        status.monitoringMode = .foregroundActive
+        status.lastSyncStatus = statusText
+        status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: date)
+    }
+
+    func consumePendingSyncRequest(deviceID: String) -> Bool {
+        consumePendingSyncStartSignal(deviceID: deviceID) != nil
+    }
+
+    func consumePendingSyncStartSignal(deviceID: String) -> LocalNetworkSyncStartSignal? {
+        pendingSyncRequestDeviceIDs.remove(deviceID)
+        return pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
     }
 
     @discardableResult
@@ -595,6 +646,25 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         save()
     }
 
+    func recordControlPlane(
+        deviceID: String,
+        syncRunID: String,
+        state controlPlaneState: LocalNetworkSyncControlPlaneState,
+        at date: Date = Date()
+    ) {
+        state.deviceID = deviceID
+        state.activeSyncRunID = syncRunID
+        state.syncControlPlaneState = controlPlaneState
+        state.syncControlPlaneUpdatedAt = date
+        if controlPlaneState == .completed {
+            state.lastSuccessfulSyncAt = date
+        }
+        if controlPlaneState != .failed {
+            state.lastError = nil
+        }
+        save()
+    }
+
     func replace(_ nextState: StudyLibrarySyncState) {
         state = nextState
         save()
@@ -711,6 +781,26 @@ final class LocalNetworkSyncStateStore: ObservableObject {
 
     func recordActiveTransfers(_ transfers: [LocalNetworkTransferProgress]) {
         state.activeTransfers = transfers
+        save()
+    }
+
+    func recordControlPlane(
+        syncRunID: String,
+        state controlPlaneState: LocalNetworkSyncControlPlaneState,
+        at date: Date = Date()
+    ) {
+        state.activeSyncRunID = syncRunID
+        state.controlPlaneState = controlPlaneState
+        state.lastControlPlaneUpdatedAt = date
+        if controlPlaneState == .completed {
+            state.lastSyncCompletedAt = date
+            state.lastSuccessfulSyncAt = date
+        } else if controlPlaneState == .failed {
+            state.lastSyncCompletedAt = date
+        } else if controlPlaneState == .syncStartAcked || controlPlaneState == .inventoryExchanging {
+            state.lastSyncStartedAt = state.lastSyncStartedAt ?? date
+            state.lastSyncAt = date
+        }
         save()
     }
 

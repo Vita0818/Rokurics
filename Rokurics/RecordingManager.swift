@@ -51,6 +51,7 @@ final class RecordingManager: ObservableObject {
 
     private let fileStore: AudioFileStore
     let studyLibraryStore: StudyLibraryStore
+    var audioFileStore: AudioFileStore { fileStore }
     private var audioRecorder: AVAudioRecorder?
     private var activeRecordingURL: URL?
     private var recordingStartedAt: Date?
@@ -365,6 +366,13 @@ final class RecordingManager: ObservableObject {
     }
 
     func stopRecording() {
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "recordingStopRequested",
+            traceID: "recording-\(UUID().uuidString.lowercased())",
+            eventResult: "begin",
+            uploadStatus: nil
+        )
         guard state == .recording || state == .paused else {
             log("stop ignored. state=\(state)")
             return
@@ -401,6 +409,15 @@ final class RecordingManager: ObservableObject {
 
         guard fileStore.fileExists(at: fileURL) else {
             elapsedSeconds = finalDuration
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "recordingAudioFileMissing",
+                traceID: "recording-\(UUID().uuidString.lowercased())",
+                eventResult: "fail",
+                reasonCode: "audio_file_missing",
+                fileExists: false,
+                safeErrorMessage: "active recording file missing"
+            )
             fail("录音文件不存在：\(fileURL.path)")
             return
         }
@@ -422,6 +439,16 @@ final class RecordingManager: ObservableObject {
         statusMessage = "等待归档"
         log("recording stopped for filing: \(fileURL.path)")
         print("[RokuricsStorage] audio file exists: \(fileStore.fileExists(at: fileURL))")
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "recordingAudioFileCreated",
+            traceID: "recording-\(String(fileURL.deletingPathExtension().lastPathComponent.prefix(12)))",
+            recordingID: fileURL.deletingPathExtension().lastPathComponent,
+            eventResult: "success",
+            fileExists: true,
+            fileSize: try? fileStore.fileSize(at: fileURL),
+            resolvedRelativePathToken: try? fileStore.relativePath(for: fileURL)
+        )
     }
 
     func finalizeRecording(
@@ -456,7 +483,54 @@ final class RecordingManager: ObservableObject {
                 studyFiling: directSave ? nil : resolvedFiling
             )
             try fileStore.saveMetadata(metadata)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "recordingMetadataWritten",
+                traceID: "recording-\(String(metadata.id.prefix(12)))",
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                fileSize: metadata.fileSize,
+                resolvedRelativePathToken: metadata.relativeMetadataPath
+            )
+            let resolvedAudioURL = try fileStore.audioURL(for: metadata)
+            let resolvedAudioExists = fileStore.fileExists(at: resolvedAudioURL)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: resolvedAudioExists ? "recordingAudioFileExists" : "recordingAudioFileMissing",
+                traceID: "recording-\(String(metadata.id.prefix(12)))",
+                recordingID: metadata.id,
+                eventResult: resolvedAudioExists ? "success" : "fail",
+                reasonCode: resolvedAudioExists ? nil : "metadata_audio_path_missing",
+                uploadStatus: metadata.uploadStatus,
+                fileExists: resolvedAudioExists,
+                fileSize: resolvedAudioExists ? (try? fileStore.fileSize(at: resolvedAudioURL)) : nil,
+                resolvedRelativePathToken: metadata.relativeAudioPath
+            )
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "recordingMetadataRelativeAudioPathChecked",
+                traceID: "recording-\(String(metadata.id.prefix(12)))",
+                recordingID: metadata.id,
+                eventResult: resolvedAudioExists ? "success" : "fail",
+                uploadStatus: metadata.uploadStatus,
+                fileExists: resolvedAudioExists,
+                fileSize: metadata.fileSize,
+                resolvedRelativePathToken: metadata.relativeAudioPath
+            )
             try studyLibraryStore.upsertRecordingMetadata(metadata)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "recordingReadyForUpload",
+                traceID: "recording-\(String(metadata.id.prefix(12)))",
+                recordingID: metadata.id,
+                eventResult: resolvedAudioExists && metadata.fileSize > 0 ? "success" : "fail",
+                reasonCode: resolvedAudioExists && metadata.fileSize > 0 ? nil : "recording_not_upload_ready",
+                uploadStatus: metadata.uploadStatus,
+                fileExists: resolvedAudioExists,
+                fileSize: metadata.fileSize,
+                resolvedRelativePathToken: metadata.relativeAudioPath
+            )
             recordings = [metadata] + recordings.filter { $0.id != metadata.id }
             trashedRecordings.removeAll { $0.id == metadata.id }
             latestRecordingMetadata = metadata

@@ -176,6 +176,11 @@ struct RecordingReceiveRecord: Codable {
     var noteSections: [RecordingNoteSectionRecord]? = nil
     var lastUploadError: String? = nil
     var lastUploadAttemptAt: Date? = nil
+    var localNetworkTransferState: String? = nil
+    var localNetworkTransferProgressFraction: Double? = nil
+    var localNetworkTransferReceivedBytes: Int64? = nil
+    var localNetworkTransferTotalBytes: Int64? = nil
+    var localNetworkTransferStatusText: String? = nil
 
     init(
         recordingID: String,
@@ -226,7 +231,12 @@ struct RecordingReceiveRecord: Codable {
         noteGenerationMode: ProcessingMode? = nil,
         noteSections: [RecordingNoteSectionRecord]? = nil,
         lastUploadError: String? = nil,
-        lastUploadAttemptAt: Date? = nil
+        lastUploadAttemptAt: Date? = nil,
+        localNetworkTransferState: String? = nil,
+        localNetworkTransferProgressFraction: Double? = nil,
+        localNetworkTransferReceivedBytes: Int64? = nil,
+        localNetworkTransferTotalBytes: Int64? = nil,
+        localNetworkTransferStatusText: String? = nil
     ) {
         self.recordingID = recordingID
         self.sanitizedRecordingID = sanitizedRecordingID
@@ -277,6 +287,11 @@ struct RecordingReceiveRecord: Codable {
         self.noteSections = noteSections
         self.lastUploadError = lastUploadError
         self.lastUploadAttemptAt = lastUploadAttemptAt
+        self.localNetworkTransferState = localNetworkTransferState
+        self.localNetworkTransferProgressFraction = localNetworkTransferProgressFraction
+        self.localNetworkTransferReceivedBytes = localNetworkTransferReceivedBytes
+        self.localNetworkTransferTotalBytes = localNetworkTransferTotalBytes
+        self.localNetworkTransferStatusText = localNetworkTransferStatusText
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -329,6 +344,11 @@ struct RecordingReceiveRecord: Codable {
         case noteSections
         case lastUploadError
         case lastUploadAttemptAt
+        case localNetworkTransferState
+        case localNetworkTransferProgressFraction
+        case localNetworkTransferReceivedBytes
+        case localNetworkTransferTotalBytes
+        case localNetworkTransferStatusText
     }
 
     init(from decoder: Decoder) throws {
@@ -383,6 +403,11 @@ struct RecordingReceiveRecord: Codable {
         noteSections = try container.decodeIfPresent([RecordingNoteSectionRecord].self, forKey: .noteSections)
         lastUploadError = try container.decodeIfPresent(String.self, forKey: .lastUploadError)
         lastUploadAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastUploadAttemptAt)
+        localNetworkTransferState = try container.decodeIfPresent(String.self, forKey: .localNetworkTransferState)
+        localNetworkTransferProgressFraction = try container.decodeIfPresent(Double.self, forKey: .localNetworkTransferProgressFraction)
+        localNetworkTransferReceivedBytes = try container.decodeIfPresent(Int64.self, forKey: .localNetworkTransferReceivedBytes)
+        localNetworkTransferTotalBytes = try container.decodeIfPresent(Int64.self, forKey: .localNetworkTransferTotalBytes)
+        localNetworkTransferStatusText = try container.decodeIfPresent(String.self, forKey: .localNetworkTransferStatusText)
     }
 
     static func normalizedNoteStatus(_ status: String?) -> String {

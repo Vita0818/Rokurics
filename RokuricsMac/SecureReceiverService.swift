@@ -59,6 +59,7 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     let pairedDeviceLastSeenAfter: Date?
     let connectionStatusStoreUpdated: Bool?
     let uiObservedLastSeenAt: Date?
+    let syncRunID: String?
     let beginPairingRequested: Bool?
     let codeIssued: Bool?
     let beginPairingButtonEnabled: Bool?
@@ -112,6 +113,7 @@ final class ConnectionDiagnosticsStore {
         pairedDeviceLastSeenAfter: Date? = nil,
         connectionStatusStoreUpdated: Bool? = nil,
         uiObservedLastSeenAt: Date? = nil,
+        syncRunID: String? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
         errorCategory: String? = nil,
@@ -137,6 +139,7 @@ final class ConnectionDiagnosticsStore {
             pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
             connectionStatusStoreUpdated: connectionStatusStoreUpdated,
             uiObservedLastSeenAt: uiObservedLastSeenAt,
+            syncRunID: sanitized(syncRunID),
             beginPairingRequested: beginPairingRequested,
             codeIssued: codeIssued,
             beginPairingButtonEnabled: beginPairingButtonEnabled,
@@ -271,6 +274,11 @@ final class SecureReceiverService: ObservableObject {
         let deviceConnectionStatusStore = injectedDeviceConnectionStatusStore ?? DeviceConnectionStatusStore()
         let syncStateStore = injectedSyncStateStore ?? StudyLibrarySyncStateStore()
         let connectionDiagnosticsStore = injectedConnectionDiagnosticsStore ?? ConnectionDiagnosticsStore()
+        UploadFlightRecorder.configureLogURL(
+            recordingFileStore.libraryRootURL
+                .appendingPathComponent("system", isDirectory: true)
+                .appendingPathComponent("upload-trace.jsonl", isDirectory: false)
+        )
 
         self.identityManager = identityManager
         self.pairedDeviceStore = pairedDeviceStore
@@ -408,6 +416,13 @@ final class SecureReceiverService: ObservableObject {
 
     func startSecureReceiving() {
         print("[RokuricsHTTPS] secure receive button tapped")
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "receiverServiceRunning",
+            traceID: "test-receiver-\(UUID().uuidString.lowercased())",
+            eventResult: "begin",
+            reasonCode: "startSecureReceiving"
+        )
         refreshSecurityState()
 
         if let httpsServer {
@@ -473,6 +488,13 @@ final class SecureReceiverService: ObservableObject {
                         return
                     }
                     self.applyHTTPSReadyState(activePort: self.httpsServer?.activePort, listenerState: "ready")
+                    UploadFlightRecorder.record(
+                        side: .Mac,
+                        stage: "httpsListenerReady",
+                        traceID: "test-receiver-\(UUID().uuidString.lowercased())",
+                        eventResult: "success",
+                        reasonCode: "listener_ready"
+                    )
                     self.completePendingPairingIfPossible(trigger: "listener_ready")
                 }
             },
@@ -530,6 +552,7 @@ final class SecureReceiverService: ObservableObject {
                         pairedDeviceLastSeenAfter: event.pairedDeviceLastSeenAfter,
                         connectionStatusStoreUpdated: event.connectionStatusStoreUpdated,
                         uiObservedLastSeenAt: event.uiObservedLastSeenAt,
+                        syncRunID: event.syncRunID,
                         errorCode: event.errorCode,
                         errorMessage: event.errorMessage,
                         errorCategory: event.errorCategory
@@ -736,6 +759,7 @@ final class SecureReceiverService: ObservableObject {
     @discardableResult
     func prepareManualStudyLibrarySync(for device: PairedDevice?) -> DeviceConnectionStatus {
         recordConnectionDiagnostic(phase: "manualSyncTapped")
+        recordConnectionDiagnostic(phase: "manualSyncActionFired")
         guard let device else {
             return deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
         }
@@ -748,15 +772,39 @@ final class SecureReceiverService: ObservableObject {
         }
 
         guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
-            let status = deviceConnectionStatusStore.recordSyncStatus(
+            let syncRunID = UUID().uuidString
+            let initiatorDeviceID = "mac-\(String(fingerprint.prefix(16)))"
+            syncStateStore.recordControlPlane(
                 deviceID: device.id,
-                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
-                statusText: StudyLibrarySyncRuntimeConfiguration.disabledStatusText
+                syncRunID: syncRunID,
+                state: .syncStartSignalSent
             )
             recordConnectionDiagnostic(
-                phase: "syncFailedPresenceUnchanged",
-                errorCode: "sync_disabled",
-                errorMessage: StudyLibrarySyncRuntimeConfiguration.disabledReason
+                phase: "syncRunIDCreated",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: syncRunID
+            )
+            recordConnectionDiagnostic(
+                phase: "syncStartSignalSent",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: syncRunID
+            )
+            let status = deviceConnectionStatusStore.recordPendingSyncRequest(
+                deviceID: device.id,
+                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+                statusText: "等待 iPhone 执行同步",
+                syncRunID: syncRunID,
+                initiatorDeviceID: initiatorDeviceID
+            )
+            recordConnectionDiagnostic(
+                phase: "pendingSyncRequestCreated",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: syncRunID
+            )
+            recordConnectionDiagnostic(
+                phase: "pendingSyncRequestSet",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: syncRunID
             )
             return status
         }
@@ -978,6 +1026,7 @@ final class SecureReceiverService: ObservableObject {
         pairedDeviceLastSeenAfter: Date? = nil,
         connectionStatusStoreUpdated: Bool? = nil,
         uiObservedLastSeenAt: Date? = nil,
+        syncRunID: String? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
         errorCategory: String? = nil
@@ -1006,6 +1055,7 @@ final class SecureReceiverService: ObservableObject {
             pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
             connectionStatusStoreUpdated: connectionStatusStoreUpdated,
             uiObservedLastSeenAt: uiObservedLastSeenAt,
+            syncRunID: syncRunID,
             errorCode: errorCode,
             errorMessage: errorMessage,
             errorCategory: errorCategory
