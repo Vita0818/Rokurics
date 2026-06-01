@@ -91,10 +91,16 @@ struct RecordingLibraryView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
+            let traceID = UploadFlightRecorder.makeTraceID()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshTriggeredLocalReloadOnly", traceID: traceID, eventResult: "begin")
+            recordViewRefreshDecision(traceID: traceID)
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "begin")
             macConnectionStore.refreshFromStorage()
             recordingManager.reloadRecordings()
             studyLibraryStore.refresh()
             keepBrowsePathValid()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshDidNotEnqueueUpload", traceID: traceID, eventResult: "success")
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "success")
         }
         .onChange(of: studyLibraryStore.allStudyItems) {
             keepBrowsePathValid()
@@ -103,9 +109,15 @@ struct RecordingLibraryView: View {
             keepBrowsePathValid()
         }
         .onReceive(NotificationCenter.default.publisher(for: .localNetworkStudyLibraryDidChange)) { _ in
+            let traceID = UploadFlightRecorder.makeTraceID()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshTriggeredLocalReloadOnly", traceID: traceID, eventResult: "begin")
+            recordViewRefreshDecision(traceID: traceID)
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "begin")
             recordingManager.reloadRecordings()
             studyLibraryStore.refresh()
             keepBrowsePathValid()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshDidNotEnqueueUpload", traceID: traceID, eventResult: "success")
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "success")
         }
         .alert(RecordingLocalOperationCopy.renameTitle, isPresented: $isRenameAlertPresented) {
             TextField("录音名称", text: $renameDraft)
@@ -192,6 +204,7 @@ struct RecordingLibraryView: View {
                 item: item,
                 metadataText: metadataText(for: item),
                 actions: cardActionModels(for: item),
+                actionAreaPresentation: uploadActionAreaPresentation(for: item),
                 onRename: { newTitle in
                     commitRename(item, rawTitle: newTitle)
                 }
@@ -202,6 +215,15 @@ struct RecordingLibraryView: View {
 
     private func uploadStatus(for item: StudyItemMetadata) -> RecordingUploadStatus {
         recordingMetadata(for: item).map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly
+    }
+
+    private func uploadActionAreaPresentation(for item: StudyItemMetadata) -> StudyRecordingActionAreaPresentation? {
+        let metadata = recordingMetadata(for: item)
+        return RecordingUploadActionAreaPresentation.resolve(
+            metadata: metadata,
+            status: metadata.map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly,
+            isMacPaired: macConnectionStore.isPaired
+        )
     }
 
     private func recordingMetadata(for item: StudyItemMetadata) -> RecordingMetadata? {
@@ -294,12 +316,21 @@ struct RecordingLibraryView: View {
             eventResult: "begin",
             uploadStatus: latestMetadata.uploadStatus
         )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadAllowed",
+            traceID: traceID,
+            recordingID: latestMetadata.id,
+            eventResult: "success",
+            uploadStatus: latestMetadata.uploadStatus
+        )
 
         uploadCoordinator.upload(
             metadata: latestMetadata,
             settings: macConnectionStore.snapshot,
             recordingManager: recordingManager,
-            traceID: traceID
+            traceID: traceID,
+            triggerSource: .manualUploadButton
         )
         UploadFlightRecorder.record(
             side: .iPhone,
@@ -308,6 +339,33 @@ struct RecordingLibraryView: View {
             recordingID: latestMetadata.id,
             eventResult: "success",
             uploadStatus: latestMetadata.uploadStatus
+        )
+    }
+
+    private func recordViewRefreshDecision(traceID: String) {
+        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .unknown,
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .recordingListRefresh,
+            syncRunID: nil,
+            objectID: "recordingAudio:recordingListRefresh",
+            recordingID: "recordingListRefresh"
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: decision.diagnosticStage,
+            traceID: traceID,
+            eventResult: decision.kind.rawValue,
+            reasonCode: decision.reasonCode
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "viewRefreshUploadSuppressed",
+            traceID: traceID,
+            eventResult: "success",
+            reasonCode: decision.reasonCode
         )
     }
 

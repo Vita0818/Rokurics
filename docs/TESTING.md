@@ -1,6 +1,6 @@
 # TESTING
 
-最近自查日期：2026-05-26
+最近自查日期：2026-06-01
 
 ## 环境要求
 
@@ -133,6 +133,32 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 - folder rename/move/color/trash 不改变 itemID 和资源路径。
 - 冲突场景保留可诊断状态。
 
+### 同步状态回归计划
+
+修改同步/上传状态机时，至少覆盖以下自动测试：
+
+- view refresh 不创建 upload job：列表、详情、文件夹、学习库 refresh 都必须命中 `uploadDecisionSuppressedViewRefreshOnly`。
+- peer 已有同 audio no-op：manual sync、Mac pending sync hint、foreground tick、periodic tick 在 peer hash/size 相同场景不调用 upload coordinator。
+- peer metadata-only 补传：Mac inventory 有 metadata 但无 audio 时只上传一次；下一次 inventory 报告同 hash/size 后 no-op。
+- metadata uploaded 但 peer missing：本地 metadata `uploaded` 不能阻止 audio 补传。
+- completed ledger 但 peer missing：ledger completed 不能单独 no-op，必须继续补 peer 缺失 audio。
+- completed ledger 且 peer same：应 suppress 并显示 uploaded。
+- transfer/ledger in-flight 去重：同 syncRunID、同 recordingID、同 artifactID 不重复创建任务。
+- retryable failure：失败后写入 `nextRetryAfter`，未到期不新建任务，到期后 retry drainer 复用上传主路径并恢复上传。
+- peer unknown：普通 sync deferred；用户手动上传记录 manual force；retry drainer 记录 retry-drainer。
+- peer conflict：Mac 已有同 recording 但 checksum/size 不同时不能覆盖，必须展示/记录冲突。
+- Mac 手动同步链：pending sync request 只能被 heartbeat 消费一次；重复点击去重；超时给明确状态；iPhone 必须 ack 同一个 `syncRunID` 并排队 tick。
+- Mac inventory：已有 audio 时必须报告 `audioAvailable`、`audioChecksum`、`audioSize`、`sourceDeviceID`、`audioLogicalPathToken`。
+- checksum cache：iPhone/Mac inventory 构建时文件 size/mtime 不变应命中缓存，变化时 invalidated，并记录 off-main hash 诊断。
+
+手动验证建议：
+
+- iPhone 前台时，Mac 点立即同步，确认 Mac pending -> iPhone heartbeat -> ack -> tick -> completed/failed 全链路诊断。
+- iPhone 后台或未启动时，Mac 点立即同步，确认 UI 明确显示等待 iPhone，而不是伪装成完成。
+- debug 启动 iPhone 后，Mac 已有同 hash/size 的旧录音不再重复上传。
+- 网络中断后失败上传显示可重试，到 backoff 后可恢复。
+- 100MB+ 或长录音场景下打开列表、连接页和触发 sync 不应出现明显主线程卡顿。
+
 ### AI Chat
 
 - 新建/切换/删除会话。
@@ -147,7 +173,7 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 - Mac build 找不到仓库外 whisper.cpp 编译产物；需要设置 `WHISPER_CPP_ROOT` 或准备本机 helper/dylib。
 - iOS test 未指定存在的 simulator 名称。
 - Mac sandbox 缺少安全范围书签，导致 whisper-cli/model/ffmpeg 访问失败。
-- TLS identity 未生成或 Data Protection Keychain 中 SecIdentity 不可用，导致 HTTPS listener 启动失败。
+- TLS identity 未生成、app-local TLS private key/certificate 不可读，或 `SecIdentityCreate` 失败，导致 HTTPS listener 启动失败。
 - iPhone 保存的 certificate fingerprint 与 Mac 当前 TLS certificate 不一致，导致 pinning failure。
 - HMAC 请求 timestamp 超过窗口、nonce 重放、body hash 不匹配、content type 不匹配、路径不在 allowlist。
 - 长录音转写 provider timeout 或模型路径/权限错误。
@@ -155,7 +181,7 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 
 ## 本轮是否实际运行命令
 
-本轮实际运行：
+2026-05-26 文档自查实际运行：
 
 - `pwd`
 - `git rev-parse --show-toplevel`
@@ -164,4 +190,11 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 - 多个只读 `find`、`rg`、`sed`、`wc`、`diff -q`
 - 写入文档后运行的验证命令见最终报告。
 
-本轮未运行完整构建/测试。
+2026-06-01 连接/上传/同步修复至少应运行：
+
+- `xcodebuild -project Rokurics.xcodeproj -scheme Rokurics -configuration Debug -destination 'generic/platform=iOS' build`
+- `xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug -destination 'platform=macOS' build`
+- 与本轮改动相关的 `RokuricsTests` / `RokuricsMacTests` 定向测试或完整测试。
+- 文档和空白检查：`git diff --check` 与 `git status --short`。
+
+实际运行结果以最终报告为准；全量 Swift Testing 在并发环境下可能出现既有非确定性失败，需用失败项隔离重跑确认。

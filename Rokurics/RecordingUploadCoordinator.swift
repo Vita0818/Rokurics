@@ -44,7 +44,10 @@ final class RecordingUploadCoordinator: ObservableObject {
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
         recordingManager: RecordingManager,
-        traceID: String? = nil
+        traceID: String? = nil,
+        triggerSource: RecordingAudioSyncTriggerSource = .manualUploadButton,
+        peerAudioState: RecordingPeerAudioState = .unknown,
+        syncRunID: String? = nil
     ) {
         let resolvedTraceID = traceID ?? UploadFlightRecorder.currentTraceID ?? UploadFlightRecorder.makeTraceID()
         UploadFlightRecorder.record(
@@ -55,6 +58,35 @@ final class RecordingUploadCoordinator: ObservableObject {
             eventResult: "begin",
             uploadStatus: metadata.uploadStatus
         )
+        let transferState: RecordingTransferJobState = uploadTasks[metadata.id] == nil ? .none : .inFlight
+        let ledgerState = uploadLedgerState(try? jobStore.loadJob(recordingID: metadata.id))
+        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: localAudioDecisionState(for: metadata),
+            peerAudioState: peerAudioState,
+            transferJobState: transferState,
+            ledgerState: ledgerState,
+            triggerSource: triggerSource,
+            syncRunID: syncRunID,
+            objectID: Self.audioObjectID(recordingID: metadata.id),
+            recordingID: metadata.id
+        )
+        recordDecision(
+            decision,
+            metadata: metadata,
+            traceID: resolvedTraceID,
+            triggerSource: triggerSource,
+            peerAudioState: peerAudioState,
+            transferJobState: transferState,
+            ledgerState: ledgerState,
+            syncRunID: syncRunID
+        )
+        guard decision.shouldCreateUploadJob else {
+            if decision.kind == .fail {
+                activeStatuses[metadata.id] = .failed
+                errorMessages[metadata.id] = decision.reasonCode
+            }
+            return
+        }
         guard uploadTasks[metadata.id] == nil else {
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -66,6 +98,18 @@ final class RecordingUploadCoordinator: ObservableObject {
                 uploadStatus: metadata.uploadStatus
             )
             return
+        }
+
+        if settings.isPaired {
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: metadata.uploadProgressFraction,
+                confirmedBytes: metadata.uploadProgressConfirmedBytes,
+                totalBytes: metadata.uploadProgressTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
+                phase: "preparing",
+                description: "准备上传"
+            )
         }
 
         uploadTasks[metadata.id] = Task { [weak self, weak recordingManager] in
@@ -90,7 +134,11 @@ final class RecordingUploadCoordinator: ObservableObject {
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
         recordingManager: RecordingManager,
-        traceID: String? = nil
+        traceID: String? = nil,
+        triggerSource: RecordingAudioSyncTriggerSource = .manualUploadButton,
+        peerAudioState: RecordingPeerAudioState = .unknown,
+        transferJobState: RecordingTransferJobState = .none,
+        syncRunID: String? = nil
     ) async -> RecordingUploadStatus {
         let resolvedTraceID = traceID ?? UploadFlightRecorder.currentTraceID ?? UploadFlightRecorder.makeTraceID()
         return await UploadFlightRecorder.$currentTraceID.withValue(resolvedTraceID) {
@@ -98,7 +146,11 @@ final class RecordingUploadCoordinator: ObservableObject {
                 metadata: metadata,
                 settings: settings,
                 recordingManager: recordingManager,
-                traceID: resolvedTraceID
+                traceID: resolvedTraceID,
+                triggerSource: triggerSource,
+                peerAudioState: peerAudioState,
+                transferJobState: transferJobState,
+                syncRunID: syncRunID
             )
         }
     }
@@ -107,7 +159,11 @@ final class RecordingUploadCoordinator: ObservableObject {
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
         recordingManager: RecordingManager,
-        traceID: String
+        traceID: String,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        peerAudioState: RecordingPeerAudioState,
+        transferJobState providedTransferJobState: RecordingTransferJobState,
+        syncRunID: String?
     ) async -> RecordingUploadStatus {
         let recordingIDPrefix = String(metadata.id.prefix(12))
         print("[RokuricsRecordingUpload] coordinator called recordingIDPrefix=\(recordingIDPrefix), localStatus=\(metadata.uploadStatus)")
@@ -142,6 +198,57 @@ final class RecordingUploadCoordinator: ObservableObject {
                 uploadStatus: metadata.uploadStatus
             )
             return .uploading
+        }
+
+        let existingLedgerJob = try? jobStore.loadJob(recordingID: metadata.id)
+        let ledgerDecisionState = uploadLedgerState(existingLedgerJob)
+        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: localAudioDecisionState(for: metadata),
+            peerAudioState: peerAudioState,
+            transferJobState: providedTransferJobState,
+            ledgerState: ledgerDecisionState,
+            triggerSource: triggerSource,
+            syncRunID: syncRunID,
+            objectID: Self.audioObjectID(recordingID: metadata.id),
+            recordingID: metadata.id
+        )
+        recordDecision(
+            decision,
+            metadata: metadata,
+            traceID: traceID,
+            triggerSource: triggerSource,
+            peerAudioState: peerAudioState,
+            transferJobState: providedTransferJobState,
+            ledgerState: ledgerDecisionState,
+            syncRunID: syncRunID
+        )
+        guard decision.shouldCreateUploadJob else {
+            if decision.kind == .fail {
+                activeStatuses[metadata.id] = .failed
+                errorMessages[metadata.id] = decision.reasonCode
+                try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+                if case .conflict = decision.displayState {
+                    try? recordingManager.updateUploadProgress(
+                        recordingID: metadata.id,
+                        fraction: nil,
+                        confirmedBytes: nil,
+                        totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+                        phase: "conflict",
+                        description: "上传冲突"
+                    )
+                } else if case .fatalFailed = decision.displayState {
+                    try? recordingManager.updateUploadProgress(
+                        recordingID: metadata.id,
+                        fraction: nil,
+                        confirmedBytes: nil,
+                        totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+                        phase: "fatalFailed",
+                        description: decision.reasonCode
+                    )
+                }
+                return .failed
+            }
+            return decision.displayState == .uploaded ? .uploaded : .uploading
         }
 
         guard settings.isPaired else {
@@ -383,9 +490,63 @@ final class RecordingUploadCoordinator: ObservableObject {
                 now: Date()
             )
             try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            let failedPhase: String
+            let failedDescription: String
+            if classification.code.contains("conflict") {
+                failedPhase = "conflict"
+                failedDescription = "上传冲突"
+            } else if classification.isFatal {
+                failedPhase = "fatalFailed"
+                failedDescription = classification.message
+            } else {
+                failedPhase = "retryPending"
+                failedDescription = "等待自动重试"
+            }
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+                phase: failedPhase,
+                description: failedDescription
+            )
             activeStatuses[metadata.id] = .failed
             errorMessages[metadata.id] = error.localizedDescription
             print("[RokuricsRecordingUpload] upload attempt failed recordingIDPrefix=\(recordingIDPrefix), errorCode=\(classification.code)")
+            if classification.code.contains("conflict") {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "audioConflictDetected",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: classification.code,
+                    uploadStatus: RecordingUploadStatus.failed.rawValue,
+                    safeErrorMessage: "上传冲突"
+                )
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "uploadConflictDetected",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: classification.code,
+                    uploadStatus: RecordingUploadStatus.failed.rawValue,
+                    safeErrorMessage: "上传冲突"
+                )
+            }
+            if triggerSource == .retryDrainer {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobFailed",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: classification.code,
+                    uploadStatus: RecordingUploadStatus.failed.rawValue,
+                    safeErrorMessage: classification.message
+                )
+            }
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "uploadCoordinatorClientCallFailed",
@@ -413,6 +574,268 @@ final class RecordingUploadCoordinator: ObservableObject {
 
     func retryQueue() -> RecordingUploadQueue {
         RecordingUploadQueue(jobStore: jobStore, retryPolicy: retryPolicy)
+    }
+
+    @discardableResult
+    func drainEligibleRetryJobs(
+        settings: SecureMacConnectionSnapshot,
+        recordingManager: RecordingManager,
+        now: Date = Date(),
+        syncRunID: String? = nil
+    ) async -> [String] {
+        let drainerTraceID = UploadFlightRecorder.makeTraceID()
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "retryDrainerStarted",
+            traceID: drainerTraceID,
+            eventResult: "begin",
+            reasonCode: "upload_ledger"
+        )
+        _ = try? jobStore.recoverStaleInProgressJobs(now: now)
+        let queue = retryQueue()
+        let jobs: [RecordingUploadJob]
+        do {
+            jobs = try queue.retryableJobs(now: now)
+        } catch {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "retryJobFailed",
+                traceID: drainerTraceID,
+                eventResult: "fail",
+                reasonCode: "retry_ledger_read_failed",
+                safeErrorMessage: error.localizedDescription
+            )
+            return []
+        }
+
+        var drainedRecordingIDs: [String] = []
+        var nextRetryAfter: Date?
+        for job in jobs {
+            let traceID = UploadFlightRecorder.traceID(forRecordingID: job.recordingID) ?? UploadFlightRecorder.makeTraceID()
+            guard uploadTasks[job.recordingID] == nil else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobSkippedBackoff",
+                    traceID: traceID,
+                    recordingID: job.recordingID,
+                    eventResult: "skip",
+                    reasonCode: "active_upload_exists",
+                    ledgerState: job.overallState.rawValue,
+                    jobID: job.id
+                )
+                continue
+            }
+
+            guard queue.isEligible(job, now: now) else {
+                nextRetryAfter = [nextRetryAfter, job.nextRetryAfter].compactMap { $0 }.min()
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobSkippedBackoff",
+                    traceID: traceID,
+                    recordingID: job.recordingID,
+                    eventResult: "skip",
+                    reasonCode: "backoff_not_elapsed",
+                    ledgerState: job.overallState.rawValue,
+                    jobID: job.id
+                )
+                continue
+            }
+
+            guard let metadata = recordingManager.recordings.first(where: { $0.id == job.recordingID })
+                    ?? (try? recordingManager.audioFileStore.loadMetadata(id: job.recordingID)) else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobFailed",
+                    traceID: traceID,
+                    recordingID: job.recordingID,
+                    eventResult: "fail",
+                    reasonCode: "metadata_missing",
+                    ledgerState: job.overallState.rawValue,
+                    jobID: job.id
+                )
+                continue
+            }
+
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "retryJobEligible",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                ledgerState: job.overallState.rawValue,
+                jobID: job.id
+            )
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "retryJobStarted",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: metadata.uploadStatus,
+                ledgerState: job.overallState.rawValue,
+                jobID: job.id
+            )
+            let status = await uploadAndWait(
+                metadata: metadata,
+                settings: settings,
+                recordingManager: recordingManager,
+                traceID: traceID,
+                triggerSource: .retryDrainer,
+                peerAudioState: .unknown,
+                transferJobState: .none,
+                syncRunID: syncRunID
+            )
+            drainedRecordingIDs.append(metadata.id)
+            if status == .uploaded {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobCompleted",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "success",
+                    uploadStatus: RecordingUploadStatus.uploaded.rawValue
+                )
+            }
+        }
+
+        if let nextRetryAfter {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "retryDrainerScheduled",
+                traceID: drainerTraceID,
+                eventResult: "scheduled",
+                reasonCode: "nextRetryAfter",
+                safeErrorMessage: "nextRetryAfter=\(nextRetryAfter.timeIntervalSince1970)"
+            )
+        }
+
+        return drainedRecordingIDs
+    }
+
+    private static func audioObjectID(recordingID: String) -> String {
+        "recordingAudio:\(recordingID)"
+    }
+
+    private func localAudioDecisionState(for metadata: RecordingMetadata) -> RecordingLocalAudioState {
+        do {
+            let audioURL = try jobStore.audioURL(for: metadata)
+            guard jobStore.fileExists(at: audioURL) else {
+                return .missing
+            }
+            let size = try? jobStore.fileSize(at: audioURL)
+            let checksum = try? SecureUploadUtilities.sha256Hex(fileURL: audioURL)
+            return .available(RecordingAudioSignature(sha256: checksum, size: size ?? (metadata.fileSize > 0 ? metadata.fileSize : nil)))
+        } catch {
+            return .unreadable(reason: error.localizedDescription)
+        }
+    }
+
+    private func uploadLedgerState(_ job: RecordingUploadJob?) -> RecordingUploadLedgerState {
+        guard let job else {
+            return .none
+        }
+        if job.overallState == .fatalFailed {
+            return .fatalFailed(reason: job.lastErrorCode ?? job.lastErrorMessage)
+        }
+        if job.overallState == .retryableFailed {
+            return .retryPending
+        }
+        if job.overallState == .succeeded || job.audioStage == .succeeded {
+            return .completed(RecordingAudioSignature(sha256: job.audioTotalSHA256, size: job.audioTotalBytes))
+        }
+        if job.audioStage == .inProgress || job.overallState == .inProgress {
+            if job.resumableState == .finalizing {
+                return .finalizing
+            }
+            return .inFlight
+        }
+        return .none
+    }
+
+    private func recordDecision(
+        _ decision: RecordingAudioUploadDecision,
+        metadata: RecordingMetadata,
+        traceID: String,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        peerAudioState: RecordingPeerAudioState,
+        transferJobState: RecordingTransferJobState,
+        ledgerState: RecordingUploadLedgerState,
+        syncRunID: String?
+    ) {
+        let localAudioState = localAudioDecisionState(for: metadata)
+        let summary = RecordingAudioUploadDecisionDiagnostics.result(
+            recordingID: metadata.id,
+            objectID: Self.audioObjectID(recordingID: metadata.id),
+            logicalPathToken: metadata.relativeAudioPath,
+            triggerSource: triggerSource,
+            decision: decision,
+            localAudioState: localAudioState,
+            peerAudioState: peerAudioState,
+            transferJobState: transferJobState,
+            ledgerState: ledgerState
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "uploadStateEvaluated",
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: decision.kind.rawValue,
+            reasonCode: decision.reasonCode,
+            uploadStatus: metadata.uploadStatus,
+            ledgerState: ledgerState.summary,
+            resolvedRelativePathToken: metadata.relativeAudioPath,
+            safeErrorMessage: summary
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "uploadDecisionComputed",
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: decision.kind.rawValue,
+            reasonCode: decision.reasonCode,
+            uploadStatus: metadata.uploadStatus,
+            ledgerState: ledgerState.summary,
+            resolvedRelativePathToken: metadata.relativeAudioPath,
+            safeErrorMessage: summary
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: decision.diagnosticStage,
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: decision.kind.rawValue,
+            reasonCode: decision.reasonCode,
+            uploadStatus: metadata.uploadStatus,
+            ledgerState: ledgerState.summary,
+            resolvedRelativePathToken: metadata.relativeAudioPath,
+            safeErrorMessage: summary
+        )
+        if decision.reasonCode == "peer_audio_conflict" {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioConflictDetected",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: decision.kind.rawValue,
+                reasonCode: decision.reasonCode,
+                uploadStatus: metadata.uploadStatus,
+                safeErrorMessage: summary
+            )
+        }
+        if decision.reasonCode == "peer_audio_unknown_deferred" {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "peerAudioUnknownDeferred",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: decision.kind.rawValue,
+                reasonCode: decision.reasonCode,
+                uploadStatus: metadata.uploadStatus,
+                safeErrorMessage: summary
+            )
+        }
+        _ = syncRunID
     }
 
     private struct MetadataProgressUpdate {

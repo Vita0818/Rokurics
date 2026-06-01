@@ -1,8 +1,8 @@
 # PROJECT_MAP
 
-最近自查日期：2026-05-26
+最近自查日期：2026-06-01
 
-本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`。
+本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
 
 ## 顶层目录树
 
@@ -40,7 +40,7 @@
 - `RokuricsUITests/`、`RokuricsMacUITests/`：XCTest UI 测试，目前是基础 launch / performance 模板级覆盖。
 - `RokuricsVisualDiagnostics/`：视觉诊断截图与 DerivedData 记录，属于诊断资产，不是运行时代码。
 - `Scripts/`：辅助脚本和生成图标资产。`embed_whisper_helper.sh` 由 Mac target 构建阶段调用；`export_finder_folder_icons.swift` 生成 Finder 风格文件夹图标。
-- `docs/`：项目说明文档。已有 `LongRecordingTestPlan.md`，本轮新增常驻上下文文档。
+- `docs/`：项目说明文档，包含常驻上下文、架构/测试/禁区说明、长录音验证计划和连接/上传/同步状态审计。
 - `Rokurics.xcodeproj/`：Xcode project。使用 file system synchronized groups；共享 scheme 为 `Rokurics` 与 `RokuricsMac`。
 
 ## Xcode target 与 scheme
@@ -110,6 +110,7 @@ target 编译边界：
   - `StudyLibrarySyncModels.swift`
   - `StudyLibrarySyncCoordinator.swift`
   - `ConnectionSyncStateStores.swift`
+  - `RecordingUploadCoordinator.swift` 中的 retry drainer 继续复用上传主路径。
 - Live Activity：
   - `RecordingLiveActivityController.swift`
   - `RokuricsLiveActivitiesShared/RecordingLiveActivityAttributes.swift`
@@ -176,6 +177,7 @@ target 编译边界：
   - `StudyLibrarySyncModels.swift`
   - `GitBackedStudyMetadataStore.swift`
   - `ConnectionSyncStateStores.swift`
+  - `SecureLocalHTTPSServer.swift` 的 `/sync/inventory` 构建和 manual sync ack/tick 诊断。
 
 ## 配置文件
 

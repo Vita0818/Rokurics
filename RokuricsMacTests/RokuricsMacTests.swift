@@ -222,9 +222,10 @@ struct RokuricsMacTests {
             )
         )
 
-        #expect(item.localNetworkReceiveTransferProgress?.state == .pending)
+        #expect(item.localNetworkReceiveTransferProgress?.state == .transferring)
         #expect(item.localNetworkReceiveTransferProgress?.isVisibleInActionArea == true)
         #expect(item.localNetworkReceiveTransferProgress?.totalBytes == 2048)
+        #expect(item.localNetworkReceiveTransferProgress?.statusText == "正在接收")
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.state == .transferring)
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.progressFraction == 0.5)
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.receivedBytes == 1024)
@@ -2082,6 +2083,23 @@ struct RokuricsMacTests {
         #expect(record.lastUploadAttemptAt != nil)
     }
 
+    @Test func macMetadataOnlyInboxItemShowsWaitingAudioActionState() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "ui-waiting-audio")
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+
+        let item = try #require(store.loadInboxItems().first { $0.id == metadata.id })
+        let progress = try #require(item.localNetworkReceiveTransferProgress)
+        #expect(!item.hasAudio)
+        #expect(item.audioRelativePath == nil)
+        #expect(progress.state == .transferring)
+        #expect(progress.statusText == "正在接收")
+        #expect(progress.totalBytes == metadata.fileSize)
+    }
+
     @Test func repeatedIdenticalMetadataIsIdempotentSuccess() throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2147,6 +2165,105 @@ struct RokuricsMacTests {
         #expect(record.audioRelativePath?.hasSuffix("/audio.m4a") == true)
         #expect(record.checksum == MacSecurityUtilities.sha256Hex(audio))
         #expect(record.lastUploadError == nil)
+    }
+
+    @MainActor
+    @Test func macSyncInventoryReportsReceivedAudioAvailableWithChecksumAndSize() throws {
+        let fileManager = FileManager.default
+        let rootURL = try makeScratchDirectory()
+        defer { try? fileManager.removeItem(at: rootURL) }
+        let recordingFileStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let studyLibraryStore = StudyLibraryStore(
+            rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
+            recordingFileStore: recordingFileStore,
+            listenForInboxChanges: false
+        )
+        let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityURL)
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: securityURL,
+            tlsKeyTagNamespace: "inventory-test-\(UUID().uuidString)"
+        )
+        let server = SecureLocalHTTPSServer(
+            port: 0,
+            identityManager: identityManager,
+            pairingManager: pairingManager,
+            requestVerifier: RequestVerifier(pairedDeviceStore: pairedDeviceStore),
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: nil,
+            deviceConnectionStatusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: rootURL),
+            onReady: {},
+            onFailed: { _ in },
+            onPairingChanged: {},
+            onUploadAccepted: { _ in },
+            onRecordingAccepted: { _ in }
+        )
+        defer { server.stop() }
+        let device = makeUploadDevice()
+        let audio = Data("inventory-audio".utf8)
+        let metadata = makeIncomingUploadMetadata(id: "inventory-audio-available", fileSize: Int64(audio.count))
+
+        _ = try recordingFileStore.saveMetadata(metadata, sourceDevice: device)
+        _ = try recordingFileStore.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+
+        let inventory = try #require(server.localNetworkSyncInventoryResponseForVerifiedDevice(device, syncRunID: "inventory-test").inventory)
+        let recording = try #require(inventory.recordings.first { $0.recordingID == metadata.id })
+        let audioObject = try #require(inventory.objects.first { $0.objectID == "recordingAudio:\(metadata.id)" })
+
+        #expect(recording.audioAvailable)
+        #expect(recording.audioAvailability == .local)
+        #expect(recording.audioChecksum == MacSecurityUtilities.sha256Hex(audio))
+        #expect(recording.audioSize == Int64(audio.count))
+        #expect(recording.sourceDeviceID == device.id)
+        #expect(recording.audioLogicalPathToken?.hasSuffix("/audio.m4a") == true)
+        #expect(audioObject.availability == .local)
+        #expect(audioObject.sha256 == MacSecurityUtilities.sha256Hex(audio))
+        #expect(audioObject.size == Int64(audio.count))
+        #expect(audioObject.sourceDeviceID == device.id)
+        #expect(audioObject.logicalPathToken?.hasSuffix("/audio.m4a") == true)
+    }
+
+    @Test func macAudioAvailableInboxItemClearsWaitingActionState() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "ui-audio-available")
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+
+        let item = try #require(store.loadInboxItems().first { $0.id == metadata.id })
+        #expect(item.hasAudio)
+        #expect(item.audioRelativePath?.hasSuffix("/audio.m4a") == true)
+        #expect(item.localNetworkReceiveTransferProgress == nil)
+    }
+
+    @MainActor
+    @Test func macReceiveUpdateRefreshesAudioInboxStoreWithoutRestart() throws {
+        let (store, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeUploadDevice()
+        let metadata = makeIncomingUploadMetadata(id: "ui-receive-refresh")
+
+        _ = try store.saveMetadata(metadata, sourceDevice: device)
+        let inboxStore = AudioInboxStore(recordingFileStore: store)
+        let waitingItem = try #require(inboxStore.recordingItems.first { $0.id == metadata.id })
+        #expect(waitingItem.localNetworkReceiveTransferProgress?.statusText == "正在接收")
+
+        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        let deadline = Date().addingTimeInterval(0.2)
+        while Date() < deadline,
+              inboxStore.recordingItems.first(where: { $0.id == metadata.id })?.hasAudio != true {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        let refreshedItem = try #require(inboxStore.recordingItems.first { $0.id == metadata.id })
+        #expect(refreshedItem.hasAudio)
+        #expect(refreshedItem.localNetworkReceiveTransferProgress == nil)
     }
 
     @Test func repeatedIdenticalAudioIsIdempotentSuccess() throws {
@@ -3806,6 +3923,7 @@ struct RokuricsMacTests {
 
         #expect(decodedHeartbeat.syncRequested == true)
         #expect(decodedHeartbeat.syncStartSignal?.syncRunID == heartbeatSyncRunID)
+        #expect(statusStore.status(for: pairedDevice.id)?.lastSyncStatus == "iPhone 已收到同步请求")
         #expect(decodedSecondHeartbeat.syncRequested == false)
         #expect(decodedSecondHeartbeat.syncStartSignal == nil)
 
@@ -3829,6 +3947,88 @@ struct RokuricsMacTests {
         #expect(probeJSON["syncRequested"] as? Bool == true)
         #expect((probeJSON["syncStartSignal"] as? [String: Any])?["syncRunID"] as? String == probeSyncRunID)
         #expect(statusStore.status(for: pairedDevice.id)?.lastSyncAt == nil)
+    }
+
+    @MainActor
+    @Test func pendingManualSyncRequestDeduplicatesAndTimesOut() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let device = makeHeartbeatDevice()
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL, pendingSyncRequestTimeout: 10)
+        let startedAt = Date(timeIntervalSince1970: 10_000)
+
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            syncRunID: "sync-first",
+            initiatorDeviceID: "mac-test",
+            at: startedAt
+        )
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            syncRunID: "sync-duplicate",
+            initiatorDeviceID: "mac-test",
+            at: startedAt.addingTimeInterval(1)
+        )
+
+        let consumed = try #require(statusStore.consumePendingSyncStartSignal(deviceID: device.id))
+        #expect(consumed.syncRunID == "sync-first")
+
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            syncRunID: "sync-timeout",
+            initiatorDeviceID: "mac-test",
+            at: startedAt
+        )
+        let timedOut = try #require(statusStore.status(for: device.id, now: startedAt.addingTimeInterval(11)))
+        #expect(timedOut.lastSyncStatus == "等待 iPhone 前台响应超时")
+        #expect(timedOut.lastErrorCode == "manual_sync_pending_timed_out")
+
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            syncRunID: "sync-after-timeout",
+            initiatorDeviceID: "mac-test",
+            at: startedAt.addingTimeInterval(12)
+        )
+        let afterTimeout = try #require(statusStore.consumePendingSyncStartSignal(deviceID: device.id))
+        #expect(afterTimeout.syncRunID == "sync-after-timeout")
+    }
+
+    @Test func macChecksumCacheHitsAndInvalidatesByFileAttributes() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let fileURL = rootURL.appendingPathComponent("audio.m4a", isDirectory: false)
+        try Data("mac-audio".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: fileURL.path)
+
+        let cache = LocalNetworkChecksumCache()
+        var computeCount = 0
+        let first = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
+            computeCount += 1
+            return try MacSecurityUtilities.sha256Hex(fileURL: url)
+        })
+        let second = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
+            computeCount += 1
+            return try MacSecurityUtilities.sha256Hex(fileURL: url)
+        })
+
+        #expect(first.event == .miss)
+        #expect(second.event == .hit)
+        #expect(computeCount == 1)
+
+        try Data("mac-audio-changed".utf8).write(to: fileURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 101)], ofItemAtPath: fileURL.path)
+        let third = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
+            computeCount += 1
+            return try MacSecurityUtilities.sha256Hex(fileURL: url)
+        })
+
+        #expect(third.event == .invalidated)
+        #expect(third.sha256 != first.sha256)
+        #expect(computeCount == 2)
     }
 
     @MainActor

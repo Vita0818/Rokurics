@@ -1,6 +1,6 @@
 # DO_NOT_BREAK
 
-最近自查日期：2026-05-26
+最近自查日期：2026-06-01
 
 本文记录维护本项目时不应破坏的工程约束。修改前先读 `AGENTS.md`、`CURRENT_STATE.md`、`PROJECT_MAP.md`、`ARCHITECTURE.md` 和本文。
 
@@ -52,7 +52,9 @@
 - Mac security directory：
   - `mac-identity.json`
   - `tls-certificate.der`
-  - TLS private key 在 Data Protection Keychain 中，不是普通文件。
+  - `tls-private-key.json`
+
+当前源码的 TLS private key 是 app-local JSON 文件，不是 Data Protection Keychain 条目。文档或代码如要改回 Keychain 方案，必须同步更新 `MacIdentityManager`、pairing/fingerprint 测试和 listener smoke tests。
 
 任何文件写入、删除、移动都必须保留 `isInsideRoot` / `isInside...Directory` / safe path component 这类路径防逃逸检查。
 
@@ -110,6 +112,7 @@ BODY_SHA256
 - 不移除 timestamp window、nonce replay cache、constant-time signature compare。
 - 不把 shared secret、device id、fingerprint 从 Keychain 降级存到 UserDefaults。
 - 不在日志、文档、诊断报告中输出完整 shared secret、API key、证书私钥、完整 provider response JSON、完整 transcript。
+- 不在日志、文档、诊断报告中输出 TLS private key JSON 的 base64 私钥内容。
 - 不删除 Mac sandbox entitlements 中 user-selected executable/read-only、app-scope bookmarks、network client/server，除非有替代权限设计。
 - 不绕过安全范围书签访问 whisper-cli/model/ffmpeg。
 
@@ -159,6 +162,18 @@ BODY_SHA256
 - 不把 mock provider 当成真实生产 provider 结果写死。
 - 不把 `TranscriptionQueue` 当成真实任务引擎；真实转写当前在 `TranscriptionCoordinator`。
 
+## 同步/上传状态机禁区
+
+- 不在 view lifecycle、folder/list/detail onAppear、study library refresh、Mac Audio Inbox refresh 中创建 recording audio upload job。
+- 不把 metadata uploaded、manifest applied、receive record existing 或 UI “已上传”显示状态当成 audio uploaded。
+- 不把 completed upload ledger 单独当成 no-op；只有 peer inventory 明确报告同 recording 的 `audioAvailable=true` 且 hash/size 与本地一致，才可视为 audio no-op。
+- 不把 peer audio unknown 当成普通 sync 下的可补传事实；普通 sync 应 deferred，只有显式用户手动上传或 retry drainer 可以带明确 reason 继续。
+- 不覆盖 Mac 已有但 hash/size 不同的 recording audio；该场景必须保留 conflict/fatal 诊断和人工可见状态。
+- 不让 UI display state 反向驱动上传、重试或 sync tick。展示状态只能来自业务状态，不能成为业务状态源。
+- 不在主线程/主 actor 路径做全量大文件 SHA256、全量 inventory、全量 inbox 扫描或高频 JSON 诊断写入；如必须读取，应使用 checksum cache、增量状态或后台执行。
+- 不让 retry pending 永久只显示等待；`nextRetryAfter` 到期后必须由 retry drainer/queue drain 去重后重新进入上传主路径。
+- 不把 Mac 手动同步实现成直接假定 iPhone 已同步。Mac 只能发 pending signal；必须保留 pending created、heartbeat consumed、iPhone acked、tick started/completed/failed/timeout 的状态回执。
+
 ## 修改前必须阅读的关键源码位置
 
 按任务类型选择：
@@ -183,5 +198,5 @@ BODY_SHA256
 - Mac receiver：运行 `RokuricsMacTests/RokuricsMacTests.swift` 中 pairing/HMAC/resumable/delete 相关测试。
 - 转写/音频：运行 `AudioPreprocessorTests`、`NativeAudioPreprocessorTests`、`WhisperCppRuntimeResolverTests`、`LongProcessingTests` 中相关测试；必要时手动跑 mock/whisper。
 - 笔记/AI：运行 `LongProcessingTests`、`ChatFeatureTests`、note generation provider 相关测试；手动验证 provider 配置错误和成功路径。
-- 同步：运行两端 sync tests；手动验证 metadata-only sync 不删音频、artifact download 不含 audio。
+- 同步：运行两端 sync tests；手动验证 metadata-only sync 不删音频、artifact download 不含 audio、peer unknown deferred、retry drainer 到期恢复、Mac 手动同步 pending/ack/timeout。
 - UI：运行对应 scheme UI tests；关键 flow 仍需手动验证。

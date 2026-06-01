@@ -19,6 +19,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
     private let staleAfter: TimeInterval
     private let disconnectedAfter: TimeInterval
     private let missedHeartbeatLimit: Int
+    private let pendingSyncRequestTimeout: TimeInterval
     private var pendingSyncRequestDeviceIDs: Set<String> = []
     private var pendingSyncStartSignalsByDeviceID: [String: LocalNetworkSyncStartSignal] = [:]
 
@@ -28,13 +29,15 @@ final class DeviceConnectionStatusStore: ObservableObject {
         offlineThreshold: TimeInterval = 12,
         staleAfter: TimeInterval = 5,
         disconnectedAfter: TimeInterval = 10,
-        missedHeartbeatLimit: Int = 3
+        missedHeartbeatLimit: Int = 3,
+        pendingSyncRequestTimeout: TimeInterval = 30
     ) {
         self.fileManager = fileManager
         self.offlineThreshold = offlineThreshold
         self.staleAfter = staleAfter
         self.disconnectedAfter = disconnectedAfter
         self.missedHeartbeatLimit = missedHeartbeatLimit
+        self.pendingSyncRequestTimeout = pendingSyncRequestTimeout
         storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
             .appendingPathComponent("device-connection-status.json", isDirectory: false)
         load()
@@ -47,7 +50,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
     }
 
     func status(for deviceID: String, now: Date = Date()) -> DeviceConnectionStatus? {
-        guard var status = statusesByDeviceID[deviceID] else {
+        guard let status = statusesByDeviceID[deviceID] else {
             return nil
         }
 
@@ -236,6 +239,20 @@ final class DeviceConnectionStatusStore: ObservableObject {
             lastSyncStatus: nil,
             lastError: nil
         )
+        if let existing = pendingSyncStartSignalsByDeviceID[deviceID],
+           date.timeIntervalSince(existing.requestedAt) < pendingSyncRequestTimeout {
+            status.displayName = displayName
+            status.state = .connected
+            status.presenceState = status.presenceState == .disconnected ? .connecting : (status.presenceState ?? .connecting)
+            status.monitoringMode = .foregroundActive
+            status.lastSyncStatus = "已请求，等待 iPhone 前台响应"
+            status.lastError = nil
+            status.lastErrorCode = nil
+            status.connectionStatusRevision = nextRevision(after: status)
+            statusesByDeviceID[deviceID] = status
+            save()
+            return evaluatedStatus(status, now: date)
+        }
         pendingSyncRequestDeviceIDs.insert(deviceID)
         pendingSyncStartSignalsByDeviceID[deviceID] = LocalNetworkSyncStartSignal(
             syncRunID: syncRunID,
@@ -263,7 +280,16 @@ final class DeviceConnectionStatusStore: ObservableObject {
 
     func consumePendingSyncStartSignal(deviceID: String) -> LocalNetworkSyncStartSignal? {
         pendingSyncRequestDeviceIDs.remove(deviceID)
-        return pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
+        let signal = pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
+        if signal != nil, var status = statusesByDeviceID[deviceID] {
+            status.lastSyncStatus = "iPhone 已收到同步请求"
+            status.lastError = nil
+            status.lastErrorCode = nil
+            status.connectionStatusRevision = nextRevision(after: status)
+            statusesByDeviceID[deviceID] = status
+            save()
+        }
+        return signal
     }
 
     @discardableResult
@@ -532,6 +558,17 @@ final class DeviceConnectionStatusStore: ObservableObject {
         }
 
         var evaluated = status
+        if let signal = pendingSyncStartSignalsByDeviceID[status.deviceID],
+           now.timeIntervalSince(signal.requestedAt) >= pendingSyncRequestTimeout {
+            pendingSyncRequestDeviceIDs.remove(status.deviceID)
+            pendingSyncStartSignalsByDeviceID.removeValue(forKey: status.deviceID)
+            evaluated.lastSyncStatus = "等待 iPhone 前台响应超时"
+            evaluated.lastErrorCode = "manual_sync_pending_timed_out"
+            evaluated.lastError = "iPhone did not acknowledge the sync request before timeout."
+            evaluated.connectionStatusRevision = nextRevision(after: evaluated)
+            statusesByDeviceID[status.deviceID] = evaluated
+            save()
+        }
         if evaluated.presenceState == .securityError {
             evaluated.state = .offline
             return evaluated

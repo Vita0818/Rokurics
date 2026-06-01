@@ -7,6 +7,7 @@
 3. `docs/ARCHITECTURE.md`
 4. `docs/DO_NOT_BREAK.md`
 5. `docs/TESTING.md`
+6. `docs/SYNC_STATE_AUDIT.md`
 
 如果文档与源码、Xcode 配置、测试或脚本冲突，必须以当前源码和配置为准，并在最终报告中明确指出冲突位置和采用源码为准的原因。
 
@@ -76,6 +77,7 @@ git status --short
 - `docs/CURRENT_STATE.md`：当前真实状态、已有能力、风险、工作区改动。
 - `docs/TESTING.md`：环境、构建、测试、lint/format 与手动验证方式。
 - `docs/DO_NOT_BREAK.md`：工程禁区、数据格式、协议、路径和回归要求。
+- `docs/SYNC_STATE_AUDIT.md`：连接、上传、本地网络同步状态机、触发源、no-op 边界、retry 和诊断信号。
 - `docs/LongRecordingTestPlan.md`：长录音本地验证计划。
 
 ## 完成标准

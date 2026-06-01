@@ -928,6 +928,7 @@ final class SecureLocalHTTPSServer {
     private let maxHeaderBytes = 16 * 1024
     private let maxAllowedBodyBytes = MacRecordingFileStore.audioMaxBytes
     private let syncArtifactChunkBytes = 2 * 1024 * 1024
+    private let checksumCache = LocalNetworkChecksumCache()
     private var listener: NWListener?
     private var activeConnections: [UUID: NWConnection] = [:]
     private let listenerStateLock = NSLock()
@@ -2174,6 +2175,7 @@ final class SecureLocalHTTPSServer {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "inventory")
         if let syncRunID {
             syncStateStore.recordControlPlane(deviceID: device.id, syncRunID: syncRunID, state: .inventoryExchanging)
+            emitConnectionDiagnostic(phase: "manualSyncTickStarted", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         }
         emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         return LocalNetworkSyncInventoryResponse(
@@ -2202,6 +2204,13 @@ final class SecureLocalHTTPSServer {
             phase: applyResult.failedChanges == 0 ? "metadataApplied" : "syncTickFailed",
             listenerState: "ready",
             activePort: activePort,
+            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+        )
+        emitConnectionDiagnostic(
+            phase: applyResult.failedChanges == 0 ? "manualSyncTickCompleted" : "manualSyncTickFailed",
+            listenerState: "ready",
+            activePort: activePort,
+            requestDeviceIDPrefix: device.idPrefix,
             errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
         )
 
@@ -2295,6 +2304,7 @@ final class SecureLocalHTTPSServer {
             )
             _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "sync-ack")
             emitConnectionDiagnostic(phase: "syncStartAckReceived", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
+            emitConnectionDiagnostic(phase: "manualSyncAckReceived", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
             return LocalNetworkSyncStartAckResponse(
                 ok: true,
                 syncRunID: request.syncRunID,
@@ -2994,6 +3004,8 @@ final class SecureLocalHTTPSServer {
 
     @MainActor
     private func makeLocalNetworkSyncInventory(generatedAt: Date = Date()) -> LocalNetworkSyncInventory {
+        let startedAt = Date()
+        emitConnectionDiagnostic(phase: "inventoryBuildStarted", listenerState: "ready", activePort: activePort)
         let manifest = studyLibraryStore.makeSyncManifest(deviceID: localSyncDeviceID, generatedAt: generatedAt)
         let itemsByRecordingID = Dictionary(
             manifest.items.compactMap { item -> (String, StudyItemMetadata)? in
@@ -3007,12 +3019,53 @@ final class SecureLocalHTTPSServer {
         let inboxItems = recordingFileStore.loadInboxItems(includeDeleted: true)
         let recordings = inboxItems.map { item in
             let metadataHash = itemsByRecordingID[item.id].map(LocalNetworkSyncMetadataHash.hash)
+            let audioURL = item.audioRelativePath.flatMap { relativePath in
+                try? LocalNetworkSyncArtifactFileService.safeFileURL(
+                    rootURL: recordingFileStore.libraryRootURL,
+                    logicalPathToken: relativePath
+                )
+            }
+            let storedChecksum = item.audioChecksum?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let checksumResult = item.hasAudio ? audioURL.flatMap {
+                cachedChecksum(fileURL: $0, pathToken: item.audioRelativePath, recordingID: item.id)
+            } : nil
+            let recomputedChecksum = checksumResult?.sha256
+            let audioChecksum = recomputedChecksum ?? (storedChecksum?.isEmpty == false ? storedChecksum : nil)
+            let audioSize = item.hasAudio ? (checksumResult?.size ?? item.fileSize) : nil
+            let traceID = UploadFlightRecorder.traceID(forRecordingID: item.id) ?? UploadFlightRecorder.makeTraceID()
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: item.hasAudio ? "macInventoryReportsAudioAvailable" : "macInventoryReportsAudioMissing",
+                traceID: traceID,
+                recordingID: item.id,
+                eventResult: "success",
+                fileExists: item.hasAudio,
+                fileSize: audioSize,
+                resolvedRelativePathToken: item.audioRelativePath,
+                macReceiveState: item.receiveStatus,
+                audioRelativePathSet: item.audioRelativePath != nil
+            )
+            if item.hasAudio, recomputedChecksum != nil, checksumResult?.event != .hit {
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "macInventoryChecksumRecomputed",
+                    traceID: traceID,
+                    recordingID: item.id,
+                    eventResult: "success",
+                    reasonCode: storedChecksum?.isEmpty == false ? "checksum_refreshed" : "checksum_missing",
+                    fileExists: true,
+                    fileSize: audioSize,
+                    resolvedRelativePathToken: item.audioRelativePath,
+                    macReceiveState: item.receiveStatus,
+                    audioRelativePathSet: item.audioRelativePath != nil
+                )
+            }
             return LocalNetworkSyncRecordingEntry(
                 recordingID: item.id,
                 metadataHash: metadataHash,
                 audioAvailable: item.hasAudio,
-                audioChecksum: nil,
-                audioSize: item.hasAudio ? item.fileSize : nil,
+                audioChecksum: audioChecksum,
+                audioSize: audioSize,
                 uploadLedgerState: nil,
                 receiveStatus: item.receiveStatus,
                 processingStatus: item.hasAudio ? "notStarted" : "awaitingAudio",
@@ -3025,8 +3078,9 @@ final class SecureLocalHTTPSServer {
                 uploadStatus: nil,
                 transcriptionStatus: item.transcriptionStatus,
                 noteStatus: item.noteStatus,
-                sourceDeviceID: nil,
-                artifactRefs: nil
+                sourceDeviceID: item.sourceDeviceID,
+                artifactRefs: nil,
+                audioLogicalPathToken: item.audioRelativePath
             )
         }
         let folders = manifest.folders.map { folder in
@@ -3065,7 +3119,7 @@ final class SecureLocalHTTPSServer {
             appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
         )
 
-        return LocalNetworkSyncInventory.make(
+        let inventory = LocalNetworkSyncInventory.make(
             device: device,
             recordings: recordings,
             folders: folders,
@@ -3073,6 +3127,91 @@ final class SecureLocalHTTPSServer {
             artifacts: artifacts,
             studyManifest: manifest
         )
+        let durationMs = max(0, Date().timeIntervalSince(startedAt) * 1_000)
+        emitConnectionDiagnostic(
+            phase: "inventoryBuildCompleted",
+            listenerState: "ready",
+            activePort: activePort,
+            errorMessage: "recordings=\(recordings.count),durationMs=\(Int(durationMs.rounded()))"
+        )
+        emitConnectionDiagnostic(
+            phase: "inventoryBuildDurationMs",
+            listenerState: "ready",
+            activePort: activePort,
+            errorMessage: "\(Int(durationMs.rounded()))"
+        )
+        return inventory
+    }
+
+    private func cachedChecksum(
+        fileURL: URL,
+        pathToken: String?,
+        recordingID: String
+    ) -> LocalNetworkChecksumCacheResult? {
+        do {
+            let result = try checksumCache.checksum(
+                fileURL: fileURL,
+                pathToken: pathToken,
+                sourceSide: "Mac"
+            ) { url in
+                try Self.sha256HexOffMainActor(fileURL: url)
+            }
+            if let result {
+                let phase: String
+                switch result.event {
+                case .hit:
+                    phase = "checksumCacheHit"
+                case .miss:
+                    phase = "checksumCacheMiss"
+                case .invalidated:
+                    phase = "checksumCacheInvalidated"
+                }
+                emitConnectionDiagnostic(
+                    phase: phase,
+                    listenerState: "ready",
+                    activePort: activePort,
+                    requestDeviceIDPrefix: String(recordingID.prefix(12)),
+                    errorMessage: "path=\(String((pathToken ?? "missing").prefix(12))),size=\(result.size)"
+                )
+                if result.event != .hit {
+                    emitConnectionDiagnostic(
+                        phase: "checksumComputedOffMainActor",
+                        listenerState: "ready",
+                        activePort: activePort,
+                        requestDeviceIDPrefix: String(recordingID.prefix(12)),
+                        errorMessage: "path=\(String((pathToken ?? "missing").prefix(12)))"
+                    )
+                }
+            }
+            return result
+        } catch {
+            emitConnectionDiagnostic(
+                phase: "checksumCacheMiss",
+                listenerState: "ready",
+                activePort: activePort,
+                requestDeviceIDPrefix: String(recordingID.prefix(12)),
+                errorCode: "checksum_failed",
+                errorMessage: error.localizedDescription
+            )
+            return nil
+        }
+    }
+
+    private static func sha256HexOffMainActor(fileURL: URL) throws -> String {
+        guard Thread.isMainThread else {
+            return try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: fileURL)
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<String, Error>!
+        DispatchQueue.global(qos: .utility).async {
+            result = Result {
+                try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: fileURL)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try result.get()
     }
 
     private func makeLocalNetworkSyncArtifacts(from manifest: StudyLibrarySyncManifest) -> [LocalNetworkSyncArtifactEntry] {
@@ -3172,8 +3311,23 @@ final class SecureLocalHTTPSServer {
             deviceID: device.id,
             displayName: normalizedDisplayName.isEmpty ? device.deviceName : normalizedDisplayName,
             lastSyncAt: syncStateStore.state.lastSuccessfulSyncAt,
-            lastSyncStatus: syncStatus ?? syncStateStore.state.lastError ?? syncStateStore.state.lastSuccessfulSyncAt.map { _ in "已同步" }
+            lastSyncStatus: Self.displaySyncStatus(syncStatus) ?? syncStateStore.state.lastError ?? syncStateStore.state.lastSuccessfulSyncAt.map { _ in "已同步" }
         )
+    }
+
+    private static func displaySyncStatus(_ rawStatus: String?) -> String? {
+        switch rawStatus {
+        case "sync-start", "sync-ack":
+            return "iPhone 已收到同步请求"
+        case "inventory":
+            return "正在同步"
+        case "metadata", "artifact":
+            return "正在同步"
+        case let status?:
+            return status
+        case nil:
+            return nil
+        }
     }
 
     private var localSyncDeviceID: String {

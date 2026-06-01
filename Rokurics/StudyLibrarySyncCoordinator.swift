@@ -1146,6 +1146,22 @@ struct LocalNetworkSyncInventoryBuilder {
     let audioFileStore: AudioFileStore
     let studyLibraryStore: StudyLibraryStore
     let uploadJobStore: RecordingUploadJobStore
+    let diagnosticsStore: ConnectionDiagnosticsStore
+    var checksumCache = LocalNetworkChecksumCache()
+
+    init(
+        audioFileStore: AudioFileStore,
+        studyLibraryStore: StudyLibraryStore,
+        uploadJobStore: RecordingUploadJobStore,
+        diagnosticsStore: ConnectionDiagnosticsStore? = nil,
+        checksumCache: LocalNetworkChecksumCache? = nil
+    ) {
+        self.audioFileStore = audioFileStore
+        self.studyLibraryStore = studyLibraryStore
+        self.uploadJobStore = uploadJobStore
+        self.diagnosticsStore = diagnosticsStore ?? .shared
+        self.checksumCache = checksumCache ?? LocalNetworkChecksumCache()
+    }
 
     func build(
         deviceID: String,
@@ -1153,6 +1169,8 @@ struct LocalNetworkSyncInventoryBuilder {
         lastKnownPeerRevision: String?,
         generatedAt: Date = Date()
     ) -> LocalNetworkSyncInventory {
+        let startedAt = Date()
+        diagnosticsStore.record(phase: "inventoryBuildStarted", deviceID: deviceID)
         let manifest = studyLibraryStore.makeSyncManifest(deviceID: deviceID, generatedAt: generatedAt)
         let recordings = (try? audioFileStore.loadAllMetadata(includeDeleted: true)) ?? []
         let jobsByRecordingID = ((try? uploadJobStore.loadJobs()) ?? []).reduce(into: [String: RecordingUploadJob]()) { result, job in
@@ -1162,12 +1180,21 @@ struct LocalNetworkSyncInventoryBuilder {
         let recordingEntries = recordings.map { metadata in
             let audioURL = try? audioFileStore.audioURL(for: metadata)
             let hasAudio = audioURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
-            let fileSize = audioURL.flatMap { LocalNetworkSyncArtifactFileService.metadata(for: $0)?.size }
+            let checksumResult = hasAudio ? audioURL.flatMap {
+                cachedChecksum(
+                    fileURL: $0,
+                    pathToken: metadata.relativeAudioPath,
+                    deviceID: deviceID,
+                    recordingID: metadata.id
+                )
+            } : nil
+            let fileSize = checksumResult?.size ?? audioURL.flatMap { LocalNetworkSyncArtifactFileService.metadata(for: $0)?.size }
+            let checksum = checksumResult?.sha256
             return LocalNetworkSyncRecordingEntry(
                 recordingID: metadata.id,
                 metadataHash: LocalNetworkSyncMetadataHash.hash(metadata),
                 audioAvailable: hasAudio,
-                audioChecksum: nil,
+                audioChecksum: checksum,
                 audioSize: fileSize,
                 uploadLedgerState: jobsByRecordingID[metadata.id]?.overallState.rawValue,
                 receiveStatus: nil,
@@ -1188,7 +1215,8 @@ struct LocalNetworkSyncInventoryBuilder {
                         ownerID: metadata.id,
                         logicalPathToken: metadata.relativeMetadataPath
                     )
-                ]
+                ],
+                audioLogicalPathToken: metadata.relativeAudioPath
             )
         }
         let folders = manifest.folders.map { folder in
@@ -1226,7 +1254,7 @@ struct LocalNetworkSyncInventoryBuilder {
             appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
         )
 
-        return LocalNetworkSyncInventory.make(
+        let inventory = LocalNetworkSyncInventory.make(
             device: device,
             recordings: recordingEntries,
             folders: folders,
@@ -1234,6 +1262,85 @@ struct LocalNetworkSyncInventoryBuilder {
             artifacts: makeArtifacts(from: manifest, recordings: recordings, rootURL: rootURL),
             studyManifest: manifest
         )
+        let durationMs = max(0, Date().timeIntervalSince(startedAt) * 1_000)
+        diagnosticsStore.record(
+            phase: "inventoryBuildCompleted",
+            deviceID: deviceID,
+            result: "recordings=\(recordingEntries.count),durationMs=\(Int(durationMs.rounded()))"
+        )
+        diagnosticsStore.record(
+            phase: "inventoryBuildDurationMs",
+            deviceID: deviceID,
+            result: "\(Int(durationMs.rounded()))"
+        )
+        return inventory
+    }
+
+    private func cachedChecksum(
+        fileURL: URL,
+        pathToken: String?,
+        deviceID: String,
+        recordingID: String
+    ) -> LocalNetworkChecksumCacheResult? {
+        do {
+            let result = try checksumCache.checksum(
+                fileURL: fileURL,
+                pathToken: pathToken,
+                sourceSide: "iPhone"
+            ) { url in
+                try Self.sha256HexOffMainActor(fileURL: url)
+            }
+            if let result {
+                let phase: String
+                switch result.event {
+                case .hit:
+                    phase = "checksumCacheHit"
+                case .miss:
+                    phase = "checksumCacheMiss"
+                case .invalidated:
+                    phase = "checksumCacheInvalidated"
+                }
+                diagnosticsStore.record(
+                    phase: phase,
+                    deviceID: deviceID,
+                    result: "recording=\(String(recordingID.prefix(12))),path=\(String((pathToken ?? "missing").prefix(12))),size=\(result.size)"
+                )
+                if result.event != .hit {
+                    diagnosticsStore.record(
+                        phase: "checksumComputedOffMainActor",
+                        deviceID: deviceID,
+                        result: "recording=\(String(recordingID.prefix(12))),path=\(String((pathToken ?? "missing").prefix(12)))"
+                    )
+                }
+            }
+            return result
+        } catch {
+            diagnosticsStore.record(
+                phase: "checksumCacheMiss",
+                deviceID: deviceID,
+                result: "recording=\(String(recordingID.prefix(12))),path=\(String((pathToken ?? "missing").prefix(12)))",
+                errorCode: "checksum_failed",
+                errorMessage: error.localizedDescription
+            )
+            return nil
+        }
+    }
+
+    private static func sha256HexOffMainActor(fileURL: URL) throws -> String {
+        guard Thread.isMainThread else {
+            return try SecureUploadUtilities.sha256Hex(fileURL: fileURL)
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<String, Error>!
+        DispatchQueue.global(qos: .utility).async {
+            result = Result {
+                try SecureUploadUtilities.sha256Hex(fileURL: fileURL)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try result.get()
     }
 
     private func makeArtifacts(
@@ -1357,7 +1464,8 @@ final class LocalNetworkSyncEngine {
         self.inventoryBuilder = LocalNetworkSyncInventoryBuilder(
             audioFileStore: audioFileStore,
             studyLibraryStore: studyLibraryStore,
-            uploadJobStore: uploadJobStore
+            uploadJobStore: uploadJobStore,
+            diagnosticsStore: self.diagnosticsStore
         )
     }
 
@@ -1370,6 +1478,7 @@ final class LocalNetworkSyncEngine {
     ) async -> LocalNetworkSyncDiffPlan? {
         let snapshot = connectionStore.snapshot
         let syncRunID = providedSyncRunID ?? UUID().uuidString
+        let triggerSource = RecordingAudioSyncTriggerSource(syncTrigger: trigger)
         if providedSyncRunID == nil {
             diagnosticsStore.record(phase: "syncRunIDCreated", deviceID: snapshot.deviceID, syncRunID: syncRunID)
         }
@@ -1545,6 +1654,7 @@ final class LocalNetworkSyncEngine {
                 diagnosticsStore.record(phase: "noTransferNeeded", deviceID: snapshot.deviceID, syncRunID: syncRunID)
             }
             recordWeakCompareDiagnostics(localInventory: localInventory, peerInventory: peerInventory, plan: plan, deviceID: snapshot.deviceID, syncRunID: syncRunID)
+            recordRecordingAudioAvailabilityDiagnostics(localInventory: localInventory, peerInventory: peerInventory, deviceID: snapshot.deviceID, syncRunID: syncRunID, triggerSource: triggerSource)
             for action in plan.uploadRecordingAudioActions {
                 diagnosticsStore.record(
                     phase: "existingUploadActionCreated",
@@ -1579,7 +1689,14 @@ final class LocalNetworkSyncEngine {
             try await uploadLocalMetadataIfNeeded(localInventory: localInventory, plan: plan, settings: snapshot, syncRunID: syncRunID)
             try await uploadLocalArtifactsIfNeeded(localInventory: localInventory, plan: plan, settings: snapshot, syncRunID: syncRunID)
             try await downloadPeerArtifactsIfNeeded(peerInventory: peerInventory, plan: plan, settings: snapshot, syncRunID: syncRunID)
-            let remainingAudioTransfers = await uploadMissingRecordingAudioIfNeeded(plan: plan, settings: snapshot, syncRunID: syncRunID)
+            let remainingAudioTransfers = await uploadMissingRecordingAudioIfNeeded(
+                plan: plan,
+                localInventory: localInventory,
+                peerInventory: peerInventory,
+                settings: snapshot,
+                syncRunID: syncRunID,
+                triggerSource: triggerSource
+            )
 
             let refreshedInventory = inventoryBuilder.build(
                 deviceID: snapshot.deviceID,
@@ -1641,6 +1758,82 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 result: "objectKind=\(action.entityKind),objectID=\(action.entityID),reason=\(action.reason)"
             )
+        }
+    }
+
+    private func recordRecordingAudioAvailabilityDiagnostics(
+        localInventory: LocalNetworkSyncInventory,
+        peerInventory: LocalNetworkSyncInventory,
+        deviceID: String,
+        syncRunID: String,
+        triggerSource: RecordingAudioSyncTriggerSource
+    ) {
+        let transferJobs = (try? transferJobStore.loadJobs()) ?? []
+        let uploadJobsByRecordingID = ((try? uploadJobStore.loadJobs()) ?? []).reduce(into: [String: RecordingUploadJob]()) { result, job in
+            result[job.recordingID] = job
+        }
+        for localRecording in localInventory.recordings where localRecording.audioAvailable {
+            let recordingID = localRecording.recordingID
+            let objectID = audioTransferArtifactID(recordingID: recordingID)
+            let localAudio = recordingAudioState(recordingID: recordingID, in: localInventory)
+            let peerAudio = recordingAudioState(recordingID: recordingID, in: peerInventory)
+            let localDecisionState = localAudioDecisionState(recordingID: recordingID, in: localInventory)
+            let peerDecisionState = peerAudioDecisionState(recordingID: recordingID, in: peerInventory, localAudioState: localDecisionState)
+            let transferState = transferJobState(
+                transferID: transferID(direction: .upload, artifactID: objectID),
+                transferJobs: transferJobs
+            )
+            let ledgerState = uploadLedgerState(uploadJobsByRecordingID[recordingID])
+            let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+                localAudioState: localDecisionState,
+                peerAudioState: peerDecisionState,
+                transferJobState: transferState,
+                ledgerState: ledgerState,
+                triggerSource: triggerSource,
+                syncRunID: syncRunID,
+                objectID: objectID,
+                recordingID: recordingID
+            )
+            recordRecordingAudioDecisionDiagnostics(
+                recordingID: recordingID,
+                objectID: objectID,
+                logicalPathToken: localRecording.audioLogicalPathToken,
+                triggerSource: triggerSource,
+                localAudioState: localDecisionState,
+                peerAudioState: peerDecisionState,
+                transferJobState: transferState,
+                ledgerState: ledgerState,
+                decision: decision,
+                deviceID: deviceID,
+                syncRunID: syncRunID
+            )
+            diagnosticsStore.record(
+                phase: "syncDiffEvaluatedRecording",
+                deviceID: deviceID,
+                syncRunID: syncRunID,
+                result: "recording=\(safePrefix(recordingID))"
+            )
+            if peerAudio.isAvailable {
+                diagnosticsStore.record(
+                    phase: "syncPeerAudioAvailable",
+                    deviceID: deviceID,
+                    syncRunID: syncRunID,
+                    result: "recording=\(safePrefix(recordingID)),size=\(peerAudio.size.map(String.init) ?? "missing")"
+                )
+                diagnosticsStore.record(
+                    phase: audioSignaturesMatch(localAudio, peerAudio) ? "syncPeerAudioHashMatched" : "syncPeerAudioHashMismatched",
+                    deviceID: deviceID,
+                    syncRunID: syncRunID,
+                    result: "recording=\(safePrefix(recordingID)),localHash=\(hashPrefix(localAudio.checksum)),peerHash=\(hashPrefix(peerAudio.checksum))"
+                )
+            } else if peerInventory.recordings.contains(where: { $0.recordingID == recordingID }) {
+                diagnosticsStore.record(
+                    phase: "syncPeerAudioMissing",
+                    deviceID: deviceID,
+                    syncRunID: syncRunID,
+                    result: "recording=\(safePrefix(recordingID))"
+                )
+            }
         }
     }
 
@@ -1744,6 +1937,9 @@ final class LocalNetworkSyncEngine {
     private func applyPeerRecordingStatuses(peerInventory: LocalNetworkSyncInventory) throws {
         var didChange = false
         for peerRecording in peerInventory.recordings where peerRecording.receiveStatus == "completed" {
+            guard recordingAudioState(recordingID: peerRecording.recordingID, in: peerInventory).isAvailable else {
+                continue
+            }
             guard let localMetadata = try? audioFileStore.loadMetadata(id: peerRecording.recordingID),
                   RecordingUploadStatus(rawMetadataValue: localMetadata.uploadStatus) != .uploaded else {
                 continue
@@ -2463,17 +2659,315 @@ final class LocalNetworkSyncEngine {
         }
     }
 
+    func uploadRecordingAudioActionsToRun(
+        _ actions: [LocalNetworkSyncDiffAction],
+        localInventory: LocalNetworkSyncInventory,
+        peerInventory: LocalNetworkSyncInventory,
+        settings: SecureMacConnectionSnapshot,
+        syncRunID: String,
+        triggerSource: RecordingAudioSyncTriggerSource = .periodicSync
+    ) -> [LocalNetworkSyncDiffAction] {
+        let transferJobs = (try? transferJobStore.loadJobs()) ?? []
+        let uploadJobsByRecordingID = ((try? uploadJobStore.loadJobs()) ?? []).reduce(into: [String: RecordingUploadJob]()) { result, job in
+            result[job.recordingID] = job
+        }
+        var seenKeys = Set<String>()
+        var allowedActions: [LocalNetworkSyncDiffAction] = []
+
+        for action in actions {
+            let artifactID = audioTransferArtifactID(recordingID: action.entityID)
+            let transferID = transferID(direction: .upload, artifactID: artifactID)
+            let dedupKey = "\(action.entityID)|\(artifactID)|upload|\(settings.deviceID)"
+            let localAudio = localAudioDecisionState(recordingID: action.entityID, in: localInventory)
+            let peerAudio = peerAudioDecisionState(recordingID: action.entityID, in: peerInventory, localAudioState: localAudio)
+            let wasDuplicateInRun = !seenKeys.insert(dedupKey).inserted
+            let transferState = wasDuplicateInRun
+                ? RecordingTransferJobState.queued
+                : transferJobState(transferID: transferID, transferJobs: transferJobs)
+            let ledgerState = uploadLedgerState(uploadJobsByRecordingID[action.entityID])
+            let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+                localAudioState: localAudio,
+                peerAudioState: peerAudio,
+                transferJobState: transferState,
+                ledgerState: ledgerState,
+                triggerSource: triggerSource,
+                syncRunID: syncRunID,
+                objectID: artifactID,
+                recordingID: action.entityID
+            )
+            recordRecordingAudioDecisionDiagnostics(
+                recordingID: action.entityID,
+                objectID: artifactID,
+                logicalPathToken: localInventory.recordings.first { $0.recordingID == action.entityID }?.audioLogicalPathToken,
+                triggerSource: triggerSource,
+                localAudioState: localAudio,
+                peerAudioState: peerAudio,
+                transferJobState: transferState,
+                ledgerState: ledgerState,
+                decision: decision,
+                deviceID: settings.deviceID,
+                syncRunID: syncRunID
+            )
+            diagnosticsStore.record(
+                phase: "transferDedupKeyComputed",
+                deviceID: settings.deviceID,
+                syncRunID: syncRunID,
+                result: "key=\(safePrefix(dedupKey)),object=\(safePrefix(artifactID)),direction=upload"
+            )
+
+            guard !wasDuplicateInRun else {
+                diagnosticsStore.record(
+                    phase: "transferDuplicateSuppressed",
+                    deviceID: settings.deviceID,
+                    syncRunID: syncRunID,
+                    result: "recording=\(safePrefix(action.entityID))"
+                )
+                continue
+            }
+
+            guard decision.shouldCreateUploadJob else {
+                continue
+            }
+
+            diagnosticsStore.record(
+                phase: "syncUploadActionCreatedBecausePeerMissingAudio",
+                deviceID: settings.deviceID,
+                syncRunID: syncRunID,
+                result: RecordingAudioUploadDecisionDiagnostics.result(
+                    recordingID: action.entityID,
+                    objectID: artifactID,
+                    logicalPathToken: localInventory.recordings.first { $0.recordingID == action.entityID }?.audioLogicalPathToken,
+                    triggerSource: triggerSource,
+                    decision: decision,
+                    localAudioState: localAudio,
+                    peerAudioState: peerAudio,
+                    transferJobState: transferState,
+                    ledgerState: ledgerState
+                )
+            )
+            var allowedAction = action
+            allowedAction.reason = decision.reasonCode
+            allowedActions.append(allowedAction)
+        }
+
+        return allowedActions
+    }
+
+    private func recordRecordingAudioDecisionDiagnostics(
+        recordingID: String,
+        objectID: String,
+        logicalPathToken: String?,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        localAudioState: RecordingLocalAudioState,
+        peerAudioState: RecordingPeerAudioState,
+        transferJobState: RecordingTransferJobState,
+        ledgerState: RecordingUploadLedgerState,
+        decision: RecordingAudioUploadDecision,
+        deviceID: String,
+        syncRunID: String
+    ) {
+        let result = RecordingAudioUploadDecisionDiagnostics.result(
+            recordingID: recordingID,
+            objectID: objectID,
+            logicalPathToken: logicalPathToken,
+            triggerSource: triggerSource,
+            decision: decision,
+            localAudioState: localAudioState,
+            peerAudioState: peerAudioState,
+            transferJobState: transferJobState,
+            ledgerState: ledgerState
+        )
+        diagnosticsStore.record(phase: "localAudioStateResolved", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: "peerAudioStateResolved", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: "transferJobStateResolved", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: "ledgerStateResolved", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: "uploadStateEvaluated", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: "uploadDecisionComputed", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        diagnosticsStore.record(phase: decision.diagnosticStage, deviceID: deviceID, syncRunID: syncRunID, result: result)
+        if decision.reasonCode == "peer_audio_unknown_deferred" {
+            diagnosticsStore.record(phase: "peerAudioUnknownVerificationStarted", deviceID: deviceID, syncRunID: syncRunID, result: result)
+            diagnosticsStore.record(phase: "peerAudioUnknownVerificationCompleted", deviceID: deviceID, syncRunID: syncRunID, result: "deferredUntilPeerTruth,\(result)")
+            diagnosticsStore.record(phase: "peerAudioUnknownDeferred", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        }
+        if decision.reasonCode == "manual_force_peer_unknown" {
+            diagnosticsStore.record(phase: "manualForcePeerUnknownUpload", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        }
+        if decision.reasonCode == "peer_audio_conflict" {
+            diagnosticsStore.record(phase: "audioConflictDetected", deviceID: deviceID, syncRunID: syncRunID, result: result)
+            diagnosticsStore.record(phase: "uploadSuppressedConflict", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        }
+        if decision.reasonCode.contains("retry_pending") {
+            diagnosticsStore.record(phase: "retryPendingDisplayState", deviceID: deviceID, syncRunID: syncRunID, result: result)
+        }
+        if decision.reasonCode == "peer_already_has_same_audio" || decision.reasonCode == "completed_ledger_peer_matches" {
+            switch triggerSource {
+            case .manualSyncMacHint:
+                diagnosticsStore.record(phase: "macManualSyncNoOpBecausePeerMatches", deviceID: deviceID, syncRunID: syncRunID, result: result)
+            case .manualSyncIPhone:
+                diagnosticsStore.record(phase: "iphoneManualSyncNoOpBecausePeerMatches", deviceID: deviceID, syncRunID: syncRunID, result: result)
+            default:
+                break
+            }
+        }
+    }
+
+    private func localAudioDecisionState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory
+    ) -> RecordingLocalAudioState {
+        guard let recording = inventory.recordings.first(where: { $0.recordingID == recordingID }) else {
+            return .missing
+        }
+        if recording.deleted || recording.tombstone == true {
+            return .deleted
+        }
+        let state = recordingAudioState(recordingID: recordingID, in: inventory)
+        guard state.isAvailable else {
+            return .missing
+        }
+        return .available(RecordingAudioSignature(sha256: state.checksum, size: state.size))
+    }
+
+    private func peerAudioDecisionState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory,
+        localAudioState: RecordingLocalAudioState
+    ) -> RecordingPeerAudioState {
+        let recording = inventory.recordings.first { $0.recordingID == recordingID }
+        let object = inventory.objects.first { $0.objectID == audioTransferArtifactID(recordingID: recordingID) }
+        if recording?.deleted == true || recording?.tombstone == true {
+            return .deleted
+        }
+        let state = recordingAudioState(recordingID: recordingID, in: inventory)
+        if state.isAvailable {
+            let signature = RecordingAudioSignature(sha256: state.checksum, size: state.size)
+            if let localSignature = localAudioState.signature, !localSignature.matches(signature) {
+                return .different(signature)
+            }
+            return .available(signature)
+        }
+        if recording != nil {
+            return .metadataOnly
+        }
+        if object != nil {
+            return .missing
+        }
+        return .unknown
+    }
+
+    private func transferJobState(
+        transferID: String,
+        transferJobs: [LocalNetworkSyncTransferJob]
+    ) -> RecordingTransferJobState {
+        guard let job = transferJobs.first(where: { $0.transferID == transferID }) else {
+            return .none
+        }
+        switch job.state {
+        case .pending:
+            return .queued
+        case .transferring, .resuming:
+            return .inFlight
+        case .verifying:
+            return .finalizing
+        case .complete:
+            return .completed
+        case .failed, .conflict:
+            return .failed(reason: job.errorCode ?? job.errorMessage)
+        case .retryPending:
+            return .retryPending
+        case .paused, .pausedDisconnected:
+            return .paused
+        }
+    }
+
+    private func uploadLedgerState(_ job: RecordingUploadJob?) -> RecordingUploadLedgerState {
+        guard let job else {
+            return .none
+        }
+        if job.overallState == .fatalFailed {
+            return .fatalFailed(reason: job.lastErrorCode ?? job.lastErrorMessage)
+        }
+        if job.overallState == .retryableFailed {
+            return .retryPending
+        }
+        if job.overallState == .succeeded || job.audioStage == .succeeded {
+            return .completed(RecordingAudioSignature(sha256: job.audioTotalSHA256, size: job.audioTotalBytes))
+        }
+        if job.audioStage == .inProgress || job.overallState == .inProgress {
+            if job.resumableState == .finalizing {
+                return .finalizing
+            }
+            return .inFlight
+        }
+        return .none
+    }
+
+    private func recordingAudioState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory
+    ) -> (isAvailable: Bool, checksum: String?, size: Int64?) {
+        let recording = inventory.recordings.first { $0.recordingID == recordingID }
+        let object = inventory.objects.first { $0.objectID == audioTransferArtifactID(recordingID: recordingID) }
+        let checksum = recording?.audioChecksum ?? object?.sha256
+        let size = recording?.audioSize ?? object?.size
+        let availability = recording?.audioAvailability ?? object?.availability
+        let isAvailable = (recording?.audioAvailable == true)
+            || availability == .local
+            || availability == .availableOnPeer
+            || availability == .complete
+        return (isAvailable, checksum, size)
+    }
+
+    private func audioSignaturesMatch(
+        _ local: (isAvailable: Bool, checksum: String?, size: Int64?),
+        _ peer: (isAvailable: Bool, checksum: String?, size: Int64?)
+    ) -> Bool {
+        guard let localChecksum = local.checksum?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localChecksum.isEmpty,
+              let peerChecksum = peer.checksum?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !peerChecksum.isEmpty,
+              let localSize = local.size,
+              let peerSize = peer.size else {
+            return false
+        }
+        return localChecksum == peerChecksum && localSize == peerSize
+    }
+
+    private func isInFlightTransferState(_ state: LocalNetworkTransferState) -> Bool {
+        switch state {
+        case .pending, .transferring, .resuming, .verifying:
+            return true
+        case .paused, .pausedDisconnected, .retryPending, .complete, .failed, .conflict:
+            return false
+        }
+    }
+
+    private func safePrefix(_ value: String) -> String {
+        String(value.prefix(12))
+    }
+
     private func uploadMissingRecordingAudioIfNeeded(
         plan: LocalNetworkSyncDiffPlan,
+        localInventory: LocalNetworkSyncInventory,
+        peerInventory: LocalNetworkSyncInventory,
         settings: SecureMacConnectionSnapshot,
-        syncRunID: String
+        syncRunID: String,
+        triggerSource: RecordingAudioSyncTriggerSource
     ) async -> [LocalNetworkTransferProgress] {
         guard let recordingManager, let uploadCoordinator else {
             return []
         }
         var remainingTransfers: [LocalNetworkTransferProgress] = []
         recordingManager.reloadRecordings()
-        for action in plan.uploadRecordingAudioActions {
+        let actions = uploadRecordingAudioActionsToRun(
+            plan.uploadRecordingAudioActions,
+            localInventory: localInventory,
+            peerInventory: peerInventory,
+            settings: settings,
+            syncRunID: syncRunID,
+            triggerSource: triggerSource
+        )
+        for action in actions {
             guard let metadata = recordingManager.recordings.first(where: { $0.id == action.entityID }) else {
                 let traceID = UploadFlightRecorder.makeTraceID()
                 UploadFlightRecorder.record(
@@ -2524,8 +3018,9 @@ final class LocalNetworkSyncEngine {
                     uploadStatus: metadata.uploadStatus
                 )
             }
-            let audioChecksum = (try? audioFileStore.audioURL(for: metadata))
-                .flatMap { try? SecureUploadUtilities.sha256Hex(fileURL: $0) }
+            let audioChecksum = localInventory.recordings.first { $0.recordingID == metadata.id }?.audioChecksum
+                ?? (try? audioFileStore.audioURL(for: metadata))
+                    .flatMap { try? SecureUploadUtilities.sha256Hex(fileURL: $0) }
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "syncExistingUploadActionCreated",
@@ -2603,7 +3098,15 @@ final class LocalNetworkSyncEngine {
                 metadata: metadata,
                 settings: settings,
                 recordingManager: recordingManager,
-                traceID: traceID
+                traceID: traceID,
+                triggerSource: triggerSource,
+                peerAudioState: peerAudioDecisionState(
+                    recordingID: metadata.id,
+                    in: peerInventory,
+                    localAudioState: localAudioDecisionState(recordingID: metadata.id, in: localInventory)
+                ),
+                transferJobState: .none,
+                syncRunID: syncRunID
             )
             progressTask.cancel()
             switch status {
@@ -3195,9 +3698,12 @@ final class LocalNetworkSyncScheduler {
 final class LocalNetworkSyncAppService: ObservableObject {
     private let connectionStore: SecureMacConnectionStore
     private let connectionStatusStore: DeviceConnectionStatusStore
+    private let recordingManager: RecordingManager
+    private let uploadCoordinator: RecordingUploadCoordinator
     private let scheduler: LocalNetworkSyncScheduler
     private let heartbeatMonitor: LocalNetworkHeartbeatMonitor
     private var isActive = false
+    private var retryDrainTask: Task<Void, Never>?
     private var uploadLedgerObserver: NSObjectProtocol?
     private var pairingObserver: NSObjectProtocol?
     private var statusStoreSubscription: AnyCancellable?
@@ -3224,6 +3730,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
 
         self.connectionStore = connectionStore
         self.connectionStatusStore = connectionStatusStore
+        self.recordingManager = recordingManager
+        self.uploadCoordinator = uploadCoordinator
         self.heartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: secureClient,
@@ -3331,6 +3839,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
             )
             return
         }
+        startRetryDrainerIfNeeded()
         guard shouldRequestSyncSoon(now: Date()) else {
             return
         }
@@ -3365,11 +3874,15 @@ final class LocalNetworkSyncAppService: ObservableObject {
         guard connectionStore.snapshot.isPaired else {
             heartbeatMonitor.suspend()
             scheduler.stop()
+            retryDrainTask?.cancel()
+            retryDrainTask = nil
             return
         }
         guard connectionStore.userConnectionIntent == .wantsConnected else {
             heartbeatMonitor.stopBecauseUserDoesNotWantConnection()
             scheduler.stop()
+            retryDrainTask?.cancel()
+            retryDrainTask = nil
             ConnectionDiagnosticsStore.shared.record(
                 phase: "heartbeatSuppressedBecauseUserDoesNotWantConnection",
                 deviceID: connectionStore.snapshot.deviceID
@@ -3390,6 +3903,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
             userConnectionIntent: connectionStore.userConnectionIntent
         ) else {
             scheduler.stop()
+            retryDrainTask?.cancel()
+            retryDrainTask = nil
             if connectionStore.userConnectionIntent == .disconnectedByUser {
                 ConnectionDiagnosticsStore.shared.record(
                     phase: "syncSkippedBecauseUserDoesNotWantConnection",
@@ -3407,9 +3922,52 @@ final class LocalNetworkSyncAppService: ObservableObject {
         }
 
         scheduler.startPeriodicTicks()
+        startRetryDrainerIfNeeded()
         ConnectionDiagnosticsStore.shared.record(phase: "syncSchedulerStarted", deviceID: connectionStore.snapshot.deviceID)
         Task {
             await scheduler.foregroundTick()
+        }
+    }
+
+    private func startRetryDrainerIfNeeded() {
+        guard retryDrainTask == nil else {
+            return
+        }
+        retryDrainTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else {
+                    return
+                }
+                await self.drainRetryJobsIfPossible()
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    private func drainRetryJobsIfPossible() async {
+        connectionStore.refreshFromStorage()
+        let snapshot = connectionStore.snapshot
+        guard LocalNetworkSyncStartGate.canRun(
+            isActive: isActive,
+            snapshot: snapshot,
+            status: connectionStatusStore.status(for: snapshot.deviceID),
+            userConnectionIntent: connectionStore.userConnectionIntent
+        ) else {
+            return
+        }
+        let syncRunID = UUID().uuidString
+        let drained = await uploadCoordinator.drainEligibleRetryJobs(
+            settings: snapshot,
+            recordingManager: recordingManager,
+            syncRunID: syncRunID
+        )
+        if !drained.isEmpty {
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "retryDrainerStarted",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "drained=\(drained.count)"
+            )
         }
     }
 
@@ -3427,6 +3985,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
         ConnectionDiagnosticsStore.shared.record(phase: "appBecameInactive", deviceID: connectionStore.snapshot.deviceID)
         heartbeatMonitor.suspend()
         scheduler.stop()
+        retryDrainTask?.cancel()
+        retryDrainTask = nil
     }
 }
 

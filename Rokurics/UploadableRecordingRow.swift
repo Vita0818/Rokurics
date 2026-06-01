@@ -161,6 +161,116 @@ struct RecordingUploadCapsulePresentation: Equatable {
     }
 }
 
+struct RecordingUploadActionAreaPresentation {
+    static func resolve(
+        metadata: RecordingMetadata?,
+        status: RecordingUploadStatus,
+        isMacPaired _: Bool
+    ) -> StudyRecordingActionAreaPresentation? {
+        guard let metadata else {
+            return nil
+        }
+
+        let displayState = displayState(metadata: metadata, status: status)
+        if case .failed(let reason) = displayState, reason == "local_audio_missing" {
+            return .statusWithActions("本地音频缺失")
+        }
+
+        switch displayState {
+        case .waiting:
+            return .statusWithActions("等待上传")
+        case .retryPending:
+            return .statusWithActions("等待自动重试")
+        case .manualRetryAvailable:
+            return .statusWithActions("可手动重试")
+        case .preparing:
+            return .progressOnly(preparingProgress(for: metadata))
+        case .uploading:
+            guard let progress = StudyItemMetadata.recordingUploadTransferProgress(for: metadata, status: .uploading),
+                  progress.isVisibleInActionArea else {
+                return .progressOnly(preparingProgress(for: metadata))
+            }
+            return .progressOnly(progress)
+        case .finalizing:
+            return .progressOnly(preparingProgress(for: metadata))
+        case .hidden, .uploaded:
+            return nil
+        case .conflict:
+            return .statusWithActions("上传冲突")
+        case .fatalFailed:
+            return .statusWithActions("上传失败")
+        case .failed:
+            return .statusWithActions("上传失败")
+        }
+    }
+
+    static func displayState(
+        metadata: RecordingMetadata?,
+        status: RecordingUploadStatus
+    ) -> RecordingUploadDisplayState {
+        guard let metadata else {
+            return .hidden
+        }
+        if hasMissingLocalAudio(metadata) {
+            return .failed("local_audio_missing")
+        }
+
+        switch status {
+        case .localOnly:
+            return .waiting
+        case .uploading:
+            let phase = metadata.uploadPhase?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if phase.contains("conflict") {
+                return .conflict(metadata.uploadProgressDescription)
+            }
+            if phase.contains("fatal") {
+                return .fatalFailed(metadata.uploadProgressDescription)
+            }
+            if phase.contains("retry") {
+                return .retryPending
+            }
+            if phase.contains("finalizing") || phase.contains("completed") {
+                return .finalizing
+            }
+            if phase.contains("preparing") || phase.contains("starting") || phase.contains("metadata") {
+                return .preparing
+            }
+            return .uploading(progressFraction: metadata.uploadProgressFraction)
+        case .uploaded:
+            return .hidden
+        case .failed:
+            let phase = metadata.uploadPhase?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if phase.contains("conflict") {
+                return .conflict(metadata.uploadProgressDescription)
+            }
+            if phase.contains("fatal") {
+                return .fatalFailed(metadata.uploadProgressDescription)
+            }
+            if phase.contains("retry") {
+                return .retryPending
+            }
+            return .failed(nil)
+        }
+    }
+
+    private static func hasMissingLocalAudio(_ metadata: RecordingMetadata) -> Bool {
+        metadata.relativeAudioPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || metadata.fileSize <= 0
+    }
+
+    private static func preparingProgress(for metadata: RecordingMetadata) -> LocalNetworkTransferProgress {
+        LocalNetworkTransferProgress(
+            objectID: "recordingAudio:\(metadata.id)",
+            objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+            state: .pending,
+            progressFraction: 0,
+            receivedBytes: metadata.uploadProgressConfirmedBytes,
+            totalBytes: metadata.uploadProgressTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
+            sourceDeviceID: nil,
+            statusText: "准备上传"
+        )
+    }
+}
+
 enum RecordingRowIconTapTrigger: Equatable {
     case singleTap
     case doubleTap

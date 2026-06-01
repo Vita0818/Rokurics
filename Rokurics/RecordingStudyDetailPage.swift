@@ -60,6 +60,7 @@ struct RecordingStudyDetailPage: View {
                     statusMessage: statusMessage,
                     fileStatusRows: StudyRecordingFileStatusRows.rows(for: item),
                     detailActions: detailActionModels(for: item),
+                    actionAreaPresentation: uploadActionAreaPresentation,
                     titleRenameTriggerID: titleRenameTriggerID,
                     onRenameTitle: { newTitle in
                         commitRename(item, rawTitle: newTitle)
@@ -89,12 +90,24 @@ struct RecordingStudyDetailPage: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
+            let traceID = UploadFlightRecorder.makeTraceID()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshTriggeredLocalReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "begin")
+            recordViewRefreshDecision(traceID: traceID, recordingID: item?.recordingID)
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "begin")
             loadDraft()
             loadPreview()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshDidNotEnqueueUpload", traceID: traceID, recordingID: item?.recordingID, eventResult: "success")
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "success")
         }
         .onChange(of: itemID) {
+            let traceID = UploadFlightRecorder.makeTraceID()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshTriggeredLocalReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "begin")
+            recordViewRefreshDecision(traceID: traceID, recordingID: item?.recordingID)
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "begin")
             loadDraft()
             loadPreview()
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshDidNotEnqueueUpload", traceID: traceID, recordingID: item?.recordingID, eventResult: "success")
+            UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, recordingID: item?.recordingID, eventResult: "success")
         }
         .onChange(of: item?.noteRelativePath) {
             loadPreview()
@@ -175,6 +188,14 @@ struct RecordingStudyDetailPage: View {
 
     private var uploadStatus: RecordingUploadStatus {
         recordingMetadata.map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly
+    }
+
+    private var uploadActionAreaPresentation: StudyRecordingActionAreaPresentation? {
+        RecordingUploadActionAreaPresentation.resolve(
+            metadata: recordingMetadata,
+            status: uploadStatus,
+            isMacPaired: macConnectionStore.isPaired
+        )
     }
 
     private func loadDraft() {
@@ -290,11 +311,20 @@ struct RecordingStudyDetailPage: View {
             eventResult: "begin",
             uploadStatus: recordingMetadata.uploadStatus
         )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "manualUploadAllowed",
+            traceID: traceID,
+            recordingID: recordingMetadata.id,
+            eventResult: "success",
+            uploadStatus: recordingMetadata.uploadStatus
+        )
         uploadCoordinator.upload(
             metadata: recordingMetadata,
             settings: macConnectionStore.snapshot,
             recordingManager: recordingManager,
-            traceID: traceID
+            traceID: traceID,
+            triggerSource: .manualUploadButton
         )
         UploadFlightRecorder.record(
             side: .iPhone,
@@ -308,6 +338,36 @@ struct RecordingStudyDetailPage: View {
 
     private func beginInlineRename() {
         titleRenameTriggerID += 1
+    }
+
+    private func recordViewRefreshDecision(traceID: String, recordingID: String?) {
+        let safeRecordingID = recordingID ?? "recordingDetailRefresh"
+        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .unknown,
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .folderViewRefresh,
+            syncRunID: nil,
+            objectID: "recordingAudio:\(safeRecordingID)",
+            recordingID: safeRecordingID
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: decision.diagnosticStage,
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: decision.kind.rawValue,
+            reasonCode: decision.reasonCode
+        )
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "viewRefreshUploadSuppressed",
+            traceID: traceID,
+            recordingID: recordingID,
+            eventResult: "success",
+            reasonCode: decision.reasonCode
+        )
     }
 
     private func commitRename(_ item: StudyItemMetadata, rawTitle: String) {

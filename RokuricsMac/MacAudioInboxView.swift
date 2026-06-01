@@ -396,60 +396,11 @@ struct MacAudioInboxListRow: View {
                 .foregroundStyle(rowMetaColor)
                 .frame(width: 62, alignment: .trailing)
 
-            HStack(spacing: 8) {
-                MacAudioInboxActionCapsule(
-                    action: action,
-                    helpText: action.intent == .startTranscription ? item.transcriptionError : nil,
-                    onAction: {
-                        switch action.intent {
-                        case .startTranscription:
-                            onTranscribe()
-                        case .viewTranscript:
-                            onViewTranscript()
-                        case .wait:
-                            break
-                        }
-                    }
-                )
-                .frame(width: 92, alignment: .trailing)
-
-                if let noteAction {
-                    MacAudioInboxNoteActionCapsule(
-                        action: noteAction,
-                        helpText: item.noteError,
-                        onAction: {
-                            switch noteAction.intent {
-                            case .generate:
-                                onGenerateNote()
-                            case .viewNote:
-                                onViewNote()
-                            case .wait:
-                                break
-                            }
-                        }
-                    )
-                    .frame(width: 92, alignment: .trailing)
-                }
-
-                if let regenerateNoteAction {
-                    MacAudioInboxNoteActionCapsule(
-                        action: regenerateNoteAction,
-                        helpText: nil,
-                        onAction: {
-                            switch regenerateNoteAction.intent {
-                            case .generate:
-                                onGenerateNote()
-                            case .viewNote:
-                                onViewNote()
-                            case .wait:
-                                break
-                            }
-                        }
-                    )
-                    .frame(width: 92, alignment: .trailing)
-                }
-            }
-            .frame(width: actionGroupWidth(noteAction: noteAction, regenerateNoteAction: regenerateNoteAction), alignment: .trailing)
+            actionArea(
+                action: action,
+                noteAction: noteAction,
+                regenerateNoteAction: regenerateNoteAction
+            )
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -532,6 +483,75 @@ struct MacAudioInboxListRow: View {
 
     private var rowMetaColor: Color {
         MacTheme.softText(for: colorScheme)
+    }
+
+    @ViewBuilder
+    private func actionArea(
+        action: MacAudioInboxRowAction,
+        noteAction: MacAudioInboxNoteRowAction?,
+        regenerateNoteAction: MacAudioInboxNoteRowAction?
+    ) -> some View {
+        let width = actionGroupWidth(noteAction: noteAction, regenerateNoteAction: regenerateNoteAction)
+        if let transfer = item.localNetworkReceiveTransferProgress,
+           transfer.isVisibleInActionArea {
+            StudyRecordingTransferProgressView(transfer: transfer)
+                .frame(width: max(width, 132), alignment: .trailing)
+        } else {
+            HStack(spacing: 8) {
+                MacAudioInboxActionCapsule(
+                    action: action,
+                    helpText: action.intent == .startTranscription ? item.transcriptionError : nil,
+                    onAction: {
+                        switch action.intent {
+                        case .startTranscription:
+                            onTranscribe()
+                        case .viewTranscript:
+                            onViewTranscript()
+                        case .wait:
+                            break
+                        }
+                    }
+                )
+                .frame(width: 92, alignment: .trailing)
+
+                if let noteAction {
+                    MacAudioInboxNoteActionCapsule(
+                        action: noteAction,
+                        helpText: item.noteError,
+                        onAction: {
+                            switch noteAction.intent {
+                            case .generate:
+                                onGenerateNote()
+                            case .viewNote:
+                                onViewNote()
+                            case .wait:
+                                break
+                            }
+                        }
+                    )
+                    .frame(width: 92, alignment: .trailing)
+                }
+
+                if let regenerateNoteAction {
+                    MacAudioInboxNoteActionCapsule(
+                        action: regenerateNoteAction,
+                        helpText: nil,
+                        onAction: {
+                            switch regenerateNoteAction.intent {
+                            case .generate:
+                                onGenerateNote()
+                            case .viewNote:
+                                onViewNote()
+                            case .wait:
+                                break
+                            }
+                        }
+                    )
+                    .frame(width: 92, alignment: .trailing)
+                }
+            }
+            .frame(width: width, alignment: .trailing)
+        }
     }
 
     private func beginTitleEdit() {

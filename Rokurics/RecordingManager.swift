@@ -210,14 +210,14 @@ final class RecordingManager: ObservableObject {
             let updated = recordings[reloadedIndex].updatingUploadStatus(status)
             try fileStore.updateMetadata(updated)
             recordings[reloadedIndex] = updated
-            refreshLatestRecordingAfterMetadataUpdate(updated)
+            publishRecordingMetadataUpdate(updated)
             return
         }
 
         let updated = recordings[index].updatingUploadStatus(status)
         try fileStore.updateMetadata(updated)
         recordings[index] = updated
-        refreshLatestRecordingAfterMetadataUpdate(updated)
+        publishRecordingMetadataUpdate(updated)
     }
 
     func updateUploadProgress(
@@ -243,7 +243,7 @@ final class RecordingManager: ObservableObject {
             )
             try fileStore.updateMetadata(updated)
             recordings[reloadedIndex] = updated
-            refreshLatestRecordingAfterMetadataUpdate(updated)
+            publishRecordingMetadataUpdate(updated)
             return
         }
 
@@ -256,7 +256,7 @@ final class RecordingManager: ObservableObject {
         )
         try fileStore.updateMetadata(updated)
         recordings[index] = updated
-        refreshLatestRecordingAfterMetadataUpdate(updated)
+        publishRecordingMetadataUpdate(updated)
     }
 
     func renameRecording(recordingID: String, rawTitle: String) throws {
@@ -781,6 +781,11 @@ final class RecordingManager: ObservableObject {
         if latestRecordingMetadata?.id == metadata.id {
             latestRecordingMetadata = metadata
         }
+    }
+
+    private func publishRecordingMetadataUpdate(_ metadata: RecordingMetadata) {
+        refreshLatestRecordingAfterMetadataUpdate(metadata)
+        studyLibraryStore.refresh()
     }
 
     private func refreshLatestRecordingAfterDeletion() {

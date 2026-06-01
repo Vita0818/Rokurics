@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-最近自查日期：2026-05-26
+最近自查日期：2026-06-01
 
 ## 总体架构
 
@@ -19,16 +19,16 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 - 录音域：`RecordingManager` 使用 `AVAudioRecorder` 管理状态机、计时、暂停/恢复、保存与 Live Activity 更新。
 - 本地存储：`AudioFileStore` 管理 app Documents 下 `Rokurics/Recordings` 和 `Rokurics/Metadata`；所有相对路径都基于 Rokurics 根目录校验。
 - 学习库：`StudyLibraryStore` 在本地 `study/` 下维护 items/folders/index/hierarchy rules，并从录音 metadata 合并视图。
-- 上传：`RecordingUploadCoordinator` 管理 job ledger、重试和状态；`RecordingUploadClient` 决定单请求上传或 resumable chunk 上传；`SecureMacUploadClient` 负责 HTTPS、证书 pinning、HMAC header。
+- 上传：`RecordingUploadCoordinator` 管理 job ledger、retry drainer、失败分类和状态；`RecordingUploadClient` 决定单请求上传或 resumable chunk 上传；`SecureMacUploadClient` 负责 HTTPS、证书 pinning、HMAC header。
 - 连接状态：`SecureMacConnectionStore` 将 host/port/name 等写入 UserDefaults，将 device id、shared secret、fingerprint 写入 Keychain。
-- 同步：`LocalNetworkSyncAppService` 由 `RokuricsApp` 在 app active 时启动，组合心跳、inventory diff、metadata/artifact 同步与缺失音频上传。
+- 同步：`LocalNetworkSyncAppService` 由 `RokuricsApp` 在 app active 时启动，组合心跳、inventory diff、metadata/artifact 同步、缺失音频上传与到期 retry job drain。
 
 ### Mac 侧
 
 - UI 层：`MacRootView` 使用 `NavigationSplitView` 组织 dashboard、iPhone connection、study library、AI chat、settings。
 - HTTPS receiver：`SecureReceiverService` 持有 identity、paired devices、request verifier、file stores 和 `SecureLocalHTTPSServer`。
 - 路由层：`SecureLocalHTTPSServer` 直接基于 Network.framework 处理 TLS listener、HTTP parsing、health/fingerprint/pair/upload/sync routes。
-- 安全层：`MacIdentityManager` 生成/加载本机 signing key、TLS private key 和自签证书；`RequestVerifier` 执行 path/content-type/body-size/header/HMAC/timestamp/nonce 校验。
+- 安全层：`MacIdentityManager` 生成/加载本机 signing key、app-local TLS private key JSON 和自签证书，并创建 `SecIdentity` 给 Network.framework；`RequestVerifier` 执行 path/content-type/body-size/header/HMAC/timestamp/nonce 校验。
 - 文件层：`MacRecordingFileStore` 管理 Application Support 下 audio inbox、upload sessions、transcripts、metadata index、receive log；`AudioInboxStore` 将文件状态映射到 UI。
 - 转写层：`TranscriptionCoordinator` 读取收件箱 source，使用 `TranscriptionSettingsStore` 选择 mock 或 whisper.cpp provider，输出到 `TranscriptStore`。
 - 音频预处理：`AudioPreprocessor` 对非 wav 输入生成 whisper-compatible WAV；默认 native preferred，可按配置使用 ffmpeg。
@@ -77,7 +77,8 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 5. 每个 signed request 使用 `X-Rokurics-*` headers，签名 payload 为 method/path/timestamp/nonce/bodySHA256。
 6. Mac `RequestVerifier` 校验 method、path、content type、body size、设备、timestamp window、nonce replay、body hash、HMAC。
 7. Mac `MacRecordingFileStore` 写入 audio inbox，维护 metadata/audio/receive.json/index/log。
-8. iPhone 根据 Mac 响应更新 metadata upload status 和 progress。
+8. iPhone 根据 Mac 响应更新 metadata upload status 和 progress；retryable failure 写入 `nextRetryAfter`，到期后由 retry drainer 重新进入同一上传主路径。
+9. 如果 Mac 已有同 recording 但 checksum/size 不同，Mac 拒绝覆盖，iPhone 将状态标记为 conflict/fatal，而不是继续覆盖旧音频。
 
 ### Mac 转写链路
 
@@ -107,6 +108,17 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 4. `LocalNetworkSyncDiffPlanner` 对 recordings/folders/studyItems/artifacts 计算 upload/download/conflict/no-op。
 5. metadata 通过 `/sync/apply-metadata` 传 manifest；artifact 通过 `/sync/artifact-request` 取 base64 数据。
 6. transcript/note artifact 可自动下载；audio 不自动下载，只通过上传队列补齐。
+7. inventory 构建使用 checksum cache，文件 size/mtime 未变化时复用 audio checksum；hash 计算放到主 actor 之外执行。
+
+### 当前本地网络同步边界
+
+- iPhone 是当前主动执行同步的一侧：app active 后启动 heartbeat、foreground tick、periodic tick 和 retry drainer；Mac 手动点击同步只写入 pending sync request，等待 iPhone heartbeat 收到 `syncStartSignal` 后再排队 `manual-sync-requested` tick。
+- Mac inventory 是 audio no-op 的关键事实源。Mac 必须在 `/sync/inventory` 中报告 `audioAvailable=true`，且提供与 iPhone 本地一致的 `audioChecksum` 和 `audioSize`，iPhone 才能判断“peer 已有同一音频”。
+- metadata sync 和 audio upload 是不同层。`RecordingUploadStatus.uploaded`、metadata manifest 已应用、receive record 已存在，都不能单独证明 Mac audio 已完成。
+- UI refresh 不能触发上传。录音列表、详情页、学习库或 Mac inbox refresh 只允许重读本地状态；是否上传必须由 sync/upload state machine 根据 trigger、local audio、peer audio、transfer job 和 ledger 决定。
+- 当前最终 no-op 条件应是 peer audio available + same hash + same size。completed ledger 只能作为辅助证据，不能替代 peer inventory。
+- peer audio unknown 在普通 sync 中会 deferred，不再当作“需要补传”直接上传；用户手动上传按钮会记录 manual force unknown，retry drainer 会记录 retry-drainer unknown。
+- peer audio hash/size 不同现在是冲突，不覆盖 Mac 现有音频；需要用户或后续流程明确处理。
 
 ### AI Chat 链路
 
@@ -148,7 +160,7 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 - 已配对请求使用 shared secret HMAC-SHA256，headers 包括 device id、timestamp、nonce、body SHA256、signature。
 - Mac `RequestVerifier` 有 timestamp window 和 per-device nonce replay cache。
 - shared secret、device id、fingerprint 在 iPhone Keychain 中保存，不应回落到 UserDefaults。
-- Mac TLS private key 使用 Data Protection Keychain；签名 identity 文件只保存在本地 security directory。
+- Mac TLS private key 当前保存在 app-local security directory 的 `tls-private-key.json`，TLS certificate 保存为 `tls-certificate.der`；源码再通过 `SecIdentityCreate(nil, certificate, privateKey)` 创建 Network.framework 使用的 identity。旧文档曾写 Data Protection Keychain，与当前源码不符。
 - Mac sandbox entitlements 包含 network client/server、user-selected executable/read-only 和 app-scope bookmarks。
 - whisper.cpp/ffmpeg/model 访问依赖安全范围书签或 bundle helper。
 
@@ -158,5 +170,6 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 - Git-backed study sync 默认禁用，但代码和测试仍存在；不要误以为本地网络同步和 Git-backed sync 是同一套开关。
 - Mac build phase 依赖仓库外本地 whisper.cpp 编译产物或 `WHISPER_CPP_ROOT`；新机器/CI 可复现性需要确认。
 - `TranscriptionQueue` 目前只是占位状态对象，真实转写由 `TranscriptionCoordinator` 执行。
+- retry drainer、Mac pending sync 超时/ack 以及 checksum cache 已有单元测试覆盖，但 Mac 点击同步到 iPhone 前台执行 tick 的完整真机链路仍需手动验证。
 - UI 测试覆盖很轻，核心保障主要来自 Swift Testing 单元测试。
 - `RokuricsVisualDiagnostics/` 和顶层图标源的维护策略需要人工确认。

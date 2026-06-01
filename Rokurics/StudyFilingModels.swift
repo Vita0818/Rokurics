@@ -795,6 +795,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             modifiedByDeviceID: modifiedByDeviceID,
             syncConflictStatus: syncConflictStatus
         )
+        .withRecordingUploadTransferProgress(recording)
     }
 
     nonisolated static func defaultMetadata(for recording: RecordingMetadata) -> StudyItemMetadata {
@@ -819,6 +820,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             isTrashed: recording.isDeleted,
             trashedAt: recording.deletedAt
         )
+        .withRecordingUploadTransferProgress(recording)
     }
 
     nonisolated static func defaultMetadata(for receiveRecord: RecordingReceiveRecord, receiveRelativePath: String?) -> StudyItemMetadata? {

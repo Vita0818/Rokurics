@@ -802,6 +802,11 @@ final class SecureReceiverService: ObservableObject {
                 syncRunID: syncRunID
             )
             recordConnectionDiagnostic(
+                phase: "manualSyncPendingCreated",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: syncRunID
+            )
+            recordConnectionDiagnostic(
                 phase: "pendingSyncRequestSet",
                 requestDeviceIDPrefix: String(device.id.prefix(12)),
                 syncRunID: syncRunID

@@ -1865,22 +1865,101 @@ struct StudyRecordingCardActions: View {
     }
 }
 
+struct StudyRecordingActionAreaPresentation: Equatable {
+    enum Layout: Equatable {
+        case actionsOnly
+        case statusWithActions
+        case progressOnly
+    }
+
+    var layout: Layout
+    var statusText: String?
+    var transferProgress: LocalNetworkTransferProgress?
+
+    static var actionsOnly: StudyRecordingActionAreaPresentation {
+        StudyRecordingActionAreaPresentation(layout: .actionsOnly)
+    }
+
+    static func statusWithActions(_ statusText: String) -> StudyRecordingActionAreaPresentation {
+        StudyRecordingActionAreaPresentation(
+            layout: .statusWithActions,
+            statusText: statusText
+        )
+    }
+
+    static func progressOnly(_ transferProgress: LocalNetworkTransferProgress) -> StudyRecordingActionAreaPresentation {
+        StudyRecordingActionAreaPresentation(
+            layout: .progressOnly,
+            statusText: transferProgress.statusText,
+            transferProgress: transferProgress
+        )
+    }
+}
+
+struct StudyRecordingCardActionArea: View {
+    let actions: [StudyRecordingCardActionModel]
+    let presentation: StudyRecordingActionAreaPresentation?
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        switch presentation?.layout {
+        case .progressOnly:
+            if let transfer = presentation?.transferProgress {
+                StudyRecordingTransferProgressView(transfer: transfer)
+            } else {
+                StudyRecordingCardActions(actions: actions)
+            }
+        case .statusWithActions:
+            VStack(alignment: .trailing, spacing: 5) {
+                if let statusText = presentation?.statusText {
+                    Text(statusText)
+                        .font(statusFont)
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                StudyRecordingCardActions(actions: actions)
+            }
+            .frame(minWidth: 132, alignment: .trailing)
+        case .actionsOnly, .none:
+            StudyRecordingCardActions(actions: actions)
+        }
+    }
+
+    private var statusColor: Color {
+        switch presentation?.statusText {
+        case "上传失败", "接收失败", "传输失败":
+            return RokuricsSharedStyle.coral
+        default:
+            return RokuricsSharedStyle.softText(for: colorScheme)
+        }
+    }
+
+    private var statusFont: Font {
+        #if os(macOS)
+        MacTypography.chineseCaption(size: 11, weight: .semibold)
+        #else
+        RokuricsTypography.caption(size: 11, weight: .semibold)
+        #endif
+    }
+}
+
 struct StudyRecordingTransferProgressView: View {
     let transfer: LocalNetworkTransferProgress
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 5) {
-            ProgressView(value: clampedProgress)
-                .progressViewStyle(.linear)
-                .frame(width: 112)
-                .tint(tint)
-
             Text(statusText)
                 .font(statusFont)
                 .foregroundStyle(tint)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
+
+            ProgressView(value: clampedProgress)
+                .progressViewStyle(.linear)
+                .frame(width: 112)
+                .tint(tint)
         }
         .frame(width: 132, alignment: .trailing)
         .accessibilityLabel(statusText)
@@ -2000,6 +2079,7 @@ struct StudyRecordingBundleCardContent: View {
     let item: StudyItemMetadata
     let metadataText: String
     let actions: [StudyRecordingCardActionModel]
+    let actionAreaPresentation: StudyRecordingActionAreaPresentation?
     var isDeleteIconActive = false
     var renameTriggerID = 0
     var onRename: ((String) -> Void)?
@@ -2010,6 +2090,7 @@ struct StudyRecordingBundleCardContent: View {
         item: StudyItemMetadata,
         metadataText: String? = nil,
         actions: [StudyRecordingCardActionModel],
+        actionAreaPresentation: StudyRecordingActionAreaPresentation? = nil,
         isDeleteIconActive: Bool = false,
         renameTriggerID: Int = 0,
         onRename: ((String) -> Void)? = nil,
@@ -2018,6 +2099,7 @@ struct StudyRecordingBundleCardContent: View {
         self.item = item
         self.metadataText = metadataText ?? StudyRecordingMetadataFormatter.cardMetadataText(for: item)
         self.actions = actions
+        self.actionAreaPresentation = actionAreaPresentation
         self.isDeleteIconActive = isDeleteIconActive
         self.renameTriggerID = renameTriggerID
         self.onRename = onRename
@@ -2040,13 +2122,24 @@ struct StudyRecordingBundleCardContent: View {
                     .lineLimit(1)
             }
         } actions: {
-            if let transfer = item.localNetworkTransferProgress,
-               transfer.isVisibleInActionArea {
-                StudyRecordingTransferProgressView(transfer: transfer)
-            } else {
-                StudyRecordingCardActions(actions: actions)
-            }
+            StudyRecordingCardActionArea(
+                actions: actions,
+                presentation: resolvedActionAreaPresentation
+            )
         }
+    }
+
+    private var resolvedActionAreaPresentation: StudyRecordingActionAreaPresentation? {
+        if let actionAreaPresentation {
+            return actionAreaPresentation
+        }
+
+        guard let transfer = item.localNetworkTransferProgress,
+              transfer.isVisibleInActionArea else {
+            return nil
+        }
+
+        return .progressOnly(transfer)
     }
 }
 
@@ -2363,6 +2456,63 @@ struct StudyDetailActionGrid: View {
                 action: action.action
             )
         }
+    }
+}
+
+struct StudyDetailActionArea: View {
+    let actions: [StudyDetailActionModel]
+    let actionAreaPresentation: StudyRecordingActionAreaPresentation?
+    let columns: [GridItem]
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        switch actionAreaPresentation?.layout {
+        case .progressOnly:
+            if let transfer = actionAreaPresentation?.transferProgress {
+                HStack {
+                    Spacer(minLength: 0)
+                    StudyRecordingTransferProgressView(transfer: transfer)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                actionGrid
+            }
+        case .statusWithActions:
+            VStack(alignment: .leading, spacing: 8) {
+                if let statusText = actionAreaPresentation?.statusText {
+                    Text(statusText)
+                        .font(statusFont)
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
+                }
+                actionGrid
+            }
+        case .actionsOnly, .none:
+            actionGrid
+        }
+    }
+
+    private var actionGrid: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            StudyDetailActionGrid(actions: actions)
+        }
+    }
+
+    private var statusColor: Color {
+        switch actionAreaPresentation?.statusText {
+        case "上传失败", "接收失败", "传输失败":
+            return RokuricsSharedStyle.coral
+        default:
+            return RokuricsSharedStyle.softText(for: colorScheme)
+        }
+    }
+
+    private var statusFont: Font {
+        #if os(macOS)
+        MacTypography.chineseCaption(size: 12, weight: .semibold)
+        #else
+        RokuricsTypography.caption(size: 12, weight: .semibold)
+        #endif
     }
 }
 
@@ -3072,6 +3222,7 @@ struct StudyLibraryDetailContent<
     let statusMessage: String?
     let fileStatusRows: [RokuricsDocumentMetadataRow]
     let detailActions: [StudyDetailActionModel]
+    let actionAreaPresentation: StudyRecordingActionAreaPresentation?
     var titleRenameTriggerID: Int
     let onRenameTitle: ((String) -> Void)?
     var layout: StudyLibraryDetailLayout
@@ -3093,6 +3244,7 @@ struct StudyLibraryDetailContent<
         statusMessage: String?,
         fileStatusRows: [RokuricsDocumentMetadataRow],
         detailActions: [StudyDetailActionModel],
+        actionAreaPresentation: StudyRecordingActionAreaPresentation? = nil,
         titleRenameTriggerID: Int = 0,
         onRenameTitle: ((String) -> Void)? = nil,
         layout: StudyLibraryDetailLayout,
@@ -3113,6 +3265,7 @@ struct StudyLibraryDetailContent<
         self.statusMessage = statusMessage
         self.fileStatusRows = fileStatusRows
         self.detailActions = detailActions
+        self.actionAreaPresentation = actionAreaPresentation
         self.titleRenameTriggerID = titleRenameTriggerID
         self.onRenameTitle = onRenameTitle
         self.layout = layout
@@ -3149,9 +3302,11 @@ struct StudyLibraryDetailContent<
                     trailing: headerTrailing
                 )
 
-                LazyVGrid(columns: layout.actionColumns, alignment: .leading, spacing: 10) {
-                    StudyDetailActionGrid(actions: detailActions)
-                }
+                StudyDetailActionArea(
+                    actions: detailActions,
+                    actionAreaPresentation: actionAreaPresentation,
+                    columns: layout.actionColumns
+                )
 
                 filingPanel
 

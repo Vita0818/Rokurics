@@ -295,6 +295,679 @@ struct LocalNetworkTransferProgress: Codable, Equatable, Identifiable {
     }
 }
 
+struct RecordingAudioSignature: Codable, Equatable {
+    var sha256: String?
+    var size: Int64?
+
+    var normalizedSHA256: String? {
+        let value = sha256?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    func matches(_ other: RecordingAudioSignature) -> Bool {
+        guard let lhsHash = normalizedSHA256,
+              let rhsHash = other.normalizedSHA256,
+              let lhsSize = size,
+              let rhsSize = other.size else {
+            return false
+        }
+        return lhsHash == rhsHash && lhsSize == rhsSize
+    }
+
+    var summary: String {
+        "hash=\(normalizedSHA256.map { String($0.prefix(12)) } ?? "missing");size=\(size.map(String.init) ?? "missing")"
+    }
+}
+
+enum RecordingMetadataSyncState: String, Codable, Equatable {
+    case unknown
+    case missing
+    case metadataOnly
+    case synced
+    case conflict
+    case deleted
+}
+
+enum RecordingLocalAudioState: Equatable {
+    case unknown
+    case missing
+    case unreadable(reason: String)
+    case available(RecordingAudioSignature)
+    case deleted
+
+    var signature: RecordingAudioSignature? {
+        if case .available(let signature) = self {
+            return signature
+        }
+        return nil
+    }
+
+    var isAvailable: Bool {
+        signature != nil
+    }
+
+    var summary: String {
+        switch self {
+        case .unknown:
+            return "unknown"
+        case .missing:
+            return "missing"
+        case .unreadable(let reason):
+            return "unreadable:\(Self.sanitize(reason))"
+        case .available(let signature):
+            return "available(\(signature.summary))"
+        case .deleted:
+            return "deleted"
+        }
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "unknown" : String(trimmed.prefix(32))
+    }
+}
+
+enum RecordingPeerAudioState: Equatable {
+    case unknown
+    case missing
+    case metadataOnly
+    case available(RecordingAudioSignature)
+    case different(RecordingAudioSignature?)
+    case deleted
+
+    var signature: RecordingAudioSignature? {
+        switch self {
+        case .available(let signature), .different(let signature?):
+            return signature
+        case .unknown, .missing, .metadataOnly, .different(nil), .deleted:
+            return nil
+        }
+    }
+
+    var isAvailable: Bool {
+        if case .available = self {
+            return true
+        }
+        return false
+    }
+
+    var summary: String {
+        switch self {
+        case .unknown:
+            return "unknown"
+        case .missing:
+            return "missing"
+        case .metadataOnly:
+            return "metadataOnly"
+        case .available(let signature):
+            return "available(\(signature.summary))"
+        case .different(let signature):
+            return "different(\(signature?.summary ?? "signature=missing"))"
+        case .deleted:
+            return "deleted"
+        }
+    }
+}
+
+enum RecordingTransferJobState: Equatable {
+    case none
+    case queued
+    case inFlight
+    case finalizing
+    case completed
+    case failed(reason: String?)
+    case retryPending
+    case paused
+
+    var summary: String {
+        switch self {
+        case .none:
+            return "none"
+        case .queued:
+            return "queued"
+        case .inFlight:
+            return "inFlight"
+        case .finalizing:
+            return "finalizing"
+        case .completed:
+            return "completed"
+        case .failed(let reason):
+            return "failed:\(reason.map { String($0.prefix(32)) } ?? "unknown")"
+        case .retryPending:
+            return "retryPending"
+        case .paused:
+            return "paused"
+        }
+    }
+}
+
+enum RecordingUploadLedgerState: Equatable {
+    case none
+    case queued
+    case inFlight
+    case finalizing
+    case completed(RecordingAudioSignature?)
+    case failed(reason: String?)
+    case retryPending
+    case fatalFailed(reason: String?)
+
+    var summary: String {
+        switch self {
+        case .none:
+            return "none"
+        case .queued:
+            return "queued"
+        case .inFlight:
+            return "inFlight"
+        case .finalizing:
+            return "finalizing"
+        case .completed(let signature):
+            return "completed(\(signature?.summary ?? "signature=missing"))"
+        case .failed(let reason):
+            return "failed:\(reason.map { String($0.prefix(32)) } ?? "unknown")"
+        case .retryPending:
+            return "retryPending"
+        case .fatalFailed(let reason):
+            return "fatalFailed:\(reason.map { String($0.prefix(32)) } ?? "unknown")"
+        }
+    }
+}
+
+enum RecordingAudioSyncTriggerSource: String, Codable, Equatable {
+    case manualUploadButton
+    case retryDrainer
+    case manualSyncIPhone
+    case manualSyncMacHint
+    case periodicSync
+    case folderViewRefresh
+    case recordingListRefresh
+    case studyLibraryRefresh
+    case appActivationRefresh
+
+    init(syncTrigger: String) {
+        let normalized = syncTrigger.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.contains("retry-drainer") || normalized.contains("retrydrainer") {
+            self = .retryDrainer
+        } else if normalized.contains("manual-sync-requested") || normalized.contains("mac") {
+            self = .manualSyncMacHint
+        } else if normalized.contains("manual") {
+            self = .manualSyncIPhone
+        } else if normalized.contains("folder") {
+            self = .folderViewRefresh
+        } else if normalized.contains("recording-list") || normalized.contains("recordinglist") {
+            self = .recordingListRefresh
+        } else if normalized.contains("study") {
+            self = .studyLibraryRefresh
+        } else if normalized.contains("foreground") || normalized.contains("activation") {
+            self = .appActivationRefresh
+        } else {
+            self = .periodicSync
+        }
+    }
+
+    var canCreateUploadJob: Bool {
+        switch self {
+        case .manualUploadButton, .retryDrainer, .manualSyncIPhone, .manualSyncMacHint, .periodicSync, .appActivationRefresh:
+            return true
+        case .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh:
+            return false
+        }
+    }
+
+    var isViewRefreshOnly: Bool {
+        switch self {
+        case .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh:
+            return true
+        case .manualUploadButton, .retryDrainer, .manualSyncIPhone, .manualSyncMacHint, .periodicSync, .appActivationRefresh:
+            return false
+        }
+    }
+
+    var isExplicitSingleRecordingUpload: Bool {
+        switch self {
+        case .manualUploadButton, .retryDrainer:
+            return true
+        case .manualSyncIPhone, .manualSyncMacHint, .periodicSync, .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh, .appActivationRefresh:
+            return false
+        }
+    }
+}
+
+enum RecordingAudioUploadDecisionKind: String, Codable, Equatable {
+    case upload
+    case noOp
+    case suppress
+    case fail
+}
+
+enum RecordingUploadDisplayState: Equatable {
+    case hidden
+    case waiting
+    case retryPending
+    case manualRetryAvailable(String?)
+    case preparing
+    case uploading(progressFraction: Double?)
+    case finalizing
+    case uploaded
+    case conflict(String?)
+    case fatalFailed(String?)
+    case failed(String?)
+
+    var shouldAnimateTransfer: Bool {
+        switch self {
+        case .waiting, .retryPending, .preparing, .uploading, .finalizing:
+            return true
+        case .hidden, .manualRetryAvailable, .uploaded, .conflict, .fatalFailed, .failed:
+            return false
+        }
+    }
+}
+
+enum LocalNetworkChecksumCacheEvent: String, Codable, Equatable {
+    case hit
+    case miss
+    case invalidated
+}
+
+struct LocalNetworkChecksumCacheResult: Equatable {
+    var sha256: String
+    var size: Int64
+    var modifiedAt: Date
+    var computedAt: Date
+    var event: LocalNetworkChecksumCacheEvent
+}
+
+final class LocalNetworkChecksumCache {
+    private struct Entry {
+        var pathToken: String
+        var size: Int64
+        var modifiedAt: Date
+        var sha256: String
+        var computedAt: Date
+        var sourceSide: String
+    }
+
+    private var entriesByKey: [String: Entry] = [:]
+
+    func checksum(
+        fileURL: URL,
+        pathToken: String?,
+        sourceSide: String,
+        now: Date = Date(),
+        compute: (URL) throws -> String
+    ) throws -> LocalNetworkChecksumCacheResult? {
+        let standardizedURL = fileURL.standardizedFileURL
+        let key = Self.cacheKey(pathToken: pathToken, fileURL: standardizedURL)
+        guard let metadata = Self.fileMetadata(for: standardizedURL) else {
+            if entriesByKey.removeValue(forKey: key) != nil {
+                return nil
+            }
+            return nil
+        }
+
+        if let existing = entriesByKey[key] {
+            if existing.size == metadata.size, existing.modifiedAt == metadata.modifiedAt {
+                return LocalNetworkChecksumCacheResult(
+                    sha256: existing.sha256,
+                    size: existing.size,
+                    modifiedAt: existing.modifiedAt,
+                    computedAt: existing.computedAt,
+                    event: .hit
+                )
+            }
+            entriesByKey.removeValue(forKey: key)
+            let sha256 = try compute(standardizedURL)
+            let entry = Entry(
+                pathToken: pathToken ?? standardizedURL.lastPathComponent,
+                size: metadata.size,
+                modifiedAt: metadata.modifiedAt,
+                sha256: sha256,
+                computedAt: now,
+                sourceSide: sourceSide
+            )
+            entriesByKey[key] = entry
+            return LocalNetworkChecksumCacheResult(
+                sha256: sha256,
+                size: metadata.size,
+                modifiedAt: metadata.modifiedAt,
+                computedAt: now,
+                event: .invalidated
+            )
+        }
+
+        let sha256 = try compute(standardizedURL)
+        let entry = Entry(
+            pathToken: pathToken ?? standardizedURL.lastPathComponent,
+            size: metadata.size,
+            modifiedAt: metadata.modifiedAt,
+            sha256: sha256,
+            computedAt: now,
+            sourceSide: sourceSide
+        )
+        entriesByKey[key] = entry
+        return LocalNetworkChecksumCacheResult(
+            sha256: sha256,
+            size: metadata.size,
+            modifiedAt: metadata.modifiedAt,
+            computedAt: now,
+            event: .miss
+        )
+    }
+
+    private static func cacheKey(pathToken: String?, fileURL: URL) -> String {
+        let token = pathToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let token, !token.isEmpty {
+            return token
+        }
+        return fileURL.path
+    }
+
+    private static func fileMetadata(for url: URL) -> (size: Int64, modifiedAt: Date)? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let sizeNumber = attributes[.size] as? NSNumber else {
+            return nil
+        }
+        let modifiedAt = attributes[.modificationDate] as? Date ?? .distantPast
+        return (sizeNumber.int64Value, modifiedAt)
+    }
+}
+
+struct RecordingAudioUploadDecision: Equatable {
+    var kind: RecordingAudioUploadDecisionKind
+    var reasonCode: String
+    var diagnosticStage: String
+    var displayState: RecordingUploadDisplayState
+
+    var shouldCreateUploadJob: Bool {
+        kind == .upload
+    }
+}
+
+enum RecordingAudioUploadDecisionEvaluator {
+    static func evaluateRecordingAudioUploadDecision(
+        localAudioState: RecordingLocalAudioState,
+        peerAudioState: RecordingPeerAudioState,
+        transferJobState: RecordingTransferJobState,
+        ledgerState: RecordingUploadLedgerState,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        syncRunID: String?,
+        objectID: String,
+        recordingID: String
+    ) -> RecordingAudioUploadDecision {
+        _ = syncRunID
+        _ = objectID
+        _ = recordingID
+
+        if triggerSource.isViewRefreshOnly {
+            return decision(.suppress, reason: "view_refresh_only", stage: "uploadDecisionSuppressedViewRefreshOnly", display: .hidden)
+        }
+
+        switch localAudioState {
+        case .missing, .unknown:
+            return decision(.fail, reason: "local_audio_missing", stage: "uploadDecisionFailedLocalAudioMissing", display: .failed("local_audio_missing"))
+        case .unreadable:
+            return decision(.fail, reason: "local_audio_unreadable", stage: "uploadDecisionFailedLocalAudioMissing", display: .failed("local_audio_unreadable"))
+        case .deleted:
+            return decision(.fail, reason: "local_audio_deleted", stage: "uploadDecisionFailedLocalAudioMissing", display: .hidden)
+        case .available:
+            break
+        }
+
+        if let localSignature = localAudioState.signature {
+            switch peerAudioState {
+            case .available(let peerSignature) where localSignature.matches(peerSignature):
+                if case .completed = ledgerState {
+                    return decision(.suppress, reason: "completed_ledger_peer_matches", stage: "uploadDecisionSuppressedCompletedAndPeerMatches", display: .uploaded)
+                }
+                return decision(.noOp, reason: "peer_already_has_same_audio", stage: "uploadDecisionNoOpPeerAlreadyHasSameAudio", display: .uploaded)
+            default:
+                break
+            }
+        }
+
+        switch transferJobState {
+        case .queued:
+            return decision(.suppress, reason: "transfer_queued", stage: "uploadDecisionSuppressedQueued", display: .waiting)
+        case .inFlight:
+            return decision(.suppress, reason: "transfer_in_flight", stage: "uploadDecisionSuppressedInFlight", display: .uploading(progressFraction: nil))
+        case .finalizing:
+            return decision(.suppress, reason: "transfer_finalizing", stage: "uploadDecisionSuppressedInFlight", display: .finalizing)
+        case .retryPending:
+            return decision(.suppress, reason: "transfer_retry_pending", stage: "retryPendingDisplayState", display: .retryPending)
+        case .none, .completed, .failed, .paused:
+            break
+        }
+
+        switch ledgerState {
+        case .queued:
+            return decision(.suppress, reason: "ledger_queued", stage: "uploadDecisionSuppressedQueued", display: .waiting)
+        case .inFlight:
+            return decision(.suppress, reason: "ledger_in_flight", stage: "uploadDecisionSuppressedInFlight", display: .uploading(progressFraction: nil))
+        case .finalizing:
+            return decision(.suppress, reason: "ledger_finalizing", stage: "uploadDecisionSuppressedInFlight", display: .finalizing)
+        case .retryPending:
+            if triggerSource.isExplicitSingleRecordingUpload {
+                break
+            }
+            return decision(.suppress, reason: "ledger_retry_pending", stage: "retryPendingDisplayState", display: .retryPending)
+        case .fatalFailed(let reason):
+            if let reason, reason.contains("conflict") {
+                return decision(.fail, reason: reason, stage: "uploadSuppressedConflict", display: .conflict(reason))
+            }
+            return decision(.fail, reason: reason ?? "ledger_fatal_failed", stage: "uploadDecisionFatalFailed", display: .fatalFailed(reason))
+        case .none, .completed, .failed:
+            break
+        }
+
+        guard triggerSource.canCreateUploadJob else {
+            return decision(.suppress, reason: "trigger_cannot_create_upload", stage: "uploadDecisionSuppressedViewRefreshOnly", display: .hidden)
+        }
+
+        switch peerAudioState {
+        case .metadataOnly:
+            return decision(.upload, reason: "peer_metadata_only", stage: "uploadDecisionUploadBecausePeerMetadataOnly", display: .preparing)
+        case .missing:
+            return decision(.upload, reason: "peer_missing_audio", stage: "uploadDecisionUploadBecausePeerMissingAudio", display: .preparing)
+        case .unknown:
+            if triggerSource == .manualUploadButton {
+                return decision(.upload, reason: "manual_force_peer_unknown", stage: "manualForcePeerUnknownUpload", display: .preparing)
+            }
+            if triggerSource == .retryDrainer {
+                return decision(.upload, reason: "retry_drainer_peer_unknown", stage: "retryJobEligible", display: .preparing)
+            }
+            return decision(.suppress, reason: "peer_audio_unknown_deferred", stage: "peerAudioUnknownDeferred", display: .waiting)
+        case .available, .different:
+            return decision(.fail, reason: "peer_audio_conflict", stage: "uploadSuppressedConflict", display: .conflict("peer_audio_conflict"))
+        case .deleted:
+            return decision(.upload, reason: "peer_audio_deleted", stage: "uploadDecisionUploadBecausePeerMissingAudio", display: .preparing)
+        }
+    }
+
+    private static func decision(
+        _ kind: RecordingAudioUploadDecisionKind,
+        reason: String,
+        stage: String,
+        display: RecordingUploadDisplayState
+    ) -> RecordingAudioUploadDecision {
+        RecordingAudioUploadDecision(
+            kind: kind,
+            reasonCode: reason,
+            diagnosticStage: stage,
+            displayState: display
+        )
+    }
+}
+
+enum RecordingAudioUploadDecisionDiagnostics {
+    static func result(
+        recordingID: String,
+        objectID: String,
+        logicalPathToken: String? = nil,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        decision: RecordingAudioUploadDecision,
+        localAudioState: RecordingLocalAudioState,
+        peerAudioState: RecordingPeerAudioState,
+        transferJobState: RecordingTransferJobState,
+        ledgerState: RecordingUploadLedgerState
+    ) -> String {
+        [
+            "recordingIDPrefix=\(prefix(recordingID))",
+            "objectIDPrefix=\(prefix(objectID))",
+            "logicalPathTokenPrefix=\(prefix(logicalPathToken))",
+            "triggerSource=\(triggerSource.rawValue)",
+            "decision=\(decision.kind.rawValue)",
+            "reasonCode=\(decision.reasonCode)",
+            "localAudio=\(localAudioState.summary)",
+            "peerAudio=\(peerAudioState.summary)",
+            "transferJobState=\(transferJobState.summary)",
+            "ledgerState=\(ledgerState.summary)"
+        ].joined(separator: ",")
+    }
+
+    private static func prefix(_ value: String?) -> String {
+        guard let value else {
+            return "missing"
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "missing" : String(trimmed.prefix(12))
+    }
+}
+
+struct RecordingUploadTransferProgressMapper {
+    static func progress(
+        for recording: RecordingMetadata,
+        status explicitStatus: RecordingUploadStatus? = nil
+    ) -> LocalNetworkTransferProgress? {
+        let status = explicitStatus ?? RecordingUploadStatus(rawMetadataValue: recording.uploadStatus)
+        guard status == .uploading else {
+            return nil
+        }
+
+        let state = state(for: recording.uploadPhase)
+        let totalBytes = recording.uploadProgressTotalBytes ?? (recording.fileSize > 0 ? recording.fileSize : nil)
+        let fraction = progressFraction(
+            explicitFraction: recording.uploadProgressFraction,
+            confirmedBytes: recording.uploadProgressConfirmedBytes,
+            totalBytes: totalBytes
+        )
+
+        return LocalNetworkTransferProgress(
+            objectID: "recordingAudio:\(recording.id)",
+            objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+            state: state,
+            progressFraction: fraction,
+            receivedBytes: recording.uploadProgressConfirmedBytes,
+            totalBytes: totalBytes,
+            sourceDeviceID: nil,
+            statusText: statusText(
+                description: recording.uploadProgressDescription,
+                phase: recording.uploadPhase,
+                state: state,
+                fraction: fraction
+            )
+        )
+    }
+
+    private static func state(for phase: String?) -> LocalNetworkTransferState {
+        let normalized = phase?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if normalized.contains("fatalfailed") || normalized.contains("failed") {
+            return .failed
+        }
+        if normalized.contains("retry") {
+            return .retryPending
+        }
+        if normalized.contains("paused") {
+            return .paused
+        }
+        if normalized.contains("resuming") {
+            return .resuming
+        }
+        if normalized.contains("finalizing") {
+            return .verifying
+        }
+        if normalized.contains("completed") {
+            return .complete
+        }
+        if normalized.contains("preparing") || normalized.contains("starting") || normalized.contains("metadata") {
+            return .pending
+        }
+        return .transferring
+    }
+
+    private static func progressFraction(
+        explicitFraction: Double?,
+        confirmedBytes: Int64?,
+        totalBytes: Int64?
+    ) -> Double? {
+        if let explicitFraction {
+            return clamped(explicitFraction)
+        }
+
+        guard let confirmedBytes,
+              let totalBytes,
+              totalBytes > 0 else {
+            return nil
+        }
+
+        return clamped(Double(confirmedBytes) / Double(totalBytes))
+    }
+
+    private static func statusText(
+        description: String?,
+        phase: String?,
+        state: LocalNetworkTransferState,
+        fraction: Double?
+    ) -> String {
+        let normalizedDescription = description?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let normalizedDescription,
+           !normalizedDescription.isEmpty,
+           normalizedDescription != "上传完成" {
+            return normalizedDescription
+        }
+
+        switch state {
+        case .pending:
+            return "准备上传"
+        case .paused, .pausedDisconnected, .retryPending:
+            return "等待重试"
+        case .resuming:
+            return percentText(prefix: "续传中", fraction: fraction)
+        case .verifying:
+            return "正在完成上传"
+        case .failed, .conflict:
+            return "上传失败"
+        case .complete:
+            return "上传完成"
+        case .transferring:
+            let normalizedPhase = phase?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            if normalizedPhase.contains("preparing") {
+                return "准备上传"
+            }
+            return percentText(prefix: "上传中", fraction: fraction)
+        }
+    }
+
+    private static func percentText(prefix: String, fraction: Double?) -> String {
+        guard let fraction else {
+            return prefix
+        }
+
+        let percent = Int((clamped(fraction) * 100).rounded())
+        return "\(prefix) \(min(max(percent, 0), 100))%"
+    }
+
+    private static func clamped(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+}
+
 extension StudyItemMetadata {
     var localNetworkTransferProgress: LocalNetworkTransferProgress? {
         guard let stateRaw = customProperties[Self.transferStateKey],
@@ -343,6 +1016,25 @@ extension StudyItemMetadata {
             copy.customProperties[Self.transferStatusTextKey] = statusText
         }
         return copy
+    }
+
+    func withRecordingUploadTransferProgress(_ recording: RecordingMetadata) -> StudyItemMetadata {
+        if let progress = Self.recordingUploadTransferProgress(for: recording) {
+            return withLocalNetworkTransferProgress(progress)
+        }
+
+        guard localNetworkTransferProgress?.objectKind == LocalNetworkSyncObjectKind.recordingAudio.rawValue else {
+            return self
+        }
+
+        return withLocalNetworkTransferProgress(nil)
+    }
+
+    static func recordingUploadTransferProgress(
+        for recording: RecordingMetadata,
+        status: RecordingUploadStatus? = nil
+    ) -> LocalNetworkTransferProgress? {
+        RecordingUploadTransferProgressMapper.progress(for: recording, status: status)
     }
 
     private static var transferKeys: [String] {
@@ -1214,7 +1906,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 deleted: recording.deleted,
                 tombstone: recording.tombstone,
                 sourceDeviceID: recording.sourceDeviceID,
-                logicalPathToken: nil,
+                logicalPathToken: recording.audioLogicalPathToken,
                 availability: recording.audioAvailability ?? (recording.audioAvailable ? .local : .missing),
                 transferState: nil,
                 transferProgress: nil,
@@ -1440,6 +2132,7 @@ struct LocalNetworkSyncRecordingEntry: Codable, Equatable, Identifiable {
     var noteStatus: String? = nil
     var sourceDeviceID: String? = nil
     var artifactRefs: [String]? = nil
+    var audioLogicalPathToken: String? = nil
 }
 
 struct LocalNetworkSyncFolderEntry: Codable, Equatable, Identifiable {
@@ -1612,6 +2305,7 @@ struct LocalNetworkSyncDiffPlanner {
         )
         var plan = makeCompatibilityPlan(from: corePlan)
         appendRecordingReceiveStatusNoOps(local: local, peer: peer, plan: &plan)
+        suppressUploadsForPeerAvailableAudio(local: local, peer: peer, plan: &plan)
         return plan
     }
 
@@ -1650,7 +2344,7 @@ struct LocalNetworkSyncDiffPlanner {
         case .downloadObject:
             plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: "audio_auto_download_disabled"))
         case .conflict:
-            plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: "audio_uses_recording_upload"))
+            plan.uploadRecordingAudioActions.append(legacyAction(.uploadRecordingAudio, action: action, entityKind: "recording", entityID: action.ownerID, reason: "peer_audio_signature_mismatch_use_existing_upload"))
         case .noOp, .skip:
             plan.noOps.append(legacyAction(.noOp, action: action, entityKind: isArtifactID(action.objectID) ? "artifact" : "recording", entityID: isArtifactID(action.objectID) ? action.objectID : action.ownerID, reason: action.reason))
         case .applyTombstone:
@@ -1710,14 +2404,140 @@ struct LocalNetworkSyncDiffPlanner {
         peer: LocalNetworkSyncInventory,
         plan: inout LocalNetworkSyncDiffPlan
     ) {
-        let localByID = Dictionary(uniqueKeysWithValues: local.recordings.map { ($0.recordingID, $0) })
-        for peerRecording in peer.recordings where peerRecording.audioAvailable == false {
-            guard localByID[peerRecording.recordingID]?.audioAvailable == true,
-                  !plan.uploadRecordingAudioActions.contains(where: { $0.entityID == peerRecording.recordingID }) else {
+        for peerRecording in peer.recordings {
+            guard !plan.uploadRecordingAudioActions.contains(where: { $0.entityID == peerRecording.recordingID }) else {
                 continue
             }
-            plan.uploadRecordingAudioActions.append(action(.uploadRecordingAudio, entityKind: "recording", entityID: peerRecording.recordingID, reason: "peer_missing_audio_use_existing_upload"))
+            let localAudio = localAudioDecisionState(recordingID: peerRecording.recordingID, in: local)
+            let peerAudio = peerAudioDecisionState(recordingID: peerRecording.recordingID, in: peer, localAudioState: localAudio)
+            let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+                localAudioState: localAudio,
+                peerAudioState: peerAudio,
+                transferJobState: .none,
+                ledgerState: .none,
+                triggerSource: .periodicSync,
+                syncRunID: nil,
+                objectID: "recordingAudio:\(peerRecording.recordingID)",
+                recordingID: peerRecording.recordingID
+            )
+            if decision.shouldCreateUploadJob {
+                plan.uploadRecordingAudioActions.append(action(.uploadRecordingAudio, entityKind: "recording", entityID: peerRecording.recordingID, reason: decision.reasonCode))
+            } else {
+                plan.noOps.append(action(.noOp, entityKind: "recording", entityID: peerRecording.recordingID, reason: decision.reasonCode))
+            }
         }
+    }
+
+    private func suppressUploadsForPeerAvailableAudio(
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory,
+        plan: inout LocalNetworkSyncDiffPlan
+    ) {
+        var retainedActions: [LocalNetworkSyncDiffAction] = []
+        for action in plan.uploadRecordingAudioActions {
+            let localAudio = localAudioDecisionState(recordingID: action.entityID, in: local)
+            let peerAudio = peerAudioDecisionState(recordingID: action.entityID, in: peer, localAudioState: localAudio)
+            let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+                localAudioState: localAudio,
+                peerAudioState: peerAudio,
+                transferJobState: .none,
+                ledgerState: .none,
+                triggerSource: .periodicSync,
+                syncRunID: nil,
+                objectID: "recordingAudio:\(action.entityID)",
+                recordingID: action.entityID
+            )
+            if decision.shouldCreateUploadJob {
+                var retained = action
+                retained.reason = decision.reasonCode
+                retainedActions.append(retained)
+            } else {
+                plan.noOps.append(
+                    self.action(
+                        .noOp,
+                        entityKind: action.entityKind,
+                        entityID: action.entityID,
+                        reason: decision.reasonCode
+                    )
+                )
+            }
+        }
+        plan.uploadRecordingAudioActions = retainedActions
+    }
+
+    private func localAudioDecisionState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory
+    ) -> RecordingLocalAudioState {
+        guard let recording = inventory.recordings.first(where: { $0.recordingID == recordingID }) else {
+            return .missing
+        }
+        if recording.deleted || recording.tombstone == true {
+            return .deleted
+        }
+        let state = recordingAudioState(recordingID: recordingID, in: inventory)
+        guard state.isAvailable else {
+            return .missing
+        }
+        return .available(RecordingAudioSignature(sha256: state.checksum, size: state.size))
+    }
+
+    private func peerAudioDecisionState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory,
+        localAudioState: RecordingLocalAudioState
+    ) -> RecordingPeerAudioState {
+        let recording = inventory.recordings.first { $0.recordingID == recordingID }
+        let object = inventory.objects.first { $0.objectID == "recordingAudio:\(recordingID)" }
+        if recording?.deleted == true || recording?.tombstone == true {
+            return .deleted
+        }
+        let state = recordingAudioState(recordingID: recordingID, in: inventory)
+        if state.isAvailable {
+            let signature = RecordingAudioSignature(sha256: state.checksum, size: state.size)
+            if let localSignature = localAudioState.signature, !localSignature.matches(signature) {
+                return .different(signature)
+            }
+            return .available(signature)
+        }
+        if recording != nil {
+            return .metadataOnly
+        }
+        if object != nil {
+            return .missing
+        }
+        return .missing
+    }
+
+    private func recordingAudioState(
+        recordingID: String,
+        in inventory: LocalNetworkSyncInventory
+    ) -> (isAvailable: Bool, checksum: String?, size: Int64?) {
+        let recording = inventory.recordings.first { $0.recordingID == recordingID }
+        let object = inventory.objects.first { $0.objectID == "recordingAudio:\(recordingID)" }
+        let checksum = recording?.audioChecksum ?? object?.sha256
+        let size = recording?.audioSize ?? object?.size
+        let availability = recording?.audioAvailability ?? object?.availability
+        let isAvailable = (recording?.audioAvailable == true)
+            || availability == .local
+            || availability == .availableOnPeer
+            || availability == .complete
+        return (isAvailable, checksum, size)
+    }
+
+    private func audioSignaturesMatch(
+        _ local: (isAvailable: Bool, checksum: String?, size: Int64?),
+        _ peer: (isAvailable: Bool, checksum: String?, size: Int64?)
+    ) -> Bool {
+        guard let localChecksum = local.checksum?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localChecksum.isEmpty,
+              let peerChecksum = peer.checksum?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !peerChecksum.isEmpty,
+              let localSize = local.size,
+              let peerSize = peer.size else {
+            return false
+        }
+        return localChecksum == peerChecksum && localSize == peerSize
     }
 
     private func metadataReason(_ reason: String, entityKind: String, uploading: Bool) -> String {

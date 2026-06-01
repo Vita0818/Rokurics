@@ -94,6 +94,22 @@ final class AudioInboxStore: ObservableObject {
                 audioRelativePathSet: item.audioRelativePath != nil,
                 inboxItemState: item.hasAudio ? "available" : "waiting"
             )
+            if !item.hasAudio {
+                UploadFlightRecorder.record(
+                    side: .Mac,
+                    stage: "audioInboxItemStillWaitingWithReason",
+                    traceID: traceID,
+                    recordingID: item.id,
+                    eventResult: "success",
+                    reasonCode: item.receiveStatus == "failed" ? "receive_failed" : "audio_missing",
+                    fileExists: false,
+                    fileSize: item.fileSize,
+                    resolvedRelativePathToken: item.audioRelativePath,
+                    macReceiveState: item.receiveStatus,
+                    audioRelativePathSet: item.audioRelativePath != nil,
+                    inboxItemState: "waiting"
+                )
+            }
             UploadFlightRecorder.record(
                 side: .Mac,
                 stage: "macUIWaitingReasonComputed",

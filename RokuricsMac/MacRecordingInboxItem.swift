@@ -13,7 +13,9 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     let receivedAt: Date
     let duration: TimeInterval
     let fileSize: Int64
+    let sourceDeviceID: String?
     let sourceDeviceName: String
+    let audioChecksum: String?
     let transcriptionStatus: String
     let noteStatus: String
     let noteRelativePath: String?
@@ -36,7 +38,9 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         receivedAt: Date,
         duration: TimeInterval,
         fileSize: Int64,
+        sourceDeviceID: String? = nil,
         sourceDeviceName: String,
+        audioChecksum: String? = nil,
         transcriptionStatus: String,
         noteStatus: String,
         receiveStatus: String,
@@ -58,7 +62,9 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         self.receivedAt = receivedAt
         self.duration = duration
         self.fileSize = fileSize
+        self.sourceDeviceID = sourceDeviceID
         self.sourceDeviceName = sourceDeviceName
+        self.audioChecksum = audioChecksum
         self.transcriptionStatus = transcriptionStatus
         self.noteStatus = RecordingReceiveRecord.normalizedNoteStatus(noteStatus)
         self.noteRelativePath = noteRelativePath
@@ -134,7 +140,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
             return transferProgress
         }
 
-        let state: LocalNetworkTransferState = receiveStatus == "failed" ? .failed : .pending
+        let state: LocalNetworkTransferState = receiveStatus == "failed" ? .failed : .transferring
         return LocalNetworkTransferProgress(
             objectID: "recordingAudio:\(id)",
             objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
@@ -143,7 +149,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
             receivedBytes: 0,
             totalBytes: fileSize > 0 ? fileSize : nil,
             sourceDeviceID: nil,
-            statusText: state == .failed ? "接收失败" : "等待录音"
+            statusText: state == .failed ? "接收失败" : "正在接收"
         )
     }
 
