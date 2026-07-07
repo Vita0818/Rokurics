@@ -9,6 +9,7 @@ import SwiftUI
 
 struct MacAudioInboxView: View {
     @ObservedObject var audioInboxStore: AudioInboxStore
+    @ObservedObject var studyLibraryStore: StudyLibraryStore
     @ObservedObject var transcriptionCoordinator: TranscriptionCoordinator
     @ObservedObject var noteGenerationCoordinator: NoteGenerationCoordinator
     @State private var selectedTranscriptItem: MacRecordingInboxItem?
@@ -50,9 +51,9 @@ struct MacAudioInboxView: View {
                         )
 
                         HStack(spacing: 12) {
-                            MacInboxMetricPill(title: "真实录音", value: "\(audioInboxStore.pendingCount)", tint: MacTheme.aqua)
-                            MacInboxMetricPill(title: "待转写", value: "\(audioInboxStore.transcriptionPendingCount)", tint: MacTheme.mint)
-                            MacInboxMetricPill(title: "已转写", value: "\(audioInboxStore.transcribedCount)", tint: MacTheme.leaf)
+                            MacInboxMetricPill(title: RokuricsCopy.text("真实录音", "Audio"), value: "\(audioInboxStore.pendingCount)", tint: MacTheme.aqua)
+                            MacInboxMetricPill(title: RokuricsCopy.text("待转写", "Pending"), value: "\(audioInboxStore.transcriptionPendingCount)", tint: MacTheme.mint)
+                            MacInboxMetricPill(title: RokuricsCopy.text("已转写", "Done"), value: "\(audioInboxStore.transcribedCount)", tint: MacTheme.leaf)
 
                             Spacer(minLength: 8)
 
@@ -67,8 +68,8 @@ struct MacAudioInboxView: View {
                             .opacity(0.64)
 
                         if audioInboxStore.recordingItems.isEmpty {
-                            Text("暂无收到的录音")
-                                .font(MacTypography.chineseBody(size: 15, weight: .medium))
+                            Text(RokuricsCopy.text("暂无收到的录音", "No recordings received"))
+                                .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 15, weight: .medium) : MacTypography.englishBody(size: 15, weight: .medium))
                                 .foregroundStyle(MacTheme.softText(for: colorScheme))
                                 .padding(22)
                                 .frame(maxWidth: 620, alignment: .leading)
@@ -78,6 +79,7 @@ struct MacAudioInboxView: View {
                                 ForEach(audioInboxStore.recordingItems) { item in
                                     MacAudioInboxListRow(
                                         item: item,
+                                        displaySyncState: canonicalDisplaySyncState(for: item),
                                         isTranscribing: transcriptionCoordinator.isTranscribing(recordingID: item.id),
                                         isGeneratingNote: noteGenerationCoordinator.isGenerating(recordingID: item.id),
                                         onTranscribe: {
@@ -118,11 +120,11 @@ struct MacAudioInboxView: View {
             isPresented: $isDeleteConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("移入废纸篓", role: .destructive) {
+            Button(RokuricsCopy.text("移入废纸篓", "Move to Trash"), role: .destructive) {
                 commitDelete()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 deleteTarget = nil
             }
         } message: {
@@ -133,11 +135,11 @@ struct MacAudioInboxView: View {
             isPresented: $isPermanentDeleteConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("永久删除", role: .destructive) {
+            Button(RokuricsCopy.text("永久删除", "Delete"), role: .destructive) {
                 commitPermanentDelete()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 permanentDeleteTarget = nil
             }
         } message: {
@@ -151,13 +153,17 @@ struct MacAudioInboxView: View {
             )
             .frame(minWidth: 560, minHeight: 420)
         }
-        .alert("操作失败", isPresented: operationErrorBinding) {
-            Button("好", role: .cancel) {
+        .alert(RokuricsCopy.text("操作失败", "Operation Failed"), isPresented: operationErrorBinding) {
+            Button(RokuricsCopy.text("好", "OK"), role: .cancel) {
                 operationErrorMessage = nil
             }
         } message: {
             Text(operationErrorMessage ?? "")
         }
+    }
+
+    private func canonicalDisplaySyncState(for item: MacRecordingInboxItem) -> CanonicalDisplaySyncState? {
+        studyLibraryStore.canonicalDisplaySyncState(for: CanonicalObjectID("recordingAudio:\(item.id)"))
     }
 
     private var operationErrorBinding: Binding<Bool> {
@@ -270,8 +276,8 @@ private struct MacInboxTrashButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label(count > 0 ? "废纸篓 \(count)" : "废纸篓", systemImage: "trash")
-                .font(MacTypography.chineseCaption(size: 12, weight: .bold))
+            Label(count > 0 ? "\(RokuricsCopy.text("废纸篓", "Trash")) \(count)" : RokuricsCopy.text("废纸篓", "Trash"), systemImage: "trash")
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .bold) : MacTypography.englishCaption(size: 12, weight: .bold))
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
                 .labelStyle(.titleAndIcon)
                 .lineLimit(1)
@@ -280,7 +286,7 @@ private struct MacInboxTrashButton: View {
                 .macGlassCapsule(fillOpacity: 0.24, strokeOpacity: 0.24)
         }
         .buttonStyle(.plain)
-        .help("打开废纸篓")
+        .help(RokuricsCopy.text("打开废纸篓", "Open Trash"))
     }
 }
 
@@ -360,6 +366,7 @@ private struct MacRecordingLeadingIcon: View {
 
 struct MacAudioInboxListRow: View {
     let item: MacRecordingInboxItem
+    let displaySyncState: CanonicalDisplaySyncState?
     let isTranscribing: Bool
     let isGeneratingNote: Bool
     let onTranscribe: () -> Void
@@ -375,7 +382,11 @@ struct MacAudioInboxListRow: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        let action = MacAudioInboxRowAction.resolve(for: item, isTranscribing: isTranscribing)
+        let action = MacAudioInboxRowAction.resolve(
+            for: item,
+            displaySyncState: displaySyncState,
+            isTranscribing: isTranscribing
+        )
         let noteAction = MacAudioInboxNoteRowAction.resolve(for: item, isGenerating: isGeneratingNote)
         let regenerateNoteAction = MacAudioInboxNoteRowAction.regenerateAction(for: item, isGenerating: isGeneratingNote)
 
@@ -399,7 +410,8 @@ struct MacAudioInboxListRow: View {
             actionArea(
                 action: action,
                 noteAction: noteAction,
-                regenerateNoteAction: regenerateNoteAction
+                regenerateNoteAction: regenerateNoteAction,
+                displaySyncState: displaySyncState
             )
         }
         .padding(.horizontal, 16)
@@ -430,13 +442,13 @@ struct MacAudioInboxListRow: View {
                 isDeleteIconHovered = isHovered
             }
         }
-        .help(isDeleteIconHovered ? "移入废纸篓" : "录音")
+        .help(isDeleteIconHovered ? RokuricsCopy.text("移入废纸篓", "Move to Trash") : RokuricsCopy.text("录音", "Recording"))
     }
 
     @ViewBuilder
     private var titleArea: some View {
         if isTitleEditing {
-            TextField("录音名称", text: $titleDraft)
+            TextField(RokuricsCopy.text("录音名称", "Recording Name"), text: $titleDraft)
                 .textFieldStyle(.plain)
                 .font(MacTypography.chineseBody(size: 16, weight: .semibold))
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
@@ -473,7 +485,7 @@ struct MacAudioInboxListRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("点击重命名")
+            .help(RokuricsCopy.text("点击重命名", "Click to rename"))
         }
     }
 
@@ -489,10 +501,12 @@ struct MacAudioInboxListRow: View {
     private func actionArea(
         action: MacAudioInboxRowAction,
         noteAction: MacAudioInboxNoteRowAction?,
-        regenerateNoteAction: MacAudioInboxNoteRowAction?
+        regenerateNoteAction: MacAudioInboxNoteRowAction?,
+        displaySyncState: CanonicalDisplaySyncState?
     ) -> some View {
         let width = actionGroupWidth(noteAction: noteAction, regenerateNoteAction: regenerateNoteAction)
-        if let transfer = item.localNetworkReceiveTransferProgress,
+        if displaySyncState?.canDisplayAsComplete != true,
+           let transfer = item.localNetworkReceiveTransferProgress,
            transfer.isVisibleInActionArea {
             StudyRecordingTransferProgressView(transfer: transfer)
                 .frame(width: max(width, 132), alignment: .trailing)
@@ -605,7 +619,7 @@ struct MacAudioInboxListRow: View {
 
     private static let dateTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
@@ -624,20 +638,21 @@ struct MacAudioInboxRowAction: Equatable {
 
     static func resolve(
         for item: MacRecordingInboxItem,
+        displaySyncState: CanonicalDisplaySyncState?,
         isTranscribing: Bool
     ) -> MacAudioInboxRowAction {
         if isTranscribing || item.isTranscriptionActive {
-            return MacAudioInboxRowAction(label: "转写中", intent: .wait, isEnabled: false)
+            return MacAudioInboxRowAction(label: RokuricsCopy.text("转写中", "Transcribing"), intent: .wait, isEnabled: false)
         }
 
         if item.isTranscribed {
-            return MacAudioInboxRowAction(label: "查看转写", intent: .viewTranscript, isEnabled: true)
+            return MacAudioInboxRowAction(label: RokuricsCopy.text("查看转写", "Transcript"), intent: .viewTranscript, isEnabled: true)
         }
 
         return MacAudioInboxRowAction(
-            label: "转写",
+            label: RokuricsCopy.text("转写", "Transcribe"),
             intent: .startTranscription,
-            isEnabled: item.hasAudio
+            isEnabled: displaySyncState?.canDisplayAsComplete == true
         )
     }
 }
@@ -662,18 +677,18 @@ struct MacAudioInboxNoteRowAction: Equatable {
         }
 
         if isGenerating || item.isNoteGenerating {
-            return MacAudioInboxNoteRowAction(label: "生成中", intent: .wait, isEnabled: false)
+            return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("生成中", "Generating"), intent: .wait, isEnabled: false)
         }
 
         if item.isNoteGenerated {
-            return MacAudioInboxNoteRowAction(label: "查看笔记", intent: .viewNote, isEnabled: true)
+            return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("查看笔记", "View Note"), intent: .viewNote, isEnabled: true)
         }
 
         if item.isNoteFailed {
-            return MacAudioInboxNoteRowAction(label: "重试笔记", intent: .generate, isEnabled: true)
+            return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("重试笔记", "Retry Note"), intent: .generate, isEnabled: true)
         }
 
-        return MacAudioInboxNoteRowAction(label: "生成笔记", intent: .generate, isEnabled: true)
+        return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("生成笔记", "Make Note"), intent: .generate, isEnabled: true)
     }
 
     static func regenerateAction(
@@ -687,7 +702,7 @@ struct MacAudioInboxNoteRowAction: Equatable {
             return nil
         }
 
-        return MacAudioInboxNoteRowAction(label: "重新生成", intent: .generate, isEnabled: true)
+        return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("重新生成", "Regenerate"), intent: .generate, isEnabled: true)
     }
 }
 
@@ -794,21 +809,21 @@ struct MacAudioInboxTrashSheet: View {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("废纸篓")
-                            .font(MacTypography.chineseHeadline(size: 22))
+                        Text(RokuricsCopy.text("废纸篓", "Trash"))
+                            .font(RokuricsCopy.usesChinese ? MacTypography.chineseHeadline(size: 22) : MacTypography.englishHeadline(size: 22))
                             .foregroundStyle(MacTheme.deepText(for: colorScheme))
 
-                        Text("已移入废纸篓的录音")
-                            .font(MacTypography.chineseCaption(size: 12, weight: .medium))
+                        Text(RokuricsCopy.text("已移入废纸篓的录音", "Recordings moved to Trash"))
+                            .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .medium) : MacTypography.englishCaption(size: 12, weight: .medium))
                             .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
                     }
 
                     Spacer()
 
-                    Button("完成") {
+                    Button(RokuricsCopy.text("完成", "Done")) {
                         dismiss()
                     }
-                    .font(MacTypography.chineseCaption(size: 12, weight: .bold))
+                    .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .bold) : MacTypography.englishCaption(size: 12, weight: .bold))
                     .buttonStyle(.plain)
                     .padding(.horizontal, 13)
                     .padding(.vertical, 8)
@@ -816,7 +831,7 @@ struct MacAudioInboxTrashSheet: View {
                 }
 
                 if items.isEmpty {
-                    Text("废纸篓为空")
+                    Text(RokuricsCopy.text("废纸篓为空", "Trash is empty"))
                         .font(RokuricsDetailTypography.metadataValue)
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                         .padding(18)
@@ -875,15 +890,15 @@ private struct MacAudioInboxTrashRow: View {
 
             Spacer(minLength: 12)
 
-            Button("恢复", action: onRestore)
-                .font(MacTypography.chineseCaption(size: 12, weight: .bold))
+            Button(RokuricsCopy.text("恢复", "Restore"), action: onRestore)
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .bold) : MacTypography.englishCaption(size: 12, weight: .bold))
                 .buttonStyle(.plain)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .macGlassCapsule(fillOpacity: 0.30, strokeOpacity: 0.26)
 
-            Button("永久删除", action: onPermanentDelete)
-                .font(MacTypography.chineseCaption(size: 12, weight: .bold))
+            Button(RokuricsCopy.text("永久删除", "Delete"), action: onPermanentDelete)
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .bold) : MacTypography.englishCaption(size: 12, weight: .bold))
                 .foregroundStyle(MacTheme.coral)
                 .buttonStyle(.plain)
                 .padding(.horizontal, 12)
@@ -904,7 +919,7 @@ private struct MacAudioInboxTrashRow: View {
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
@@ -1020,7 +1035,7 @@ struct MacTranscriptDetailView: View {
         case .loaded(let markdown):
             let transcriptResult = loader.loadTranscriptResult(item: item)
             let receiveRecord = metadataLoader.loadReceiveRecord(item: item)
-            RokuricsDocumentPageHeader(title: item.title, subtitle: "转写文本 / transcript", onBack: onBack) {
+            RokuricsDocumentPageHeader(title: item.title, subtitle: RokuricsCopy.text("转写文本 / transcript", "Transcript"), onBack: onBack) {
                 RokuricsInfoButton {
                     isInfoPresented = true
                 }
@@ -1042,7 +1057,7 @@ struct MacTranscriptDetailView: View {
                 }
             }
         default:
-            RokuricsDocumentPageHeader(title: item.title, subtitle: "转写文本 / transcript", onBack: onBack)
+            RokuricsDocumentPageHeader(title: item.title, subtitle: RokuricsCopy.text("转写文本 / transcript", "Transcript"), onBack: onBack)
         }
     }
 
@@ -1051,12 +1066,12 @@ struct MacTranscriptDetailView: View {
         switch loadResult {
         case .loading:
             RokuricsDocumentContentCard {
-                Text("正在读取转写文本")
+                Text(RokuricsCopy.text("正在读取转写文本", "Loading transcript"))
                     .font(RokuricsDetailTypography.metadataValue)
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
             }
         case .loaded(let markdown):
-            RokuricsDocumentContentCard(title: "转写正文") {
+            RokuricsDocumentContentCard(title: RokuricsCopy.text("转写正文", "Transcript")) {
                 RokuricsMarkdownContentView(markdown: RokuricsTranscriptMarkdownCleaner.cleanedBody(from: markdown))
             }
         case .failed(let message):
@@ -1096,7 +1111,7 @@ struct TranscriptMarkdownDocumentLoader {
     func load(item: MacRecordingInboxItem) -> TranscriptMarkdownLoadResult {
         let paths = candidateMarkdownRelativePaths(for: item)
         guard !paths.isEmpty else {
-            return .failed("未找到转写文档")
+            return .failed(RokuricsCopy.text("未找到转写文档", "Transcript not found"))
         }
 
         for path in paths {
@@ -1111,11 +1126,11 @@ struct TranscriptMarkdownDocumentLoader {
             do {
                 return .loaded(try String(contentsOf: url, encoding: .utf8))
             } catch {
-                return .failed("无法读取转写文档")
+                return .failed(RokuricsCopy.text("无法读取转写文档", "Could not read transcript"))
             }
         }
 
-        return .failed("未找到转写文档")
+        return .failed(RokuricsCopy.text("未找到转写文档", "Transcript not found"))
     }
 
     func loadTranscriptResult(item: MacRecordingInboxItem) -> TranscriptionResult? {

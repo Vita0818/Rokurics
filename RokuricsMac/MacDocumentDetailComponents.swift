@@ -193,8 +193,8 @@ struct ClickableFilePathView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help("在 Finder 中打开")
-        .accessibilityLabel("在 Finder 中打开")
+        .help(RokuricsCopy.text("在 Finder 中打开", "Open in Finder"))
+        .accessibilityLabel(RokuricsCopy.text("在 Finder 中打开", "Open in Finder"))
     }
 }
 
@@ -356,7 +356,7 @@ struct RokuricsCircleIconButton: View {
 struct RokuricsBackButton: View {
     static let systemImage = "chevron.left"
     static let visibleTitle = ""
-    static let accessibilityTitle = "返回"
+    static var accessibilityTitle: String { RokuricsCopy.text("返回", "Back") }
 
     var tint: Color? = nil
     let action: () -> Void
@@ -374,7 +374,7 @@ struct RokuricsBackButton: View {
 struct RokuricsInfoButton: View {
     static let systemImage = "info"
     static let visibleTitle = ""
-    static let accessibilityTitle = "信息"
+    static var accessibilityTitle: String { RokuricsCopy.text("信息", "Info") }
 
     let action: () -> Void
 
@@ -448,7 +448,7 @@ extension RokuricsDocumentPageHeader where Trailing == EmptyView {
 }
 
 struct RokuricsDocumentInfoCard: View {
-    var title = "基本信息"
+    var title = RokuricsCopy.text("基本信息", "Info")
     let rows: [RokuricsDocumentMetadataRow]
 
     var body: some View {
@@ -466,7 +466,7 @@ struct RokuricsDocumentInfoCard: View {
 }
 
 struct RokuricsDocumentAdvancedInfoCard: View {
-    var title = "高级信息"
+    var title = RokuricsCopy.text("高级信息", "Details")
     let rows: [RokuricsDocumentMetadataRow]
     @State private var isExpanded = false
     @Environment(\.colorScheme) private var colorScheme
@@ -503,7 +503,7 @@ struct RokuricsDocumentInfoPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !primaryVisibleRows.isEmpty {
-                infoGroup(title: "基础信息", rows: primaryVisibleRows)
+                infoGroup(title: RokuricsCopy.text("基础信息", "Info"), rows: primaryVisibleRows)
             }
 
             if !advancedVisibleRows.isEmpty {
@@ -511,7 +511,7 @@ struct RokuricsDocumentInfoPopover: View {
                     RokuricsDocumentRows(rows: advancedVisibleRows)
                         .padding(.top, 10)
                 } label: {
-                    RokuricsSectionTitle(text: "高级信息")
+                    RokuricsSectionTitle(text: RokuricsCopy.text("高级信息", "Details"))
                 }
                 .disclosureGroupStyle(.automatic)
                 .tint(MacTheme.softText(for: colorScheme))
@@ -670,12 +670,12 @@ enum RokuricsDocumentDisplayRows {
     ) -> [RokuricsDocumentMetadataRow] {
         let metadata = RokuricsTranscriptMarkdownCleaner.metadata(from: markdown)
         return [
-            RokuricsDocumentMetadataRow("录音时间", RokuricsDocumentFormatting.dateTime(item.receivedAt)),
-            RokuricsDocumentMetadataRow("时长", RokuricsDocumentFormatting.duration(item.duration)),
-            RokuricsDocumentMetadataRow("语言", transcriptResult?.language ?? metadata["language"]),
-            RokuricsDocumentMetadataRow("转写 Provider", RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("转写模型", RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
-            RokuricsDocumentMetadataRow("转写时间", RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("录音时间", "Recorded"), RokuricsDocumentFormatting.dateTime(item.receivedAt)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("时长", "Duration"), RokuricsDocumentFormatting.duration(item.duration)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("语言", "Language"), transcriptResult?.language ?? metadata["language"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写 Provider", "Provider"), RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写模型", "Model"), RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写时间", "Transcribed"), RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.transcriptionMode)),
             RokuricsDocumentMetadataRow("chunks", receiveRecord?.transcriptionChunks.map { "\($0.count)" })
         ]
@@ -689,9 +689,9 @@ enum RokuricsDocumentDisplayRows {
     ) -> [RokuricsDocumentMetadataRow] {
         let metadata = RokuricsTranscriptMarkdownCleaner.metadata(from: markdown)
         return [
-            RokuricsDocumentMetadataRow("转写 Provider", RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("转写模型", RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
-            RokuricsDocumentMetadataRow("转写时间", RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写 Provider", "Provider"), RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写模型", "Model"), RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写时间", "Transcribed"), RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.transcriptionMode)),
             RokuricsDocumentMetadataRow("chunks", receiveRecord?.transcriptionChunks.map { "\($0.count)" }),
             RokuricsDocumentMetadataRow("recordingID", item.id, isTechnical: true),
@@ -705,11 +705,11 @@ enum RokuricsDocumentDisplayRows {
         let metadata = RokuricsNoteMarkdownCleaner.metadata(from: markdown)
         return [
             RokuricsDocumentMetadataRow(
-                "生成时间",
+                RokuricsCopy.text("生成时间", "Generated"),
                 RokuricsDocumentFormatting.dateTime(receiveRecord?.noteGeneratedAt) ?? metadata["generatedAt"]
             ),
             RokuricsDocumentMetadataRow("Note Provider", RokuricsProviderDisplayName.note(receiveRecord?.noteProviderID ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("模型", RokuricsModelDisplayName.friendly(receiveRecord?.noteModelName ?? metadata["model"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("模型", "Model"), RokuricsModelDisplayName.friendly(receiveRecord?.noteModelName ?? metadata["model"])),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.noteGenerationMode) ?? metadata["mode"]),
             RokuricsDocumentMetadataRow("sections", receiveRecord?.noteSections.map { "\($0.count)" } ?? metadata["sections"])
         ]
@@ -720,7 +720,7 @@ enum RokuricsDocumentDisplayRows {
         return [
             RokuricsDocumentMetadataRow("recordingID", item.id, isTechnical: true),
             RokuricsDocumentMetadataRow("note", item.noteRelativePath, isTechnical: true),
-            RokuricsDocumentMetadataRow("来源 transcript", metadata["sourceTranscript"] ?? item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("来源 transcript", "Source transcript"), metadata["sourceTranscript"] ?? item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),
             RokuricsDocumentMetadataRow(
                 "note sections",
                 receiveRecord?.noteSections?
@@ -784,7 +784,7 @@ struct RokuricsMarkdownContentView: View {
         let blocks = RokuricsMarkdownRenderer.blocks(from: markdown)
 
         if blocks.isEmpty {
-            Text("暂无内容")
+            Text(RokuricsCopy.text("暂无内容", "No content"))
                 .font(RokuricsDetailTypography.metadataValue)
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
         } else {

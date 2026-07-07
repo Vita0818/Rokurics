@@ -14,9 +14,9 @@ enum WhisperCppRuntimeMode: String, Codable, Equatable {
     var displayText: String {
         switch self {
         case .bundled:
-            return "内置 helper"
+            return RokuricsCopy.text("内置 helper", "Bundled helper")
         case .externalDebugFallback:
-            return "外部调试路径"
+            return RokuricsCopy.text("外部调试路径", "External debug path")
         }
     }
 }
@@ -33,11 +33,17 @@ struct WhisperCppRuntimeResolution: Equatable {
     var statusText: String {
         switch mode {
         case .bundled:
-            return "whisper runtime：内置 helper"
+            return RokuricsCopy.text("whisper runtime：内置 helper", "whisper runtime: bundled helper")
         case .externalDebugFallback:
             return bundledHelperExists
-                ? "whisper runtime：外部调试路径（内置 helper 不可执行）"
-                : "whisper runtime：外部调试路径（未找到内置 helper）"
+                ? RokuricsCopy.text(
+                    "whisper runtime：外部调试路径（内置 helper 不可执行）",
+                    "whisper runtime: external path; bundled helper not executable"
+                )
+                : RokuricsCopy.text(
+                    "whisper runtime：外部调试路径（未找到内置 helper）",
+                    "whisper runtime: external path; bundled helper missing"
+                )
         }
     }
 }

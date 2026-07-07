@@ -13,17 +13,20 @@ struct IPhoneSyncStorageAdapter: SyncStorageAdapter {
     let studyLibraryStore: StudyLibraryStore
     let uploadJobStore: RecordingUploadJobStore
     let fileManager: FileManager
+    let checksumRuntime: CanonicalChecksumRuntime
 
     init(
         audioFileStore: AudioFileStore,
         studyLibraryStore: StudyLibraryStore,
         uploadJobStore: RecordingUploadJobStore? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        checksumRuntime: CanonicalChecksumRuntime = CanonicalChecksumRuntime()
     ) {
         self.audioFileStore = audioFileStore
         self.studyLibraryStore = studyLibraryStore
         self.uploadJobStore = uploadJobStore ?? RecordingUploadJobStore(audioFileStore: audioFileStore)
         self.fileManager = fileManager
+        self.checksumRuntime = checksumRuntime
     }
 
     func buildDirectorySnapshot() throws -> [SyncDirectory] {
@@ -91,11 +94,24 @@ struct IPhoneSyncStorageAdapter: SyncStorageAdapter {
         return tempDirectory.appendingPathComponent("\(object.objectID.safeSyncFileComponent)-\(UUID().uuidString).tmp")
     }
 
-    func verifyChecksum(for object: SyncObject, at url: URL) throws -> Bool {
+    func verifyChecksum(for object: SyncObject, at url: URL) async throws -> Bool {
         guard let expected = object.sha256 else {
             return true
         }
-        return try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: url) == expected
+        let cacheDirectoryURL = try audioFileStore.baseDirectory()
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+            .standardizedFileURL
+        var configuration = CanonicalInventoryRuntimeConfiguration()
+        configuration.persistentChecksumCacheEnabled = false
+        let result = await checksumRuntime.checksum(
+            fileURL: url,
+            logicalToken: object.logicalPathToken,
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL,
+            configuration: configuration
+        )
+        return result.sha256 == expected
     }
 
     func atomicApply(tempURL: URL, for object: SyncObject) throws {

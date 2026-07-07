@@ -14,7 +14,7 @@ import AppKit
 #endif
 
 enum StudyLibraryHeaderModel {
-    static let title = "学习库"
+    static var title: String { RokuricsCopy.text("学习库", "Library") }
     static let showsLeadingIcon = false
     static let titleToken: RokuricsSharedTypographyToken = .pageTitle
 }
@@ -106,10 +106,10 @@ struct StudyLibraryBrowserView<
     let folders: [StudyFolderMetadata]
     @Binding var browsePath: StudyBrowsePath
     var layout: StudyLibraryBrowserLayout
-    var emptyLibraryTitle = "暂无学习内容"
+    var emptyLibraryTitle = RokuricsCopy.text("暂无学习内容", "No study items")
     var emptyLibraryMessage: String?
-    var emptyFolderTitle = "暂无学习内容"
-    var emptyFolderMessage = "这个文件夹里暂时没有学习内容"
+    var emptyFolderTitle = RokuricsCopy.text("暂无学习内容", "No study items")
+    var emptyFolderMessage = RokuricsCopy.text("这个文件夹里暂时没有学习内容", "This folder is empty for now.")
     let headerLeading: () -> HeaderLeading
     let headerTrailing: () -> HeaderTrailing
     let navigationLeading: () -> NavigationLeading
@@ -123,10 +123,10 @@ struct StudyLibraryBrowserView<
         folders: [StudyFolderMetadata],
         browsePath: Binding<StudyBrowsePath>,
         layout: StudyLibraryBrowserLayout,
-        emptyLibraryTitle: String = "暂无学习内容",
+        emptyLibraryTitle: String = RokuricsCopy.text("暂无学习内容", "No study items"),
         emptyLibraryMessage: String?,
-        emptyFolderTitle: String = "暂无学习内容",
-        emptyFolderMessage: String = "这个文件夹里暂时没有学习内容",
+        emptyFolderTitle: String = RokuricsCopy.text("暂无学习内容", "No study items"),
+        emptyFolderMessage: String = RokuricsCopy.text("这个文件夹里暂时没有学习内容", "This folder is empty for now."),
         @ViewBuilder headerLeading: @escaping () -> HeaderLeading,
         @ViewBuilder headerTrailing: @escaping () -> HeaderTrailing,
         @ViewBuilder navigationLeading: @escaping () -> NavigationLeading,
@@ -437,7 +437,7 @@ struct StudyFolderRow: View {
                         .foregroundStyle(RokuricsSharedStyle.deepText(for: colorScheme))
                         .lineLimit(1)
 
-                    Text("\(folder.itemCount) 项")
+                    Text(RokuricsCopy.itemCount(folder.itemCount))
                         .font(secondaryFont)
                         .foregroundStyle(RokuricsSharedStyle.softText(for: colorScheme))
                 }
@@ -476,7 +476,7 @@ struct StudyStatusCapsuleModel: Identifiable {
     var tint: Color?
 
     static var standaloneNote: StudyStatusCapsuleModel {
-        StudyStatusCapsuleModel(text: "笔记", systemImage: "doc.text", tint: RokuricsSharedStyle.mint)
+        StudyStatusCapsuleModel(text: RokuricsCopy.text("笔记", "Note"), systemImage: "doc.text", tint: RokuricsSharedStyle.mint)
     }
 }
 
@@ -663,9 +663,9 @@ private enum StudyFolderIconProvider {
 }
 
 enum StudyFolderMenuModel {
-    static let renameTitle = "重命名"
-    static let moveToTrashTitle = "移入废纸篓"
-    static let primaryActionTitles = [renameTitle, moveToTrashTitle]
+    static var renameTitle: String { RokuricsCopy.text("重命名", "Rename") }
+    static var moveToTrashTitle: String { RokuricsCopy.text("移入废纸篓", "Move to Trash") }
+    static var primaryActionTitles: [String] { [renameTitle, moveToTrashTitle] }
     static let colorColumnsPerRow = 6
     static let colorTokens: [StudyFolderColorToken] = [
         .default,
@@ -691,29 +691,29 @@ enum StudyFolderMenuModel {
     static func title(for colorToken: StudyFolderColorToken) -> String {
         switch colorToken {
         case .default:
-            return "默认"
+            return RokuricsCopy.text("默认", "Default")
         case .red:
-            return "红"
+            return RokuricsCopy.text("红", "Red")
         case .orange:
-            return "橙"
+            return RokuricsCopy.text("橙", "Orange")
         case .yellow:
-            return "黄"
+            return RokuricsCopy.text("黄", "Yellow")
         case .green:
-            return "绿"
+            return RokuricsCopy.text("绿", "Green")
         case .mint:
-            return "薄荷"
+            return RokuricsCopy.text("薄荷", "Mint")
         case .teal:
-            return "青绿"
+            return RokuricsCopy.text("青绿", "Teal")
         case .cyan:
-            return "青"
+            return RokuricsCopy.text("青", "Cyan")
         case .blue:
-            return "蓝"
+            return RokuricsCopy.text("蓝", "Blue")
         case .indigo:
-            return "靛"
+            return RokuricsCopy.text("靛", "Indigo")
         case .purple:
-            return "紫"
+            return RokuricsCopy.text("紫", "Purple")
         case .gray:
-            return "灰"
+            return RokuricsCopy.text("灰", "Gray")
         }
     }
 }
@@ -1199,7 +1199,7 @@ struct StudyFolderTileShell<TitleContent: View>: View {
 
             titleContent
 
-            Text("\(folder.itemCount) 项")
+            Text(RokuricsCopy.itemCount(folder.itemCount))
                 .font(countFont)
                 .foregroundStyle(RokuricsSharedStyle.softText(for: colorScheme))
         }
@@ -1333,7 +1333,7 @@ struct StudyFolderTile: View {
             .presentationDragIndicator(.hidden)
             .presentationBackground(.clear)
         }
-        .accessibilityLabel("打开\(folder.title)")
+        .accessibilityLabel(RokuricsCopy.openLabel(folder.title))
         .accessibilityAddTraits(.isButton)
         #else
         Button(action: onOpen) {
@@ -1347,7 +1347,7 @@ struct StudyFolderTile: View {
         #if os(macOS)
         .buttonStyle(.plain)
         #endif
-        .accessibilityLabel("打开\(folder.title)")
+        .accessibilityLabel(RokuricsCopy.openLabel(folder.title))
         #endif
     }
 
@@ -1620,7 +1620,7 @@ struct StudyLibraryTrashButtonGroup: View {
         RokuricsIconButtonGroup {
             RokuricsIconButtonGroupItem(
                 systemName: "trash",
-                accessibilityLabel: "打开废纸篓",
+                accessibilityLabel: RokuricsCopy.text("打开废纸篓", "Open Trash"),
                 tint: RokuricsSharedStyle.softText(for: colorScheme),
                 isEnabled: true,
                 action: action
@@ -1640,14 +1640,14 @@ enum StudyRecordingMetadataFormatter {
 
     private static let cardDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
 
     private static let detailDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
@@ -1682,26 +1682,26 @@ enum StudyRecordingStatusPresentation {
     static func transcriptionText(_ status: String?) -> String {
         switch status {
         case "transcribed":
-            return "已转写"
+            return RokuricsCopy.text("已转写", "Transcribed")
         case "transcribing", "queued":
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         case "failed":
-            return "转写失败"
+            return RokuricsCopy.text("转写失败", "Transcript failed")
         default:
-            return "未转写"
+            return RokuricsCopy.text("未转写", "No transcript")
         }
     }
 
     static func noteText(_ status: String?) -> String {
         switch status {
         case "generated":
-            return "有总结"
+            return RokuricsCopy.text("有总结", "Summary ready")
         case "generating":
-            return "总结中"
+            return RokuricsCopy.text("总结中", "Summarizing")
         case "failed":
-            return "总结失败"
+            return RokuricsCopy.text("总结失败", "Summary failed")
         default:
-            return "无总结"
+            return RokuricsCopy.text("无总结", "No summary")
         }
     }
 
@@ -1728,7 +1728,7 @@ enum StudyRecordingStatusPresentation {
             id: "detail",
             systemImage: "chevron.right",
             tint: RokuricsSharedStyle.aqua,
-            accessibilityLabel: "打开详情"
+            accessibilityLabel: RokuricsCopy.text("打开详情", "Open Details")
         )
     }
 }
@@ -1756,7 +1756,7 @@ enum StudyRecordingActionPolicy {
             id: "play",
             systemImage: "play.fill",
             tint: RokuricsSharedStyle.leaf,
-            accessibilityLabel: "播放录音",
+            accessibilityLabel: RokuricsCopy.text("播放录音", "Play Recording"),
             isEnabled: isEnabled,
             action: action
         )
@@ -1801,7 +1801,7 @@ enum StudyRecordingActionPolicy {
             id: "chat",
             systemImage: "bubble.left.and.bubble.right",
             tint: RokuricsSharedStyle.aqua,
-            accessibilityLabel: "导入 AI 对话",
+            accessibilityLabel: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
             isEnabled: true,
             action: action
         )
@@ -1812,7 +1812,7 @@ enum StudyRecordingActionPolicy {
             id: "detail",
             systemImage: "chevron.right",
             tint: RokuricsSharedStyle.aqua,
-            accessibilityLabel: "打开详情",
+            accessibilityLabel: RokuricsCopy.text("打开详情", "Open Details"),
             isEnabled: true,
             action: action
         )
@@ -1820,28 +1820,28 @@ enum StudyRecordingActionPolicy {
 
     static func transcriptionActionLabel(for item: StudyItemMetadata, isProcessing: Bool = false) -> String {
         if isProcessing || item.transcriptionStatus == "transcribing" || item.transcriptionStatus == "queued" {
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         }
         if item.hasTranscript {
-            return "重新转写"
+            return RokuricsCopy.text("重新转写", "Transcribe Again")
         }
         if item.transcriptionStatus == "failed" {
-            return "重试转写"
+            return RokuricsCopy.text("重试转写", "Retry Transcript")
         }
-        return "转写"
+        return RokuricsCopy.text("转写", "Transcribe")
     }
 
     static func noteActionLabel(for item: StudyItemMetadata, isProcessing: Bool = false) -> String {
         if isProcessing || item.noteStatus == "generating" {
-            return "总结中"
+            return RokuricsCopy.text("总结中", "Summarizing")
         }
         if item.hasNote {
-            return "重新总结"
+            return RokuricsCopy.text("重新总结", "Summarize Again")
         }
         if item.noteStatus == "failed" {
-            return "重试总结"
+            return RokuricsCopy.text("重试总结", "Retry Summary")
         }
-        return "AI 总结"
+        return RokuricsCopy.text("AI 总结", "AI Summary")
     }
 }
 
@@ -1928,7 +1928,7 @@ struct StudyRecordingCardActionArea: View {
 
     private var statusColor: Color {
         switch presentation?.statusText {
-        case "上传失败", "接收失败", "传输失败":
+        case "上传失败", "接收失败", "传输失败", "Upload failed", "Receive failed", "Transfer failed":
             return RokuricsSharedStyle.coral
         default:
             return RokuricsSharedStyle.softText(for: colorScheme)
@@ -1975,25 +1975,25 @@ struct StudyRecordingTransferProgressView: View {
         }
         switch transfer.state {
         case .pending:
-            return "等待传输"
+            return RokuricsCopy.text("等待传输", "Waiting")
         case .transferring:
             return "\(Int(clampedProgress * 100))%"
         case .paused:
-            return "等待重试"
+            return RokuricsCopy.text("等待重试", "Retry pending")
         case .pausedDisconnected:
-            return "连接中断"
+            return RokuricsCopy.text("连接中断", "Disconnected")
         case .retryPending:
-            return "等待重试"
+            return RokuricsCopy.text("等待重试", "Retry pending")
         case .resuming:
-            return "续传中"
+            return RokuricsCopy.text("续传中", "Resuming")
         case .verifying:
-            return "校验中"
+            return RokuricsCopy.text("校验中", "Verifying")
         case .complete:
-            return "已完成"
+            return RokuricsCopy.text("已完成", "Done")
         case .failed:
-            return "传输失败"
+            return RokuricsCopy.text("传输失败", "Transfer failed")
         case .conflict:
-            return "传输冲突"
+            return RokuricsCopy.text("传输冲突", "Conflict")
         }
     }
 
@@ -2236,10 +2236,10 @@ struct StudyTrashSheet<Item: Identifiable, RowContent: View>: View {
                 }
                 .padding(22)
             }
-            .navigationTitle("废纸篓")
+            .navigationTitle(RokuricsCopy.text("废纸篓", "Trash"))
             .toolbar {
                 ToolbarItem(placement: doneToolbarPlacement) {
-                    Button("完成") {
+                    Button(RokuricsCopy.text("完成", "Done")) {
                         dismiss()
                     }
                 }
@@ -2294,14 +2294,14 @@ struct StudyRecordingTrashRow: View {
 
             Spacer(minLength: 10)
 
-            Button("恢复", action: onRestore)
+            Button(RokuricsCopy.text("恢复", "Restore"), action: onRestore)
                 .font(buttonFont)
                 .foregroundStyle(RokuricsSharedStyle.deepText(for: colorScheme))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .rokuricsSharedGlassCapsule(fillOpacity: 0.28, strokeOpacity: 0.28)
 
-            Button("永久删除", action: onPermanentDelete)
+            Button(RokuricsCopy.text("永久删除", "Delete"), action: onPermanentDelete)
                 .font(buttonFont)
                 .foregroundStyle(RokuricsSharedStyle.coral)
                 .padding(.horizontal, 12)
@@ -2500,7 +2500,7 @@ struct StudyDetailActionArea: View {
 
     private var statusColor: Color {
         switch actionAreaPresentation?.statusText {
-        case "上传失败", "接收失败", "传输失败":
+        case "上传失败", "接收失败", "传输失败", "Upload failed", "Receive failed", "Transfer failed":
             return RokuricsSharedStyle.coral
         default:
             return RokuricsSharedStyle.softText(for: colorScheme)
@@ -2598,7 +2598,7 @@ enum StudyDetailActionPolicy {
         StudyDetailHeaderActionModel(
             id: "chat",
             systemImage: StudyRecordingDetailActionSymbol.chat,
-            accessibilityLabel: "导入 AI 对话",
+            accessibilityLabel: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
             tint: RokuricsSharedStyle.aqua,
             action: action
         )
@@ -2608,7 +2608,7 @@ enum StudyDetailActionPolicy {
         StudyDetailHeaderActionModel(
             id: "rename",
             systemImage: StudyRecordingDetailActionSymbol.rename,
-            accessibilityLabel: "重命名",
+            accessibilityLabel: RokuricsCopy.text("重命名", "Rename"),
             tint: tint,
             action: action
         )
@@ -2621,7 +2621,7 @@ enum StudyDetailActionPolicy {
         StudyDetailHeaderActionModel(
             id: "trash",
             systemImage: StudyRecordingDetailActionSymbol.trash,
-            accessibilityLabel: "移入废纸篓",
+            accessibilityLabel: RokuricsCopy.text("移入废纸篓", "Move to Trash"),
             tint: RokuricsSharedStyle.coral,
             isEnabled: isEnabled,
             role: .destructive,
@@ -2665,7 +2665,7 @@ enum StudyDetailActionPolicy {
     ) -> StudyDetailActionModel {
         StudyDetailActionModel(
             id: "viewTranscript",
-            title: isEnabled ? "查看转写" : "未转写",
+            title: isEnabled ? RokuricsCopy.text("查看转写", "View Transcript") : RokuricsCopy.text("未转写", "No Transcript"),
             systemImage: StudyRecordingDetailActionSymbol.transcript,
             isEnabled: isEnabled,
             action: action
@@ -2693,7 +2693,7 @@ enum StudyDetailActionPolicy {
     ) -> StudyDetailActionModel {
         StudyDetailActionModel(
             id: "viewNote",
-            title: isEnabled ? "查看总结" : "无总结",
+            title: isEnabled ? RokuricsCopy.text("查看总结", "View Summary") : RokuricsCopy.text("无总结", "No Summary"),
             systemImage: StudyRecordingDetailActionSymbol.note,
             isEnabled: isEnabled,
             action: action
@@ -2703,7 +2703,7 @@ enum StudyDetailActionPolicy {
     static func renameDetailAction(action: @escaping () -> Void) -> StudyDetailActionModel {
         StudyDetailActionModel(
             id: "rename",
-            title: "重命名",
+            title: RokuricsCopy.text("重命名", "Rename"),
             systemImage: StudyRecordingDetailActionSymbol.rename,
             action: action
         )
@@ -2713,7 +2713,7 @@ enum StudyDetailActionPolicy {
 enum StudyRecordingFileStatusRows {
     static func rows(for item: StudyItemMetadata) -> [RokuricsDocumentMetadataRow] {
         [
-            RokuricsDocumentMetadataRow("audio", item.audioRelativePath == nil ? "缺失" : "可用"),
+            RokuricsDocumentMetadataRow("audio", item.audioRelativePath == nil ? RokuricsCopy.text("缺失", "Missing") : RokuricsCopy.text("可用", "Available")),
             RokuricsDocumentMetadataRow("transcript", StudyRecordingStatusPresentation.transcriptionText(item.transcriptionStatus)),
             RokuricsDocumentMetadataRow("note", StudyRecordingStatusPresentation.noteText(item.noteStatus)),
             RokuricsDocumentMetadataRow("recordingID", item.recordingID, isTechnical: true),
@@ -2734,12 +2734,12 @@ enum StudyReadingMetadataRows {
     ) -> [RokuricsDocumentMetadataRow] {
         let metadata = RokuricsTranscriptMarkdownCleaner.metadata(from: markdown)
         return [
-            RokuricsDocumentMetadataRow("录音时间", RokuricsDocumentFormatting.dateTime(item.createdAt)),
-            RokuricsDocumentMetadataRow("时长", RokuricsDocumentFormatting.duration(item.durationForDisplay)),
-            RokuricsDocumentMetadataRow("语言", transcriptResult?.language ?? metadata["language"]),
-            RokuricsDocumentMetadataRow("转写 Provider", RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("转写模型", RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
-            RokuricsDocumentMetadataRow("转写时间", RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("录音时间", "Recorded"), RokuricsDocumentFormatting.dateTime(item.createdAt)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("时长", "Duration"), RokuricsDocumentFormatting.duration(item.durationForDisplay)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("语言", "Language"), transcriptResult?.language ?? metadata["language"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写 Provider", "Transcript Provider"), RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写模型", "Transcript Model"), RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写时间", "Transcribed"), RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.transcriptionMode)),
             RokuricsDocumentMetadataRow("chunks", receiveRecord?.transcriptionChunks.map { "\($0.count)" })
         ]
@@ -2753,9 +2753,9 @@ enum StudyReadingMetadataRows {
     ) -> [RokuricsDocumentMetadataRow] {
         let metadata = RokuricsTranscriptMarkdownCleaner.metadata(from: markdown)
         return [
-            RokuricsDocumentMetadataRow("转写 Provider", RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("转写模型", RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
-            RokuricsDocumentMetadataRow("转写时间", RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写 Provider", "Transcript Provider"), RokuricsProviderDisplayName.transcription(receiveRecord?.transcriptionProviderID ?? transcriptResult?.providerID ?? transcriptResult?.providerName ?? metadata["provider"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写模型", "Transcript Model"), RokuricsModelDisplayName.friendly(receiveRecord?.transcriptionModelName ?? transcriptResult?.modelName)),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("转写时间", "Transcribed"), RokuricsDocumentFormatting.dateTime(transcriptResult?.completedAt ?? receiveRecord?.transcriptionCompletedAt) ?? metadata["transcribedAt"]),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.transcriptionMode)),
             RokuricsDocumentMetadataRow("chunks", receiveRecord?.transcriptionChunks.map { "\($0.count)" }),
             RokuricsDocumentMetadataRow("recordingID", item.recordingID, isTechnical: true),
@@ -2772,9 +2772,9 @@ enum StudyReadingMetadataRows {
     ) -> [RokuricsDocumentMetadataRow] {
         let metadata = RokuricsNoteMarkdownCleaner.metadata(from: markdown)
         return [
-            RokuricsDocumentMetadataRow("生成时间", RokuricsDocumentFormatting.dateTime(receiveRecord?.noteGeneratedAt) ?? metadata["generatedAt"]),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("生成时间", "Generated"), RokuricsDocumentFormatting.dateTime(receiveRecord?.noteGeneratedAt) ?? metadata["generatedAt"]),
             RokuricsDocumentMetadataRow("Note Provider", RokuricsProviderDisplayName.note(receiveRecord?.noteProviderID ?? metadata["provider"])),
-            RokuricsDocumentMetadataRow("模型", RokuricsModelDisplayName.friendly(receiveRecord?.noteModelName ?? metadata["model"])),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("模型", "Model"), RokuricsModelDisplayName.friendly(receiveRecord?.noteModelName ?? metadata["model"])),
             RokuricsDocumentMetadataRow("mode", RokuricsDocumentFormatting.mode(receiveRecord?.noteGenerationMode) ?? metadata["mode"]),
             RokuricsDocumentMetadataRow("sections", receiveRecord?.noteSections.map { "\($0.count)" } ?? metadata["sections"])
         ]
@@ -2793,7 +2793,7 @@ enum StudyReadingMetadataRows {
         return [
             RokuricsDocumentMetadataRow("recordingID", item.recordingID, isTechnical: true),
             RokuricsDocumentMetadataRow("note", item.noteRelativePath, isTechnical: true),
-            RokuricsDocumentMetadataRow("来源 transcript", metadata["sourceTranscript"] ?? item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),
+            RokuricsDocumentMetadataRow(RokuricsCopy.text("来源 transcript", "Source transcript"), metadata["sourceTranscript"] ?? item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),
             RokuricsDocumentMetadataRow("note sections", sectionPaths, isTechnical: true)
         ]
     }
@@ -2877,7 +2877,7 @@ struct StudyFilingPicker: View {
                 }
 
                 HStack(spacing: 6) {
-                    TextField("新建", text: $newValueDraft)
+                    TextField(RokuricsCopy.text("新建", "New"), text: $newValueDraft)
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
                         .submitLabel(.done)
@@ -2890,7 +2890,7 @@ struct StudyFilingPicker: View {
 
                     RokuricsGlassIconButton(
                         systemImage: "plus",
-                        accessibilityTitle: "新建\(selectionLevel.title)",
+                        accessibilityTitle: RokuricsCopy.newLabel(selectionLevel.title),
                         tint: RokuricsSharedStyle.aqua,
                         isEnabled: !newValueDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                         action: createCurrentValue
@@ -3013,7 +3013,7 @@ private struct StudyFilingLevelButton: View {
                     .font(labelFont)
                     .foregroundStyle(RokuricsSharedStyle.tertiaryText(for: colorScheme))
 
-                Text(value.isEmpty ? "未选择" : value)
+                Text(value.isEmpty ? RokuricsCopy.text("未选择", "Not set") : value)
                     .font(valueFont)
                     .foregroundStyle(isEnabled ? RokuricsSharedStyle.deepText(for: colorScheme) : RokuricsSharedStyle.tertiaryText(for: colorScheme))
                     .lineLimit(1)
@@ -3310,7 +3310,7 @@ struct StudyLibraryDetailContent<
 
                 filingPanel
 
-                MetadataInfoPanel(title: "文件状态", rows: fileStatusRows)
+                MetadataInfoPanel(title: RokuricsCopy.text("文件状态", "File Status"), rows: fileStatusRows)
 
                 summary()
             }
@@ -3610,7 +3610,7 @@ struct StudyReadingLoadingCard: View {
 }
 
 struct MetadataInfoPanel: View {
-    var title = "文件状态"
+    var title = RokuricsCopy.text("文件状态", "File Status")
     let rows: [RokuricsDocumentMetadataRow]
     @State private var isExpanded = false
     @Environment(\.colorScheme) private var colorScheme
@@ -3684,7 +3684,7 @@ struct StudyNoteSummaryPreviewCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        RokuricsDocumentContentCard(title: "AI 摘要") {
+        RokuricsDocumentContentCard(title: RokuricsCopy.text("AI 摘要", "AI Summary")) {
             VStack(alignment: .leading, spacing: 12) {
                 if let preview, preview.isVisible {
                     if !preview.shortSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -3710,7 +3710,7 @@ struct StudyNoteSummaryPreviewCard: View {
                         }
                     }
                 } else {
-                    Text("暂无摘要")
+                    Text(RokuricsCopy.text("暂无摘要", "No summary yet"))
                         .font(secondaryFont)
                         .foregroundStyle(RokuricsSharedStyle.softText(for: colorScheme))
                 }

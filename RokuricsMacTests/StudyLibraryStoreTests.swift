@@ -249,10 +249,10 @@ struct StudyLibraryStoreTests {
         #expect(metadata.tags.isEmpty)
     }
 
-    @Test func savedTagsCanBeReloadedFromStudyMetadataStore() throws {
+    @Test func savedTagsCanBeReloadedFromStudyMetadataStore() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "study-save-01", title: "保存标签", store: fileStore)
+        try await saveInboxRecording(id: "study-save-01", title: "保存标签", store: fileStore)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
 
         try store.updateTags(for: "study-save-01", tags: [
@@ -499,10 +499,10 @@ struct StudyLibraryStoreTests {
         #expect(path.parent.components == ["课堂", "线性代数"])
     }
 
-    @Test func finderBrowserPathUpdatesAfterFilingChanges() throws {
+    @Test func finderBrowserPathUpdatesAfterFilingChanges() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "browser-update-01", title: "路径更新", store: fileStore)
+        try await saveInboxRecording(id: "browser-update-01", title: "路径更新", store: fileStore)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
 
         #expect(StudyLibraryBrowser.content(items: store.allStudyItems, path: StudyBrowsePath()).folders.map(\.title) == [StudyHierarchyRule.uncategorizedValue])
@@ -605,10 +605,10 @@ struct StudyLibraryStoreTests {
         #expect(content.folders.map(\.itemCount) == [0, 1])
     }
 
-    @Test func moveItemUpdatesItemAndFolderReferencesWithoutMovingResources() throws {
+    @Test func moveItemUpdatesItemAndFolderReferencesWithoutMovingResources() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "move-item-01", title: "移动对象", store: fileStore)
+        try await saveInboxRecording(id: "move-item-01", title: "移动对象", store: fileStore)
         try fileStore.updateTranscriptionStatus(
             recordingID: "move-item-01",
             status: "transcribed",
@@ -651,11 +651,11 @@ struct StudyLibraryStoreTests {
         #expect(moved.noteRelativePath == before.noteRelativePath)
     }
 
-    @Test func renamingFolderKeepsFolderIDAndUpdatesItemFiling() throws {
+    @Test func renamingFolderKeepsFolderIDAndUpdatesItemFiling() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
         let filing = StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
-        try saveInboxRecording(id: "folder-rename-01", title: "矩阵乘法", store: fileStore, studyFiling: filing)
+        try await saveInboxRecording(id: "folder-rename-01", title: "矩阵乘法", store: fileStore, studyFiling: filing)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let folderID = StudyFolderMetadata.folderID(for: .topic, path: filing)
         let browsePath = StudyBrowsePath(components: ["课堂", "线性代数", "矩阵", "矩阵乘法"])
@@ -669,10 +669,10 @@ struct StudyLibraryStoreTests {
         #expect(item.folderIDs.contains(folderID))
     }
 
-    @Test func renamingStudyItemKeepsStableIDsAndResourcePaths() throws {
+    @Test func renamingStudyItemKeepsStableIDsAndResourcePaths() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "item-rename-01", title: "旧标题", store: fileStore)
+        try await saveInboxRecording(id: "item-rename-01", title: "旧标题", store: fileStore)
         try fileStore.updateTranscriptionStatus(
             recordingID: "item-rename-01",
             status: "transcribed",
@@ -760,11 +760,11 @@ struct StudyLibraryStoreTests {
         #expect(!content.folders.contains { $0.folderID == folder.folderID })
     }
 
-    @Test func movingNonEmptyFolderToTrashFailsWithoutDeletingItems() throws {
+    @Test func movingNonEmptyFolderToTrashFailsWithoutDeletingItems() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
         let filing = StudyFilingPath(type: "课堂")
-        try saveInboxRecording(id: "folder-trash-01", title: "课堂录音", store: fileStore, studyFiling: filing)
+        try await saveInboxRecording(id: "folder-trash-01", title: "课堂录音", store: fileStore, studyFiling: filing)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let folder = try store.createFolder(named: "课堂", at: StudyBrowsePath())
 
@@ -866,10 +866,10 @@ struct StudyLibraryStoreTests {
         #expect(Set(candidates.topics) == Set(["格林公式", "矩阵乘法"]))
     }
 
-    @Test func customNamespacesCanBeSaved() throws {
+    @Test func customNamespacesCanBeSaved() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "custom-tag-01", title: "自定义标签", store: fileStore)
+        try await saveInboxRecording(id: "custom-tag-01", title: "自定义标签", store: fileStore)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
 
         try store.updateTags(for: "custom-tag-01", tags: [
@@ -882,10 +882,10 @@ struct StudyLibraryStoreTests {
         #expect(item.tags.contains(StudyTag(namespace: "status", value: "待复习")))
     }
 
-    @Test func studyLibraryStoreDoesNotMoveTranscriptOrNoteFiles() throws {
+    @Test func studyLibraryStoreDoesNotMoveTranscriptOrNoteFiles() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "no-move-01", title: "不移动文件", store: fileStore)
+        try await saveInboxRecording(id: "no-move-01", title: "不移动文件", store: fileStore)
         let transcriptURL = try writeTranscriptFile(rootURL: rootURL, recordingID: "no-move-01")
         let noteURL = try writeNoteFile(rootURL: rootURL, recordingID: "no-move-01")
         try fileStore.updateTranscriptionStatus(
@@ -919,10 +919,10 @@ struct StudyLibraryStoreTests {
         #expect(try String(contentsOf: noteURL, encoding: .utf8) == "# note")
     }
 
-    @Test func receiveJSONWithoutNotePathStillAppearsInStudyLibrary() throws {
+    @Test func receiveJSONWithoutNotePathStillAppearsInStudyLibrary() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "missing-note-path-01", title: "无笔记路径", store: fileStore)
+        try await saveInboxRecording(id: "missing-note-path-01", title: "无笔记路径", store: fileStore)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let item = try #require(store.item(recordingID: "missing-note-path-01"))
 
@@ -931,10 +931,10 @@ struct StudyLibraryStoreTests {
         #expect(item.noteRelativePath == nil)
     }
 
-    @Test func generatedNoteRelativePathIsVisibleAfterRefresh() throws {
+    @Test func generatedNoteRelativePathIsVisibleAfterRefresh() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "note-path-01", title: "有笔记路径", store: fileStore)
+        try await saveInboxRecording(id: "note-path-01", title: "有笔记路径", store: fileStore)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         try fileStore.updateNoteGenerationStatus(
             recordingID: "note-path-01",
@@ -954,12 +954,12 @@ struct StudyLibraryStoreTests {
         #expect(item.noteRelativePath == "notes/1970-01-01/note-path-01/note.md")
     }
 
-    @Test func incomingMetadataStudyFilingIsWrittenToReceiveJSONAndStudyLibrary() throws {
+    @Test func incomingMetadataStudyFilingIsWrittenToReceiveJSONAndStudyLibrary() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
         let filing = StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵", topic: "矩阵乘法")
 
-        try saveInboxRecording(id: "filing-receive-01", title: "归档上传", store: fileStore, studyFiling: filing)
+        try await saveInboxRecording(id: "filing-receive-01", title: "归档上传", store: fileStore, studyFiling: filing)
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: "filing-receive-01")
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let item = try #require(store.item(recordingID: "filing-receive-01"))
@@ -1040,10 +1040,10 @@ struct StudyLibraryStoreTests {
         #expect(decoded.studyFiling == nil)
     }
 
-    @Test func updatingStudyTagsDoesNotChangeReceiveStatuses() throws {
+    @Test func updatingStudyTagsDoesNotChangeReceiveStatuses() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(id: "preserve-receive-01", title: "保持状态", store: fileStore)
+        try await saveInboxRecording(id: "preserve-receive-01", title: "保持状态", store: fileStore)
         try fileStore.updateTranscriptionStatus(
             recordingID: "preserve-receive-01",
             status: "transcribed",
@@ -1190,7 +1190,7 @@ struct StudyLibraryStoreTests {
         #expect(reason == "signature_mismatch")
     }
 
-    @Test func macAppliesIPhoneMetadataOnlyRecordingWithoutPretendingAudioExists() throws {
+    @Test func macAppliesIPhoneMetadataOnlyRecordingWithoutPretendingAudioExists() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
@@ -1212,7 +1212,7 @@ struct StudyLibraryStoreTests {
             folders: []
         )
 
-        let result = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let result = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
         let synced = try #require(store.item(recordingID: "iphone-new-metadata"))
 
         #expect(result.appliedItemCount == 1)
@@ -1221,10 +1221,10 @@ struct StudyLibraryStoreTests {
         #expect(!synced.asInboxItem().hasAudio)
     }
 
-    @Test func macSyncLastWriteWinsForFilingAndKeepsFolderIndexSafe() throws {
+    @Test func macSyncLastWriteWinsForFilingAndKeepsFolderIndexSafe() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        try saveInboxRecording(
+        try await saveInboxRecording(
             id: "sync-filing-lww",
             title: "旧归档",
             store: fileStore,
@@ -1251,7 +1251,7 @@ struct StudyLibraryStoreTests {
             folders: [folder]
         )
 
-        _ = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        _ = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
         let synced = try #require(store.item(recordingID: "sync-filing-lww"))
         let syncedFolder = try #require(store.folder(folderID: remote.folderIDs[0]))
 
@@ -1276,10 +1276,10 @@ struct StudyLibraryStoreTests {
         #expect(decoded.hasValidChecksum)
     }
 
-    @Test func deleteMetadataOnlyTombstoneDoesNotDeleteMacAudioFile() throws {
+    @Test func deleteMetadataOnlyTombstoneDoesNotDeleteMacAudioFile() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
-        let recordingDirectoryURL = try saveInboxRecording(id: "delete-metadata-only", title: "只删 metadata", store: fileStore)
+        let recordingDirectoryURL = try await saveInboxRecording(id: "delete-metadata-only", title: "只删 metadata", store: fileStore)
         let audioURL = recordingDirectoryURL.appendingPathComponent("audio.m4a", isDirectory: false)
         let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let item = try #require(store.item(recordingID: "delete-metadata-only"))
@@ -1299,12 +1299,133 @@ struct StudyLibraryStoreTests {
             tombstones: [tombstone]
         )
 
-        let result = try store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let result = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
         let synced = try #require(store.item(recordingID: "delete-metadata-only"))
 
         #expect(result.tombstoneCount == 1)
         #expect(synced.isTrashed)
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    @Test func macApplyManifestRecordingsWritesCanonicalMetadataOnlyLedgerWhenExplicitlyConfigured() async throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: rootURL)
+        let store = StudyLibraryStore(
+            rootURL: rootURL,
+            recordingFileStore: fileStore,
+            listenForInboxChanges: false,
+            canonicalExistenceApplyRuntimeConfiguration: CanonicalExistenceApplyRuntimeConfiguration(mode: .testRootApply),
+            canonicalRecordingExistenceApplyPort: port
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_400),
+            items: [],
+            folders: [],
+            recordings: [Self.metadataOnlyManifestRecording()]
+        )
+
+        let result = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let record = try port.readRecord(objectID: "manifest-recording-01")
+        let inboxAudioURL = rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("manifest-recording-01", isDirectory: true)
+            .appendingPathComponent("audio.m4a", isDirectory: false)
+
+        #expect(result.failedChanges == 0)
+        #expect(record?.objectID == "manifest-recording-01")
+        #expect(record?.audioAvailable == false)
+        #expect(record?.audioHash == nil)
+        #expect(record?.audioByteSize == nil)
+        #expect(FileManager.default.fileExists(atPath: inboxAudioURL.path) == false)
+    }
+
+    @Test func macApplyNoAudioModeWritesMetadataOnlyLedgerWithoutAudio() async throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: rootURL)
+        let configuration = CanonicalKernelSwitchConfiguration(
+            mode: .canonicalApplyNoAudio,
+            policy: .debugInternal()
+        ).resolve().effectiveConfiguration.existenceApplyRuntimeConfiguration
+        let store = StudyLibraryStore(
+            rootURL: rootURL,
+            recordingFileStore: fileStore,
+            listenForInboxChanges: false,
+            canonicalExistenceApplyRuntimeConfiguration: configuration,
+            canonicalRecordingExistenceApplyPort: port
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_402),
+            items: [],
+            folders: [],
+            recordings: [Self.metadataOnlyManifestRecording()]
+        )
+
+        let result = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let record = try port.readRecord(objectID: "manifest-recording-01")
+        let inboxAudioURL = rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("manifest-recording-01", isDirectory: true)
+            .appendingPathComponent("audio.m4a", isDirectory: false)
+
+        #expect(configuration.canWriteMetadataOnlyRecord)
+        #expect(configuration.policy.writeAudioAllowed == false)
+        #expect(result.failedChanges == 0)
+        #expect(record?.objectID == "manifest-recording-01")
+        #expect(record?.audioAvailable == false)
+        #expect(record?.audioHash == nil)
+        #expect(record?.audioByteSize == nil)
+        #expect(FileManager.default.fileExists(atPath: inboxAudioURL.path) == false)
+    }
+
+    @Test func macApplyManifestRecordingsMissingPortBlocksLoudly() async throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let store = StudyLibraryStore(
+            rootURL: rootURL,
+            recordingFileStore: fileStore,
+            listenForInboxChanges: false,
+            canonicalExistenceApplyRuntimeConfiguration: CanonicalExistenceApplyRuntimeConfiguration(mode: .testRootApply),
+            canonicalRecordingExistenceApplyPort: nil
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_403),
+            items: [],
+            folders: [],
+            recordings: [Self.metadataOnlyManifestRecording()]
+        )
+
+        do {
+            _ = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
+            Issue.record("expected canonical existence apply missing port to throw")
+        } catch let error as StudyLibraryStoreError {
+            #expect(error.localizedDescription == "canonical_existence_apply_port_missing")
+        }
+    }
+
+    @Test func macApplyManifestRecordingsDefaultStoreDoesNotWriteCanonicalLedger() async throws {
+        let (fileStore, rootURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: rootURL.deletingLastPathComponent()) }
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: rootURL)
+        let store = StudyLibraryStore(rootURL: rootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 2_401),
+            items: [],
+            folders: [],
+            recordings: [Self.metadataOnlyManifestRecording()]
+        )
+
+        _ = try await store.applySyncManifest(manifest, localDeviceID: "mac-device")
+        let records = try port.loadRecords()
+
+        #expect(records.isEmpty)
     }
 
     private static func makeFilteredCandidateItems() -> [StudyItemMetadata] {
@@ -1338,6 +1459,31 @@ struct StudyLibraryStoreTests {
                 studyFiling: StudyFilingPath(type: "复习", subject: "线性代数", chapter: "矩阵", topic: "逆矩阵")
             )
         ]
+    }
+
+    private static func metadataOnlyManifestRecording() -> LocalNetworkSyncRecordingEntry {
+        LocalNetworkSyncRecordingEntry(
+            recordingID: "manifest-recording-01",
+            metadataHash: "manifest-recording-metadata-hash",
+            audioAvailable: true,
+            audioChecksum: String(repeating: "a", count: 64),
+            audioSize: 16,
+            uploadLedgerState: nil,
+            receiveStatus: nil,
+            processingStatus: nil,
+            updatedAt: Date(timeIntervalSince1970: 2_400),
+            deleted: false,
+            title: "Manifest Recording",
+            createdAt: Date(timeIntervalSince1970: 2_399),
+            tombstone: false,
+            audioAvailability: .local,
+            uploadStatus: nil,
+            transcriptionStatus: nil,
+            noteStatus: nil,
+            sourceDeviceID: "iphone-device",
+            artifactRefs: nil,
+            audioLogicalPathToken: "Recordings/manifest-recording-01.m4a"
+        )
     }
 
     private static let encoder: JSONEncoder = {
@@ -1401,7 +1547,7 @@ private func saveInboxRecording(
     title: String,
     store: MacRecordingFileStore,
     studyFiling: StudyFilingPath? = nil
-) throws -> URL {
+) async throws -> URL {
     let sourceDevice = PairedDevice(
         id: "device-01",
         deviceName: "Vita iPhone",
@@ -1434,7 +1580,7 @@ private func saveInboxRecording(
     )
 
     let receiveResult = try store.saveMetadata(metadata, sourceDevice: sourceDevice)
-    _ = try store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
+    _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
     return receiveResult.directoryURL
 }
 

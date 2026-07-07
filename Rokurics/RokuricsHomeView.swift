@@ -18,6 +18,23 @@ struct RokuricsHomeView: View {
     @State private var isMacConnectionPresented = false
     @State private var isSettingsPresented = false
 
+    init(
+        recordingManager: RecordingManager,
+        macConnectionStore: SecureMacConnectionStore,
+        userProfileStore: UserProfileStore
+    ) {
+        _recordingManager = ObservedObject(wrappedValue: recordingManager)
+        _macConnectionStore = ObservedObject(wrappedValue: macConnectionStore)
+        _userProfileStore = ObservedObject(wrappedValue: userProfileStore)
+        _uploadCoordinator = StateObject(
+            wrappedValue: RecordingUploadCoordinator(
+                canonicalKernelSwitchResultProvider: {
+                    CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
+                }
+            )
+        )
+    }
+
     var body: some View {
         RokuricsAdaptivePage { metrics in
             ZStack {
@@ -95,7 +112,7 @@ struct RokuricsHomeView: View {
 
             RokuricsProfileAvatarButton(
                 profile: userProfileStore.profile,
-                accessibilityLabel: "打开设置",
+                accessibilityLabel: RokuricsCopy.text("打开设置", "Open Settings"),
                 size: 46 * metrics.headerScale
             ) {
                 isSettingsPresented = true
@@ -342,21 +359,21 @@ private struct RokuricsRecordingOrb: View {
     private var accessibilityLabel: String {
         switch state {
         case .recording:
-            return "返回当前录音"
+            return RokuricsCopy.text("返回当前录音", "Return to Recording")
         case .paused:
-            return "返回已暂停录音"
+            return RokuricsCopy.text("返回已暂停录音", "Return to Paused Recording")
         case .requestingPermission:
-            return "打开录音页，正在请求麦克风权限"
+            return RokuricsCopy.text("打开录音页，正在请求麦克风权限", "Open Recorder, Requesting Mic Access")
         case .configuringSession:
-            return "打开录音页，正在配置录音"
+            return RokuricsCopy.text("打开录音页，正在配置录音", "Open Recorder, Preparing")
         case .stopping:
-            return "打开录音页，正在保存录音"
+            return RokuricsCopy.text("打开录音页，正在保存录音", "Open Recorder, Saving")
         case .filing:
-            return "归档录音"
+            return RokuricsCopy.text("归档录音", "File Recording")
         case .saving:
-            return "正在保存录音"
+            return RokuricsCopy.text("正在保存录音", "Saving Recording")
         default:
-            return "开始录音"
+            return RokuricsCopy.text("开始录音", "Start Recording")
         }
     }
 
@@ -534,35 +551,35 @@ private struct RokuricsHomeNavigationCard: View {
     var body: some View {
         HStack(spacing: 0) {
             RokuricsHomeNavigationButton(
-                title: "学习库",
+                title: RokuricsCopy.text("学习库", "Library"),
                 systemImage: "books.vertical",
                 tint: RokuricsColors.aqua,
                 scale: scale,
                 action: onOpenRecordingLibrary
             )
-            .accessibilityLabel("打开学习库")
+            .accessibilityLabel(RokuricsCopy.text("打开学习库", "Open Library"))
 
             RokuricsHomeDashboardDivider(scale: scale)
 
             RokuricsHomeNavigationButton(
-                title: "AI 对话",
+                title: RokuricsCopy.text("AI 对话", "AI Chat"),
                 systemImage: "bubble.left.and.bubble.right",
                 tint: RokuricsColors.mint,
                 scale: scale,
                 action: onOpenAIChat
             )
-            .accessibilityLabel("打开 AI 对话")
+            .accessibilityLabel(RokuricsCopy.text("打开 AI 对话", "Open AI Chat"))
 
             RokuricsHomeDashboardDivider(scale: scale)
 
             RokuricsHomeNavigationButton(
-                title: "Mac 连接",
+                title: RokuricsCopy.text("Mac 连接", "Mac Link"),
                 systemImage: isMacPaired ? "iphone.gen3.radiowaves.left.and.right" : "iphone.slash",
                 tint: RokuricsColors.softTeal,
                 scale: scale,
                 action: onOpenMacConnection
             )
-            .accessibilityLabel(isMacPaired ? "打开 Mac 连接，已配对" : "打开 Mac 连接，未配对")
+            .accessibilityLabel(isMacPaired ? RokuricsCopy.text("打开 Mac 连接，已配对", "Open Mac Link, Paired") : RokuricsCopy.text("打开 Mac 连接，未配对", "Open Mac Link, Not Paired"))
         }
         .frame(maxWidth: .infinity, minHeight: 104 * scale)
         .frame(maxWidth: .infinity)

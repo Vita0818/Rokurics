@@ -47,8 +47,8 @@ struct RecordingSessionView: View {
                     subject: $filingSubject,
                     chapter: $filingChapter,
                     topic: $filingTopic,
-                    items: recordingManager.studyLibraryStore.allStudyItems,
-                    folders: recordingManager.studyLibraryStore.allStudyFolders,
+                    items: recordingManager.studyLibraryStore.effectiveStudyItems,
+                    folders: recordingManager.studyLibraryStore.effectiveStudyFolders,
                     saveAction: saveFilingAndDismiss,
                     directSaveAction: directSaveAndDismiss
                 )
@@ -136,7 +136,7 @@ struct RecordingSessionView: View {
                         )
 
                         RecordingSessionControlButton(
-                            title: "停止",
+                            title: RokuricsCopy.text("停止", "Stop"),
                             systemImage: "stop.fill",
                             tint: RokuricsColors.coral,
                             isEnabled: canStop,
@@ -144,7 +144,7 @@ struct RecordingSessionView: View {
                         )
 
                         RecordingSessionControlButton(
-                            title: "上传",
+                            title: RokuricsCopy.text("上传", "Upload"),
                             systemImage: "arrow.up.circle.fill",
                             tint: RokuricsColors.tertiaryText,
                             isEnabled: false,
@@ -152,7 +152,7 @@ struct RecordingSessionView: View {
                         )
                     }
 
-                    Text("Mac 传输稍后支持")
+                    Text(RokuricsCopy.text("Mac 传输稍后支持", "Mac transfer soon"))
                         .font(RokuricsTypography.caption(size: 12, weight: .semibold))
                         .foregroundStyle(RokuricsColors.tertiaryText)
                 }
@@ -166,7 +166,7 @@ struct RecordingSessionView: View {
         HStack(spacing: 0) {
             RokuricsIconCircleButton(
                 systemName: "chevron.left",
-                accessibilityLabel: "返回首页",
+                accessibilityLabel: RokuricsCopy.text("返回首页", "Back Home"),
                 action: dismissToHome
             )
 
@@ -182,7 +182,7 @@ struct RecordingSessionView: View {
     }
 
     private var pauseButtonTitle: String {
-        recordingManager.state == .paused ? "继续" : "暂停"
+        recordingManager.state == .paused ? RokuricsCopy.text("继续", "Resume") : RokuricsCopy.text("暂停", "Pause")
     }
 
     private var pauseButtonImageName: String {
@@ -411,11 +411,11 @@ private struct RecordingFilingOverlay: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("录音归档")
+                    Text(RokuricsCopy.text("录音归档", "File Recording"))
                         .font(RokuricsTypography.font(for: .pageTitle))
                         .foregroundStyle(RokuricsColors.deepText)
 
-                    Text("选择 \(selectionLevel.title)")
+                    Text(RokuricsCopy.text("选择 \(selectionLevel.title)", "Choose \(selectionLevel.title)"))
                         .font(RokuricsTypography.font(for: .pageSubtitle))
                         .foregroundStyle(RokuricsColors.softText)
                 }
@@ -440,7 +440,7 @@ private struct RecordingFilingOverlay: View {
                     }
 
                     if currentCandidates.isEmpty {
-                        Text("暂无已有\(selectionLevel.title)，可以新建。")
+                        Text(RokuricsCopy.text("暂无已有\(selectionLevel.title)，可以新建。", "No existing \(selectionLevel.title). Create one."))
                             .font(RokuricsTypography.font(for: .secondary))
                             .foregroundStyle(RokuricsColors.softText)
                             .padding(.vertical, 4)
@@ -458,7 +458,7 @@ private struct RecordingFilingOverlay: View {
                     }
 
                     HStack(spacing: 8) {
-                        TextField("新建\(selectionLevel.title)", text: $newValueDraft)
+                        TextField(RokuricsCopy.newLabel(selectionLevel.title), text: $newValueDraft)
                             .font(RokuricsTypography.font(for: .body))
                             .foregroundStyle(RokuricsColors.deepText)
                             .textInputAutocapitalization(.never)
@@ -468,7 +468,7 @@ private struct RecordingFilingOverlay: View {
 
                         RokuricsIconCircleButton(
                             systemName: "plus",
-                            accessibilityLabel: "新建\(selectionLevel.title)",
+                            accessibilityLabel: RokuricsCopy.newLabel(selectionLevel.title),
                             size: 36,
                             tint: RokuricsColors.aqua,
                             isEnabled: !newValueDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -489,7 +489,7 @@ private struct RecordingFilingOverlay: View {
 
                 HStack(spacing: 12) {
                     Button(action: directSaveAction) {
-                        Text("直接保存")
+                        Text(RokuricsCopy.text("直接保存", "Save Directly"))
                             .font(RokuricsTypography.button(size: 15))
                             .foregroundStyle(RokuricsColors.softText)
                             .frame(maxWidth: .infinity)
@@ -499,7 +499,7 @@ private struct RecordingFilingOverlay: View {
                     .rokuricsGlassCapsule(fillOpacity: 0.30, strokeOpacity: 0.32, shadowOpacity: 0.04)
 
                     Button(action: saveAction) {
-                        Text("保存")
+                        Text(RokuricsCopy.text("保存", "Save"))
                             .font(RokuricsTypography.button(size: 15))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -602,7 +602,7 @@ private struct RecordingFilingLevelButton: View {
                     .font(RokuricsTypography.secondary(size: 10, weight: .bold))
                     .foregroundStyle(RokuricsColors.tertiaryText)
 
-                Text(value.isEmpty ? "未选择" : value)
+                Text(value.isEmpty ? RokuricsCopy.text("未选择", "Not set") : value)
                     .font(RokuricsTypography.secondary(size: 12, weight: .bold))
                     .foregroundStyle(isEnabled ? RokuricsColors.deepText : RokuricsColors.tertiaryText)
                     .lineLimit(1)
@@ -673,7 +673,7 @@ private struct RecordingFilingField: View {
 
                 Menu {
                     if candidates.isEmpty {
-                        Text("暂无已有值")
+                        Text(RokuricsCopy.text("暂无已有值", "No existing values"))
                     } else {
                         ForEach(candidates, id: \.self) { candidate in
                             Button(candidate) {
@@ -687,7 +687,7 @@ private struct RecordingFilingField: View {
                         .foregroundStyle(RokuricsColors.aqua)
                         .frame(width: 32, height: 32)
                 }
-                .accessibilityLabel("选择\(title)")
+                .accessibilityLabel(RokuricsCopy.chooseLabel(title))
             }
             .padding(.horizontal, 14)
             .frame(height: 48)

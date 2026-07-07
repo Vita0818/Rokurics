@@ -207,7 +207,7 @@ final class NoteStore {
     private let rootURL: URL
     private let notesURL: URL
 
-    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
+    nonisolated init(fileManager: FileManager = .default, rootURL: URL? = nil) {
         self.fileManager = fileManager
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
@@ -275,7 +275,7 @@ final class NoteStore {
         }
     }
 
-    func loadSummaryPreview(noteRelativePath: String?) -> NoteSummaryPreview? {
+    nonisolated func loadSummaryPreview(noteRelativePath: String?) -> NoteSummaryPreview? {
         guard let noteRelativePath,
               let noteURL = resolvedRootFileURL(relativePath: noteRelativePath) else {
             return nil

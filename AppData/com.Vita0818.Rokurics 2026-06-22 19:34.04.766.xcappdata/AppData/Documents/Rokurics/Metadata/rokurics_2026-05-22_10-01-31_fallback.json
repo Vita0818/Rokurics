@@ -1,0 +1,28 @@
+{
+  "bitrate" : 128000,
+  "channels" : 1,
+  "codec" : "AAC",
+  "createdAt" : "2026-05-22T02:01:31Z",
+  "duration" : 8152.662267573696,
+  "endedAt" : "2026-05-22T04:25:41Z",
+  "fileName" : "rokurics_2026-05-22_10-01-31_fallback.m4a",
+  "fileSize" : 86947222,
+  "format" : "m4a",
+  "id" : "rokurics_2026-05-22_10-01-31_fallback",
+  "isDeleted" : false,
+  "noteStatus" : "notStarted",
+  "relativeAudioPath" : "Recordings\/rokurics_2026-05-22_10-01-31_fallback.m4a",
+  "relativeMetadataPath" : "Metadata\/rokurics_2026-05-22_10-01-31_fallback.json",
+  "sampleRate" : 44100,
+  "studyFiling" : {
+    "chapter" : "Ch10",
+    "subject" : "大学物理乙",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "title" : "大学物理乙 · Ch10",
+  "transcriptionStatus" : "notStarted",
+  "uploadStatus" : "uploaded"
+}

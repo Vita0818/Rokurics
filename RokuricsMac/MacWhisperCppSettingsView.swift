@@ -44,19 +44,19 @@ struct MacWhisperCppSettingsView: View {
 
     private var modelSettings: some View {
         VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
-            RokuricsSettingsGroup(title: "模型") {
+            RokuricsSettingsGroup(title: RokuricsCopy.text("模型", "Model")) {
                 RokuricsSettingsRow(
-                    title: "当前模型",
+                    title: RokuricsCopy.text("当前模型", "Current"),
                     valueText: settingsStore.whisperConfiguration.currentModelDisplayName
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsRow(
-                    title: "模型等级",
+                    title: RokuricsCopy.text("模型等级", "Model tier"),
                     valueText: settingsStore.whisperConfiguration.modelKind.displayName
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "选择模型",
+                    title: RokuricsCopy.text("选择模型", "Choose model"),
                     valueText: currentDraft.modelAuthorizationState.displayText,
                     systemImage: "cube",
                     tint: authorizationTint(for: currentDraft.modelAuthorizationState),
@@ -68,10 +68,13 @@ struct MacWhisperCppSettingsView: View {
 
     private var authorizationAndTestSettings: some View {
         VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
-            RokuricsSettingsGroup(title: "模型") {
-                RokuricsSettingsRow(title: "当前模型", valueText: settingsStore.whisperConfiguration.currentModelDisplayName)
+            RokuricsSettingsGroup(title: RokuricsCopy.text("模型", "Model")) {
+                RokuricsSettingsRow(
+                    title: RokuricsCopy.text("当前模型", "Current"),
+                    valueText: settingsStore.whisperConfiguration.currentModelDisplayName
+                )
                 RokuricsSettingsDivider()
-                RokuricsSettingsPickerRow(title: "默认语言", selection: languageBinding) {
+                RokuricsSettingsPickerRow(title: RokuricsCopy.text("默认语言", "Default language"), selection: languageBinding) {
                     Text("auto").tag("auto")
                     Text("zh").tag("zh")
                     Text("en").tag("en")
@@ -80,7 +83,7 @@ struct MacWhisperCppSettingsView: View {
                 RokuricsSettingsToggleRow(title: "JSON Segments", isOn: preferSegmentOutputBinding)
             }
 
-            RokuricsSettingsGroup(title: "授权") {
+            RokuricsSettingsGroup(title: RokuricsCopy.text("授权", "Access")) {
                 RokuricsSettingsActionRow(
                     title: "whisper-cli",
                     valueText: currentDraft.executableAuthorizationState.displayText,
@@ -90,7 +93,7 @@ struct MacWhisperCppSettingsView: View {
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "模型文件",
+                    title: RokuricsCopy.text("模型文件", "Model file"),
                     valueText: currentDraft.modelAuthorizationState.displayText,
                     systemImage: "cube",
                     tint: authorizationTint(for: currentDraft.modelAuthorizationState),
@@ -98,7 +101,7 @@ struct MacWhisperCppSettingsView: View {
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "whisper.cpp 根目录",
+                    title: RokuricsCopy.text("whisper.cpp 根目录", "whisper.cpp root"),
                     valueText: currentDraft.whisperCppRootDirectoryAuthorizationState.displayText,
                     systemImage: "folder",
                     tint: authorizationTint(for: currentDraft.whisperCppRootDirectoryAuthorizationState),
@@ -114,9 +117,11 @@ struct MacWhisperCppSettingsView: View {
                 )
             }
 
-            RokuricsSettingsGroup(title: "操作") {
+            RokuricsSettingsGroup(title: RokuricsCopy.text("操作", "Actions")) {
                 RokuricsSettingsActionRow(
-                    title: isCheckingConfiguration ? "检查中" : "检查配置",
+                    title: isCheckingConfiguration
+                        ? RokuricsCopy.text("检查中", "Checking")
+                        : RokuricsCopy.text("检查配置", "Check"),
                     valueText: settingsStore.lastValidationStatus.displayText,
                     systemImage: "checkmark.shield",
                     tint: validationTint,
@@ -125,7 +130,9 @@ struct MacWhisperCppSettingsView: View {
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: isTestingWhisperLaunch ? "测试中" : "测试启动",
+                    title: isTestingWhisperLaunch
+                        ? RokuricsCopy.text("测试中", "Testing")
+                        : RokuricsCopy.text("测试启动", "Launch test"),
                     valueText: "",
                     systemImage: "terminal",
                     isDisabled: isTestingWhisperLaunch,
@@ -133,40 +140,48 @@ struct MacWhisperCppSettingsView: View {
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "保存设置",
+                    title: RokuricsCopy.text("保存设置", "Save"),
                     valueText: saveMessage ?? "",
                     systemImage: "square.and.arrow.down",
                     tint: MacTheme.leaf
                 ) {
                     debugLogCurrentBookmarkState(context: "save.beforePersist")
                     settingsStore.persist()
-                    saveMessage = "已保存"
+                    saveMessage = RokuricsCopy.text("已保存", "Saved")
                 }
                 RokuricsSettingsDivider()
                 RokuricsSettingsDangerRow(
-                    title: "重置授权",
+                    title: RokuricsCopy.text("重置授权", "Reset access"),
                     valueText: "",
                     systemImage: "arrow.counterclockwise",
                     action: resetAuthorizations
                 )
             }
 
-            RokuricsSettingsGroup(title: "高级") {
+            RokuricsSettingsGroup(title: RokuricsCopy.text("高级", "Advanced")) {
                 RokuricsSettingsDisclosureRow(
-                    title: "诊断",
+                    title: RokuricsCopy.text("诊断", "Diagnostics"),
                     valueText: settingsStore.lastValidationStatus.displayText,
                     isExpanded: $isAdvancedDiagnosticsExpanded
                 ) {
                     RokuricsSettingsRow(title: "Runtime", valueText: runtimeStatusText)
                     RokuricsSettingsDivider()
-                    RokuricsSettingsRow(title: "检查结果", valueText: settingsStore.lastValidationMessage)
+                    RokuricsSettingsRow(
+                        title: RokuricsCopy.text("检查结果", "Check result"),
+                        valueText: settingsStore.lastValidationMessage
+                    )
                     if let launchProbeMessage {
                         RokuricsSettingsDivider()
-                        RokuricsSettingsRow(title: "启动结果", valueText: launchProbeMessage)
+                        RokuricsSettingsRow(
+                            title: RokuricsCopy.text("启动结果", "Launch result"),
+                            valueText: launchProbeMessage
+                        )
                     }
                     RokuricsSettingsDivider()
                     RokuricsSettingsActionRow(
-                        title: isRefreshingFileDiagnostics ? "刷新中" : "文件可见性诊断",
+                        title: isRefreshingFileDiagnostics
+                            ? RokuricsCopy.text("刷新中", "Refreshing")
+                            : RokuricsCopy.text("文件可见性诊断", "File visibility"),
                         valueText: fileVisibilityConclusion ?? "",
                         systemImage: "list.bullet.rectangle",
                         isDisabled: isRefreshingFileDiagnostics,
@@ -184,15 +199,15 @@ struct MacWhisperCppSettingsView: View {
                     }
                     RokuricsSettingsDivider()
                     RokuricsSettingsActionRow(
-                        title: "whisper-cli 文件夹授权",
-                        valueText: "可选",
+                        title: RokuricsCopy.text("whisper-cli 文件夹授权", "whisper-cli folder"),
+                        valueText: RokuricsCopy.text("可选", "Optional"),
                         systemImage: "folder.badge.gearshape",
                         action: chooseExecutableParentDirectory
                     )
                     RokuricsSettingsDivider()
                     RokuricsSettingsActionRow(
-                        title: "ffmpeg 文件夹授权",
-                        valueText: "可选",
+                        title: RokuricsCopy.text("ffmpeg 文件夹授权", "ffmpeg folder"),
+                        valueText: RokuricsCopy.text("可选", "Optional"),
                         systemImage: "folder.badge.gearshape",
                         action: chooseFFmpegParentDirectory
                     )
@@ -285,7 +300,7 @@ struct MacWhisperCppSettingsView: View {
     private var ffmpegFallbackValue: String {
         let path = settingsStore.whisperConfiguration.normalizedFFmpegExecutablePath
         if path.isEmpty {
-            return "可选"
+            return RokuricsCopy.text("可选", "Optional")
         }
         return currentDraft.ffmpegAuthorizationState.displayText
     }
@@ -298,19 +313,24 @@ struct MacWhisperCppSettingsView: View {
         let runtime = WhisperCppRuntimeResolver().resolveRuntime(
             configuration: settingsStore.whisperConfiguration
         )
-        let helperText = runtime.bundledHelperIsExecutable ? "helper：内置可用" : "helper：内置不可用"
-        return "\(runtime.statusText)；\(helperText)"
+        let helperText = runtime.bundledHelperIsExecutable
+            ? RokuricsCopy.text("helper：内置可用", "helper: bundled OK")
+            : RokuricsCopy.text("helper：内置不可用", "helper: bundled unavailable")
+        return "\(runtime.statusText)\(RokuricsCopy.text("；", "; "))\(helperText)"
     }
 
     private var fileVisibilityDiagnosticsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("文件可见性诊断")
+                    Text(RokuricsCopy.text("文件可见性诊断", "File visibility"))
                         .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
 
-                    Text("从 RokuricsMac sandbox 视角只读检查 whisper.cpp 目录")
+                    Text(RokuricsCopy.text(
+                        "从 RokuricsMac sandbox 视角只读检查 whisper.cpp 目录",
+                        "Read-only check from the RokuricsMac sandbox"
+                    ))
                         .font(MacTypography.chineseCaption(size: 10, weight: .medium))
                         .foregroundStyle(MacTheme.softText(for: colorScheme).opacity(0.72))
                 }
@@ -320,7 +340,12 @@ struct MacWhisperCppSettingsView: View {
                 Button {
                     refreshFileVisibilityDiagnostics()
                 } label: {
-                    Label(isRefreshingFileDiagnostics ? "刷新中" : "刷新文件诊断", systemImage: "list.bullet.rectangle")
+                    Label(
+                        isRefreshingFileDiagnostics
+                            ? RokuricsCopy.text("刷新中", "Refreshing")
+                            : RokuricsCopy.text("刷新文件诊断", "Refresh"),
+                        systemImage: "list.bullet.rectangle"
+                    )
                         .font(MacTypography.chineseCaption(size: 11, weight: .bold))
                         .lineLimit(1)
                         .padding(.horizontal, 12)
@@ -368,7 +393,7 @@ struct MacWhisperCppSettingsView: View {
                     .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
 
-                Text("\(authorizationLabel)：\(authorizationState.displayText)")
+                Text("\(authorizationLabel)\(RokuricsCopy.text("：", ": "))\(authorizationState.displayText)")
                     .font(MacTypography.chineseCaption(size: 11, weight: .medium))
                     .foregroundStyle(authorizationTint(for: authorizationState))
             }
@@ -471,7 +496,7 @@ struct MacWhisperCppSettingsView: View {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.treatsFilePackagesAsDirectories = false
-        panel.prompt = "选择目录"
+        panel.prompt = RokuricsCopy.text("选择目录", "Choose Folder")
 
         guard panel.runModal() == .OK,
               let directoryURL = panel.url else {
@@ -481,7 +506,10 @@ struct MacWhisperCppSettingsView: View {
         guard selectedURLIsDirectory(directoryURL) else {
             settingsStore.updateValidation(
                 status: .checkFailed,
-                message: "请选择 whisper.cpp 根目录文件夹。"
+                message: RokuricsCopy.text(
+                    "请选择 whisper.cpp 根目录文件夹。",
+                    "Choose the whisper.cpp root folder."
+                )
             )
             return
         }
@@ -495,7 +523,10 @@ struct MacWhisperCppSettingsView: View {
             guard !bookmarkData.isEmpty else {
                 settingsStore.updateValidation(
                     status: .checkFailed,
-                    message: "whisper.cpp 根目录 sandbox 授权为空，请重新选择。"
+                    message: RokuricsCopy.text(
+                        "whisper.cpp 根目录 sandbox 授权为空，请重新选择。",
+                        "whisper.cpp root sandbox access is empty. Choose again."
+                    )
                 )
                 return
             }
@@ -548,7 +579,10 @@ struct MacWhisperCppSettingsView: View {
             guard !bookmarkData.isEmpty else {
                 settingsStore.updateValidation(
                     status: .checkFailed,
-                    message: "sandbox 授权为空，请重新选择文件。"
+                    message: RokuricsCopy.text(
+                        "sandbox 授权为空，请重新选择文件。",
+                        "Sandbox access is empty. Choose the file again."
+                    )
                 )
                 return nil
             }
@@ -608,7 +642,10 @@ struct MacWhisperCppSettingsView: View {
             guard !path.isEmpty else {
                 settingsStore.updateValidation(
                     status: .checkFailed,
-                    message: "请先选择可执行文件，再选择其所在文件夹授权。"
+                    message: RokuricsCopy.text(
+                        "请先选择可执行文件，再选择其所在文件夹授权。",
+                        "Choose the executable before granting folder access."
+                    )
                 )
                 return
             }
@@ -621,7 +658,7 @@ struct MacWhisperCppSettingsView: View {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.treatsFilePackagesAsDirectories = false
-        panel.prompt = "选择文件夹"
+        panel.prompt = RokuricsCopy.text("选择文件夹", "Choose Folder")
 
         guard panel.runModal() == .OK,
               let directoryURL = panel.url else {
@@ -631,7 +668,10 @@ struct MacWhisperCppSettingsView: View {
         guard selectedURLIsDirectory(directoryURL) else {
             settingsStore.updateValidation(
                 status: .checkFailed,
-                message: "请选择可执行文件所在的直接父文件夹。"
+                message: RokuricsCopy.text(
+                    "请选择可执行文件所在的直接父文件夹。",
+                    "Choose the executable's direct parent folder."
+                )
             )
             return
         }
@@ -643,7 +683,10 @@ struct MacWhisperCppSettingsView: View {
               ) else {
             settingsStore.updateValidation(
                 status: .checkFailed,
-                message: "请选择可执行文件所在的直接父文件夹，不要选择过宽目录。"
+                message: RokuricsCopy.text(
+                    "请选择可执行文件所在的直接父文件夹，不要选择过宽目录。",
+                    "Choose the direct parent folder, not a broad directory."
+                )
             )
             return
         }
@@ -655,7 +698,10 @@ struct MacWhisperCppSettingsView: View {
               FileManager.default.fileExists(atPath: expectedExecutableURL.path) else {
             settingsStore.updateValidation(
                 status: .checkFailed,
-                message: "所选文件夹中没有对应的可执行文件，请选择它的所在文件夹。"
+                message: RokuricsCopy.text(
+                    "所选文件夹中没有对应的可执行文件，请选择它的所在文件夹。",
+                    "That folder does not contain the executable."
+                )
             )
             return
         }
@@ -669,7 +715,10 @@ struct MacWhisperCppSettingsView: View {
             guard !bookmarkData.isEmpty else {
                 settingsStore.updateValidation(
                     status: .checkFailed,
-                    message: "文件夹 sandbox 授权为空，请重新选择。"
+                    message: RokuricsCopy.text(
+                        "文件夹 sandbox 授权为空，请重新选择。",
+                        "Folder sandbox access is empty. Choose again."
+                    )
                 )
                 return
             }
@@ -822,7 +871,7 @@ struct MacWhisperCppSettingsView: View {
 
     private func resetAuthorizations() {
         settingsStore.resetWhisperCppAuthorizations()
-        saveMessage = "已清除授权"
+        saveMessage = RokuricsCopy.text("已清除授权", "Access cleared")
         launchProbeMessage = nil
         fileVisibilityMessage = nil
         fileVisibilityConclusion = nil

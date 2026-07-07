@@ -258,7 +258,11 @@ private struct MacMixedCaptionText: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        if let supportRange = text.range(of: "稍后支持") {
+        if !RokuricsCopy.usesChinese, text.contains("稍后支持") {
+            Text(text.replacingOccurrences(of: "稍后支持", with: "Coming Soon"))
+                .font(MacTypography.englishBody(size: 14))
+                .foregroundStyle(MacTheme.softText(for: colorScheme))
+        } else if let supportRange = text.range(of: "稍后支持") {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(String(text[..<supportRange.lowerBound]).trimmingCharacters(in: .whitespaces))
                     .font(MacTypography.englishBody(size: 14, weight: .medium))

@@ -14,8 +14,8 @@ struct MacAudioInboxCard: View {
 
     var body: some View {
         MacDashboardCard(systemImage: "tray.and.arrow.down", tint: MacTheme.mint) {
-            Text("学习库")
-                .font(MacTypography.chineseHeadline(size: 17))
+            Text(RokuricsCopy.text("学习库", "Library"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseHeadline(size: 17) : MacTypography.englishHeadline(size: 17))
         } content: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
@@ -26,19 +26,19 @@ struct MacAudioInboxCard: View {
 
                     Spacer()
 
-                    MacStatusPill(text: "真实录音", systemImage: "waveform", tint: MacTheme.leaf)
+                    MacStatusPill(text: RokuricsCopy.text("真实录音", "Real Audio"), systemImage: "waveform", tint: MacTheme.leaf)
                 }
 
                 Spacer(minLength: 12)
 
-                Text("录音、转写与笔记统一入口")
-                    .font(MacTypography.chineseBody(size: 14, weight: .medium))
+                Text(RokuricsCopy.text("录音、转写与笔记统一入口", "Recordings, transcripts, and notes"))
+                    .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
                     .lineLimit(1)
 
                 Spacer(minLength: 12)
 
-                let footerText = audioInboxStore.latestRecordingItem?.title ?? "HTTPS + HMAC，HTTP 已隔离"
+                let footerText = audioInboxStore.latestRecordingItem?.title ?? RokuricsCopy.text("HTTPS + HMAC，HTTP 已隔离", "HTTPS + HMAC, HTTP isolated")
                 Text(footerText)
                     .font(footerText.macContainsCJK ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.englishCaption(size: 12, weight: .semibold))
                     .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))

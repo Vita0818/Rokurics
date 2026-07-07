@@ -7,6 +7,7 @@
 3. `docs/ARCHITECTURE.md`
 4. `docs/DO_NOT_BREAK.md`
 5. `docs/TESTING.md`
+6. `docs/NEXT_TARGET.md`（如果存在）
 6. `docs/SYNC_STATE_AUDIT.md`
 
 如果文档与源码、Xcode 配置、测试或脚本冲突，必须以当前源码和配置为准，并在最终报告中明确指出冲突位置和采用源码为准的原因。
@@ -53,7 +54,8 @@ git status --short
 ## 禁止事项
 
 - 不执行破坏性 Git 操作：`git reset --hard`、`git clean -fd`、`git checkout .`、强制 push、删除用户未提交文件。
-- 未经用户明确要求，不 commit、不 push、不创建 PR。
+- 未经用户明文要求具体 Git 操作，不 add、不 commit、不 push、不创建 PR；编辑、整理、修复、验证或准备工作都不等于提交请求。
+- 若用户要求提交，只提交当前 Git root 中与本任务相关的文件；不得递归进入、暂存、提交或推送子仓库、submodule、nested Git repo 或依赖 checkout。
 - 不引入新依赖，不改构建脚本，不改测试源码，除非任务明确要求。
 - 不把密钥、token、证书私钥、shared secret、账号密码、完整指纹、完整 API 响应、完整转写文本或个人隐私路径写入文档。
 - 不绕过 TLS 证书指纹校验、HMAC 签名、nonce 重放防护、Keychain/安全范围书签等安全机制。
@@ -77,6 +79,7 @@ git status --short
 - `docs/CURRENT_STATE.md`：当前真实状态、已有能力、风险、工作区改动。
 - `docs/TESTING.md`：环境、构建、测试、lint/format 与手动验证方式。
 - `docs/DO_NOT_BREAK.md`：工程禁区、数据格式、协议、路径和回归要求。
+- `docs/NEXT_TARGET.md`：临时下一目标记录；目标完成或不再有效后删除。
 - `docs/SYNC_STATE_AUDIT.md`：连接、上传、本地网络同步状态机、触发源、no-op 边界、retry 和诊断信号。
 - `docs/LongRecordingTestPlan.md`：长录音本地验证计划。
 
@@ -88,6 +91,7 @@ git status --short
 - 只修改任务范围内文件。
 - 保留用户已有改动。
 - 运行与任务相称的检查；文档任务至少运行 `git diff --check` 与 `git status --short`。
+- 将本轮已完成的持久性改动及时回写到相关项目文档；若无需更新文档，最终报告说明原因。
 - 如未运行构建或测试，最终报告必须明确写“未运行构建/测试”。
 
 ## 最终报告格式
@@ -102,3 +106,7 @@ git status --short
 6. `VALIDATION_RESULT`：实际运行命令与结果。
 7. `UNCERTAINTIES`：无法确认、需要人工确认的点。
 8. `NEXT_RECOMMENDED_ACTION`：下一步建议；不要自动继续改业务源码。
+
+## Imported Claude Cowork project instructions
+
+Claude 任何时候都不应当修改代码；Codex 可以按本文件边界和用户任务要求正常修改代码。

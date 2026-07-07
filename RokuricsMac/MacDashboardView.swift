@@ -82,11 +82,11 @@ enum MacDashboardCardKind: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .iPhoneConnection:
-            return "iPhone 连接"
+            return RokuricsCopy.text("iPhone 连接", "iPhone Link")
         case .audioInbox:
-            return "学习库"
+            return RokuricsCopy.text("学习库", "Library")
         case .aiProcessing:
-            return "AI 整理"
+            return RokuricsCopy.text("AI 整理", "AI Notes")
         }
     }
 }

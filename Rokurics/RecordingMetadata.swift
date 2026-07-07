@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct RecordingMetadata: Codable, Identifiable, Equatable {
+nonisolated struct RecordingMetadata: Codable, Identifiable, Equatable {
     let id: String
     let title: String
     let fileName: String
@@ -323,12 +323,12 @@ extension RecordingMetadata {
     }
 
     static func defaultTitle(createdAt: Date) -> String {
-        "录音 \(Self.titleDateFormatter.string(from: createdAt))"
+        "\(RokuricsCopy.text("录音", "Recording")) \(Self.titleDateFormatter.string(from: createdAt))"
     }
 
     private static let titleDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()

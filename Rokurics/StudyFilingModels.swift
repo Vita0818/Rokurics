@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct StudyFilingPath: Codable, Equatable, Hashable {
+nonisolated struct StudyFilingPath: Codable, Equatable, Hashable {
     var type: String?
     var subject: String?
     var chapter: String?
@@ -81,8 +81,8 @@ struct StudyFilingPath: Codable, Equatable, Hashable {
             .nilIfEmpty
     }
 
-    nonisolated static let uncategorizedTitle = "未分类"
-    nonisolated static let missingTitle = "未填写"
+    nonisolated static var uncategorizedTitle: String { RokuricsCopy.text("未分类", "Uncategorized") }
+    nonisolated static var missingTitle: String { RokuricsCopy.text("未填写", "Missing") }
 }
 
 enum StudyFilingLevel: String, CaseIterable, Identifiable {
@@ -96,13 +96,13 @@ enum StudyFilingLevel: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .type:
-            return "门类"
+            return RokuricsCopy.text("门类", "Type")
         case .subject:
-            return "课程"
+            return RokuricsCopy.text("课程", "Course")
         case .chapter:
-            return "章节"
+            return RokuricsCopy.text("章节", "Chapter")
         case .topic:
-            return "主题"
+            return RokuricsCopy.text("主题", "Topic")
         }
     }
 }
@@ -291,7 +291,7 @@ enum RecordingStudyBrowser {
     }
 
     static func breadcrumbs(for path: RecordingStudyBrowsePath) -> [(title: String, path: RecordingStudyBrowsePath)] {
-        var result: [(String, RecordingStudyBrowsePath)] = [("学习库", RecordingStudyBrowsePath())]
+        var result: [(String, RecordingStudyBrowsePath)] = [(RokuricsCopy.text("学习库", "Library"), RecordingStudyBrowsePath())]
 
         for index in path.components.indices {
             let componentPath = path.truncated(to: index + 1)
@@ -303,7 +303,7 @@ enum RecordingStudyBrowser {
 
     static func levelTitle(for path: RecordingStudyBrowsePath) -> String {
         if path.depth >= StudyFilingLevel.allCases.count || path.isUncategorizedTypeSelection {
-            return "录音"
+            return RokuricsCopy.text("录音", "Recordings")
         }
 
         return StudyFilingLevel.allCases[path.depth].title
@@ -353,7 +353,7 @@ enum RecordingStudyBrowser {
 
 enum RecordingStudyTreeBuilder {
     static func build(recordings: [RecordingMetadata]) -> [RecordingStudyNode] {
-        let root = MutableRecordingStudyNode(id: "root", level: .type, title: "学习库")
+        let root = MutableRecordingStudyNode(id: "root", level: .type, title: RokuricsCopy.text("学习库", "Library"))
 
         for recording in recordings {
             insert(recording, levelIndex: 0, into: root)
@@ -491,7 +491,7 @@ struct RecordingNoteSectionRecord: Codable, Equatable {
     var sectionNoteRelativePath: String?
 }
 
-struct StudyTag: Codable, Hashable, Identifiable {
+nonisolated struct StudyTag: Codable, Hashable, Identifiable {
     let id: String
     var namespace: String
     var value: String
@@ -594,7 +594,7 @@ enum StudyTagList {
     }
 }
 
-struct StudyItemMetadata: Codable, Equatable, Identifiable {
+nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
     var id: String { itemID }
 
     var itemID: StudyItemID
@@ -658,7 +658,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
 
         self.itemID = resolvedItemID
         self.kind = resolvedKind
-        self.title = Self.normalized(title) ?? (resolvedKind == .standaloneNote ? "未命名笔记" : "未命名录音")
+        self.title = Self.normalized(title) ?? (resolvedKind == .standaloneNote ? RokuricsCopy.text("未命名笔记", "Untitled Note") : RokuricsCopy.text("未命名录音", "Untitled Recording"))
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.filing = filing.isEmpty ? StudyFilingPath() : filing
@@ -765,7 +765,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         duration ?? 0
     }
 
-    func mergedWithCurrentRecording(_ recording: RecordingMetadata) -> StudyItemMetadata {
+    nonisolated func mergedWithCurrentRecording(_ recording: RecordingMetadata) -> StudyItemMetadata {
         let resolvedFiling = filing.isEmpty ? (recording.studyFiling ?? StudyFilingPath()) : filing
         let resolvedFolderIDs = folderIDs.isEmpty ? Self.defaultFolderIDs(for: resolvedFiling) : folderIDs
         return StudyItemMetadata(
@@ -831,7 +831,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
         return StudyItemMetadata(
             recordingID: recordingID,
             sanitizedRecordingID: receiveRecord.sanitizedRecordingID,
-            title: receiveRecord.normalizedTitle ?? receiveRecord.originalTitle ?? "未命名录音",
+            title: receiveRecord.normalizedTitle ?? receiveRecord.originalTitle ?? RokuricsCopy.text("未命名录音", "Untitled Recording"),
             createdAt: receiveRecord.createdAt ?? receiveRecord.receivedAt ?? Date(timeIntervalSince1970: 0),
             duration: receiveRecord.duration ?? 0,
             audioRelativePath: receiveRecord.audioRelativePath,
@@ -885,7 +885,7 @@ struct StudyItemMetadata: Codable, Equatable, Identifiable {
             ?? recordingID.map(Self.recordingBundleItemID(for:))
         let kind = try container.decodeIfPresent(StudyItemKind.self, forKey: .kind)
             ?? (recordingID == nil ? .standaloneNote : .recordingBundle)
-        let title = try container.decodeIfPresent(String.self, forKey: .title) ?? "未命名录音"
+        let title = try container.decodeIfPresent(String.self, forKey: .title) ?? RokuricsCopy.text("未命名录音", "Untitled Recording")
         let createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
         let updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date(timeIntervalSince1970: 0)
         let filing = try container.decodeIfPresent(StudyFilingPath.self, forKey: .filing)
@@ -1030,20 +1030,20 @@ enum StudyFolderLevel: String, Codable, Equatable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .type:
-            return "门类"
+            return RokuricsCopy.text("门类", "Type")
         case .subject:
-            return "课程"
+            return RokuricsCopy.text("课程", "Course")
         case .chapter:
-            return "章节"
+            return RokuricsCopy.text("章节", "Chapter")
         case .topic:
-            return "主题"
+            return RokuricsCopy.text("主题", "Topic")
         case .custom:
-            return "文件夹"
+            return RokuricsCopy.text("文件夹", "Folder")
         }
     }
 }
 
-struct StudyFolderMetadata: Codable, Equatable, Identifiable {
+nonisolated struct StudyFolderMetadata: Codable, Equatable, Identifiable {
     var id: String { folderID }
 
     var folderID: StudyFolderID
@@ -1139,7 +1139,7 @@ struct StudyFolderMetadata: Codable, Equatable, Identifiable {
         )
     }
 
-    var pathComponents: [String] {
+    nonisolated var pathComponents: [String] {
         Self.pathComponents(for: path, through: level)
     }
 
@@ -1229,7 +1229,7 @@ struct StudyHierarchyRule: Codable, Equatable, Identifiable {
 
     init(id: String = "course-view", name: String, levels: [String]) {
         self.id = id
-        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "学习视图"
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? RokuricsCopy.text("学习视图", "Study View")
         self.levels = levels
             .map(StudyTag.normalizedNamespace)
             .filter { !$0.isEmpty }
@@ -1237,7 +1237,7 @@ struct StudyHierarchyRule: Codable, Equatable, Identifiable {
 
     static let defaultCourseView = StudyHierarchyRule(
         id: "course-view",
-        name: "课程视图",
+        name: RokuricsCopy.text("课程视图", "Course View"),
         levels: ["type", "subject", "chapter", "topic"]
     )
 
@@ -1365,7 +1365,7 @@ enum StudyLibraryBrowser {
     }
 
     static func breadcrumbs(for path: StudyBrowsePath) -> [(title: String, path: StudyBrowsePath)] {
-        var result: [(String, StudyBrowsePath)] = [("学习库", StudyBrowsePath())]
+        var result: [(String, StudyBrowsePath)] = [(RokuricsCopy.text("学习库", "Library"), StudyBrowsePath())]
 
         for index in path.components.indices {
             let componentPath = path.truncated(to: index + 1)
@@ -1377,20 +1377,20 @@ enum StudyLibraryBrowser {
 
     static func levelTitle(for path: StudyBrowsePath) -> String {
         if path.depth >= levelKeys.count || path.isUncategorizedTypeSelection {
-            return "录音"
+            return RokuricsCopy.text("录音", "Recordings")
         }
 
         switch levelKeys[path.depth] {
         case "type":
-            return "门类"
+            return RokuricsCopy.text("门类", "Type")
         case "subject":
-            return "课程"
+            return RokuricsCopy.text("课程", "Course")
         case "chapter":
-            return "章节"
+            return RokuricsCopy.text("章节", "Chapter")
         case "topic":
-            return "主题"
+            return RokuricsCopy.text("主题", "Topic")
         default:
-            return "文件夹"
+            return RokuricsCopy.text("文件夹", "Folder")
         }
     }
 
@@ -1640,7 +1640,7 @@ enum StudyPathSanitizer {
     }
 }
 
-struct RecordingReceiveRecord: Codable, Equatable {
+nonisolated struct RecordingReceiveRecord: Codable, Equatable {
     var recordingID: String?
     var sanitizedRecordingID: String?
     var receivedAt: Date?

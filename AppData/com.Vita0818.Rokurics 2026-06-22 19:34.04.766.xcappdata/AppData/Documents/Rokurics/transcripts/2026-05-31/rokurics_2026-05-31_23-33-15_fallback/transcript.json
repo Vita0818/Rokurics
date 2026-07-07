@@ -1,0 +1,15 @@
+{
+  "completedAt" : "2026-05-31T15:35:31Z",
+  "language" : "auto",
+  "modelName" : "ggml-large-v3.bin",
+  "providerID" : "whisperCpp",
+  "providerName" : "whisper.cpp",
+  "recordingID" : "rokurics_2026-05-31_23-33-15_fallback",
+  "segments" : [
+
+  ],
+  "startedAt" : "2026-05-31T15:35:27Z",
+  "status" : "transcribed",
+  "taskID" : "b23eff93-61ee-4ef2-a04b-3d74a0669f6e",
+  "text" : "1、2、3、1、2、3、1、2、3"
+}

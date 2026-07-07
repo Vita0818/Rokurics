@@ -1,0 +1,24 @@
+{
+  "childFolderIDs" : [
+    "folder_topic_通识_大英IV_Unit6_Class2"
+  ],
+  "createdAt" : "2026-05-26T14:39:48Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_chapter_通识_大英IV_Unit6",
+  "isTrashed" : false,
+  "itemIDs" : [
+
+  ],
+  "level" : "chapter",
+  "modifiedByDeviceID" : "mac-d6c0ef1617bf4af1",
+  "name" : "Unit6",
+  "parentFolderID" : "folder_subject_通识_大英IV",
+  "path" : {
+    "chapter" : "Unit6",
+    "subject" : "大英IV",
+    "type" : "通识"
+  },
+  "updatedAt" : "2026-06-22T11:32:03Z"
+}

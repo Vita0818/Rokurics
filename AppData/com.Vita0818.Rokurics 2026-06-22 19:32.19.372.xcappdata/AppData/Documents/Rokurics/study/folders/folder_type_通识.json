@@ -1,0 +1,23 @@
+{
+  "childFolderIDs" : [
+    "folder_subject_通识_大学物理乙",
+    "folder_subject_通识_大英IV",
+    "folder_subject_通识_线性代数"
+  ],
+  "createdAt" : "2026-05-22T04:26:13Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_type_通识",
+  "isTrashed" : false,
+  "itemIDs" : [
+
+  ],
+  "level" : "type",
+  "modifiedByDeviceID" : "iphone-1158bb44-fa4c-4683-a6b6-abeb9eaaac2e",
+  "name" : "通识",
+  "path" : {
+    "type" : "通识"
+  },
+  "updatedAt" : "2026-06-22T11:32:03Z"
+}

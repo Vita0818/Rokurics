@@ -63,14 +63,16 @@ struct MacNoteGenerationSettingsView: View {
 
             RokuricsSettingsDivider()
             RokuricsSettingsRow(
-                title: "状态",
-                valueText: providerKindDraft == .mock ? "本地" : "需配置"
+                title: RokuricsCopy.text("状态", "Status"),
+                valueText: providerKindDraft == .mock
+                    ? RokuricsCopy.text("本地", "Local")
+                    : RokuricsCopy.text("需配置", "Setup needed")
             )
 
             RokuricsSettingsDivider()
             RokuricsSettingsActionRow(
-                title: "保存设置",
-                valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                title: RokuricsCopy.text("保存设置", "Save"),
+                valueText: isSavedDiagnostic ? RokuricsCopy.text("已保存", "Saved") : "",
                 systemImage: "square.and.arrow.down",
                 tint: MacTheme.leaf,
                 action: saveConfiguration
@@ -79,13 +81,13 @@ struct MacNoteGenerationSettingsView: View {
     }
 
     private var aiModelGroup: some View {
-        RokuricsSettingsGroup(title: "模型") {
-            RokuricsSettingsRow(title: "当前模型", valueText: currentModelSummary)
+        RokuricsSettingsGroup(title: RokuricsCopy.text("模型", "Model")) {
+            RokuricsSettingsRow(title: RokuricsCopy.text("当前模型", "Current"), valueText: currentModelSummary)
 
             if providerKindDraft != .mock {
                 if !currentModelCandidates.isEmpty {
                     RokuricsSettingsDivider()
-                    RokuricsSettingsPickerRow(title: "模型候选", selection: modelNameBinding) {
+                    RokuricsSettingsPickerRow(title: RokuricsCopy.text("模型候选", "Candidates"), selection: modelNameBinding) {
                         ForEach(currentModelCandidates, id: \.self) { modelName in
                             Text(modelName).tag(modelName)
                         }
@@ -94,7 +96,7 @@ struct MacNoteGenerationSettingsView: View {
 
                 RokuricsSettingsDivider()
                 RokuricsSettingsTextFieldRow(
-                    title: "手动模型名",
+                    title: RokuricsCopy.text("手动模型名", "Model name"),
                     placeholder: modelPlaceholder,
                     text: modelNameBinding
                 )
@@ -102,7 +104,9 @@ struct MacNoteGenerationSettingsView: View {
                 if supportsModelRefresh {
                     RokuricsSettingsDivider()
                     RokuricsSettingsActionRow(
-                        title: activeDiagnostic == .models ? "刷新中" : "刷新模型",
+                        title: activeDiagnostic == .models
+                            ? RokuricsCopy.text("刷新中", "Refreshing")
+                            : RokuricsCopy.text("刷新模型", "Refresh"),
                         valueText: modelCandidateSummary,
                         systemImage: "arrow.clockwise",
                         isDisabled: activeDiagnostic != nil
@@ -113,8 +117,8 @@ struct MacNoteGenerationSettingsView: View {
 
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "保存设置",
-                    valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                    title: RokuricsCopy.text("保存设置", "Save"),
+                    valueText: isSavedDiagnostic ? RokuricsCopy.text("已保存", "Saved") : "",
                     systemImage: "square.and.arrow.down",
                     tint: MacTheme.leaf,
                     action: saveConfiguration
@@ -124,7 +128,7 @@ struct MacNoteGenerationSettingsView: View {
     }
 
     private var aiAPIGroup: some View {
-        RokuricsSettingsGroup(title: "API 设置") {
+        RokuricsSettingsGroup(title: RokuricsCopy.text("API 设置", "API")) {
             if providerKindDraft == .openAICompatible {
                 RokuricsSettingsPickerRow(title: "Preset", selection: providerPresetBinding) {
                     ForEach(AIProviderPreset.allCases) { preset in
@@ -168,8 +172,8 @@ struct MacNoteGenerationSettingsView: View {
 
             RokuricsSettingsDivider()
             RokuricsSettingsActionRow(
-                title: "保存设置",
-                valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                title: RokuricsCopy.text("保存设置", "Save"),
+                valueText: isSavedDiagnostic ? RokuricsCopy.text("已保存", "Saved") : "",
                 systemImage: "square.and.arrow.down",
                 tint: MacTheme.leaf,
                 action: saveConfiguration
@@ -178,12 +182,17 @@ struct MacNoteGenerationSettingsView: View {
     }
 
     private var aiTestGroup: some View {
-        RokuricsSettingsGroup(title: "测试") {
+        RokuricsSettingsGroup(title: RokuricsCopy.text("测试", "Test")) {
             if providerKindDraft == .mock {
-                RokuricsSettingsRow(title: "状态", valueText: "Mock provider 本地可用")
+                RokuricsSettingsRow(
+                    title: RokuricsCopy.text("状态", "Status"),
+                    valueText: RokuricsCopy.text("Mock provider 本地可用", "Mock is local")
+                )
             } else {
                 RokuricsSettingsActionRow(
-                    title: activeDiagnostic == .connection ? "测试中" : "测试连接",
+                    title: activeDiagnostic == .connection
+                        ? RokuricsCopy.text("测试中", "Testing")
+                        : RokuricsCopy.text("测试连接", "Connection"),
                     valueText: "",
                     systemImage: DiagnosticAction.connection.systemImage,
                     isDisabled: activeDiagnostic != nil
@@ -193,7 +202,9 @@ struct MacNoteGenerationSettingsView: View {
 
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: activeDiagnostic == .model ? "测试中" : "测试模型",
+                    title: activeDiagnostic == .model
+                        ? RokuricsCopy.text("测试中", "Testing")
+                        : RokuricsCopy.text("测试模型", "Model"),
                     valueText: "",
                     systemImage: DiagnosticAction.model.systemImage,
                     isDisabled: activeDiagnostic != nil
@@ -203,7 +214,9 @@ struct MacNoteGenerationSettingsView: View {
 
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: activeDiagnostic == .generation ? "测试中" : "测试生成",
+                    title: activeDiagnostic == .generation
+                        ? RokuricsCopy.text("测试中", "Testing")
+                        : RokuricsCopy.text("测试生成", "Generation"),
                     valueText: "",
                     systemImage: DiagnosticAction.generation.systemImage,
                     isDisabled: activeDiagnostic != nil
@@ -213,8 +226,8 @@ struct MacNoteGenerationSettingsView: View {
 
                 RokuricsSettingsDivider()
                 RokuricsSettingsActionRow(
-                    title: "保存设置",
-                    valueText: diagnosticMessage == "配置已保存" ? "已保存" : "",
+                    title: RokuricsCopy.text("保存设置", "Save"),
+                    valueText: isSavedDiagnostic ? RokuricsCopy.text("已保存", "Saved") : "",
                     systemImage: "square.and.arrow.down",
                     tint: MacTheme.leaf,
                     action: saveConfiguration
@@ -224,7 +237,7 @@ struct MacNoteGenerationSettingsView: View {
             if let diagnosticMessage {
                 RokuricsSettingsDivider()
                 RokuricsSettingsRow(
-                    title: "结果",
+                    title: RokuricsCopy.text("结果", "Result"),
                     valueText: diagnosticMessage,
                     systemImage: diagnosticIsSuccess ? "checkmark.circle" : "exclamationmark.triangle",
                     tint: diagnosticIsSuccess ? MacTheme.leaf : MacTheme.coral
@@ -247,15 +260,16 @@ struct MacNoteGenerationSettingsView: View {
         case .mock:
             return "mock-note-local"
         case .openAICompatible:
-            return compactValue(modelNameDraft, fallback: "未选择模型")
+            return compactValue(modelNameDraft, fallback: RokuricsCopy.text("未选择模型", "No model"))
         case .anthropicMessages:
-            return compactValue(anthropicModelNameDraft, fallback: "未选择模型")
+            return compactValue(anthropicModelNameDraft, fallback: RokuricsCopy.text("未选择模型", "No model"))
         }
     }
 
     private var modelCandidateSummary: String {
         let count = currentModelCandidates.count
-        return count > 0 ? "\(count) 个" : ""
+        guard count > 0 else { return "" }
+        return RokuricsCopy.usesChinese ? "\(count) 个" : "\(count) models"
     }
 
     private var currentModelCandidates: [String] {
@@ -292,7 +306,13 @@ struct MacNoteGenerationSettingsView: View {
     }
 
     private var apiKeyPlaceholder: String {
-        providerKindDraft == .anthropicMessages ? "必填" : "可选"
+        providerKindDraft == .anthropicMessages
+            ? RokuricsCopy.text("必填", "Required")
+            : RokuricsCopy.text("可选", "Optional")
+    }
+
+    private var isSavedDiagnostic: Bool {
+        diagnosticMessage == RokuricsCopy.text("配置已保存", "Saved")
     }
 
     private var baseURLBinding: Binding<String> {
@@ -393,13 +413,13 @@ struct MacNoteGenerationSettingsView: View {
             cachedAnthropicModelCandidates: anthropicModelCandidatesDraft
         )
         diagnosticIsSuccess = true
-        diagnosticMessage = "配置已保存"
+        diagnosticMessage = RokuricsCopy.text("配置已保存", "Saved")
     }
 
     private func runDiagnostic(_ action: DiagnosticAction) {
         saveConfiguration()
         activeDiagnostic = action
-        diagnosticMessage = "测试中"
+        diagnosticMessage = RokuricsCopy.text("测试中", "Testing")
 
         Task {
             let result: NoteGenerationDiagnosticResult
@@ -473,7 +493,7 @@ struct MacNoteGenerationSettingsView: View {
             let currentModel = modelNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = currentModel.isEmpty || refreshResult.modelIDs.contains(currentModel)
                 ? ""
-                : "，当前模型不在刷新列表中"
+                : RokuricsCopy.text("，当前模型不在刷新列表中", "; current model not in list")
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
                 message: "\(refreshResult.message)\(suffix)"
@@ -506,7 +526,7 @@ struct MacNoteGenerationSettingsView: View {
             let currentModel = anthropicModelNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = currentModel.isEmpty || refreshResult.modelIDs.contains(currentModel)
                 ? ""
-                : "，当前模型不在刷新列表中"
+                : RokuricsCopy.text("，当前模型不在刷新列表中", "; current model not in list")
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
                 message: "\(refreshResult.message)\(suffix)"

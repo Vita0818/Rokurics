@@ -1,0 +1,15 @@
+{
+  "completedAt" : "2026-05-31T06:04:36Z",
+  "language" : "auto",
+  "modelName" : "ggml-large-v3.bin",
+  "providerID" : "whisperCpp",
+  "providerName" : "whisper.cpp",
+  "recordingID" : "rokurics_2026-05-21_14-30-01_fallback",
+  "segments" : [
+
+  ],
+  "startedAt" : "2026-05-31T06:04:17Z",
+  "status" : "transcribed",
+  "taskID" : "22cbdb0e-890d-40f7-aa68-2b7512e159d3",
+  "text" : "Thank you for watching!\n Thank you for watching!\n Thank you for watching!"
+}

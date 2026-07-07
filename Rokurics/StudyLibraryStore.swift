@@ -68,6 +68,67 @@ struct StudyMetadataIndex: Codable, Equatable {
     }
 }
 
+enum CanonicalEffectiveReadCacheReason: String {
+    case readRuntimeResultChanged
+    case readRuntimeConfigChanged
+    case legacyBackingChanged
+    case explicitRefresh
+    case fallbackStateChanged
+    case cacheMiss
+}
+
+struct CanonicalEffectiveReadCacheMetrics: Equatable {
+    var projectionRebuildCount = 0
+    var treeRebuildCount = 0
+    var cacheHitCount = 0
+    var cacheMissCount = 0
+    var cacheInvalidationCount = 0
+    var fallbackLegacyCount = 0
+    var repeatedAccessCount = 0
+    var itemProjectionBuildCount = 0
+    var folderProjectionBuildCount = 0
+    var lastRebuildReason: String?
+    var lastRebuildDurationMs: Int?
+    var lastReadSource: String?
+
+    var diagnosticsSummary: String {
+        [
+            "projectionRebuildCount=\(projectionRebuildCount)",
+            "treeRebuildCount=\(treeRebuildCount)",
+            "cacheHitCount=\(cacheHitCount)",
+            "cacheMissCount=\(cacheMissCount)",
+            "cacheInvalidationCount=\(cacheInvalidationCount)",
+            "fallbackLegacyCount=\(fallbackLegacyCount)",
+            "repeatedAccessCount=\(repeatedAccessCount)",
+            "itemProjectionBuildCount=\(itemProjectionBuildCount)",
+            "folderProjectionBuildCount=\(folderProjectionBuildCount)",
+            lastRebuildReason.map { "lastRebuildReason=\($0)" },
+            lastRebuildDurationMs.map { "lastRebuildDurationMs=\($0)" },
+            lastReadSource.map { "lastReadSource=\($0)" }
+        ].compactMap { $0 }.joined(separator: ",")
+    }
+}
+
+private struct CanonicalEffectiveStudyCacheKey: Equatable {
+    var mode: CanonicalReadRuntimeMode
+    var returnedSource: CanonicalReadProjectionSource
+    var fallback: CanonicalReadRuntimeFallback
+    var canonicalReadServed: Bool
+    var legacyBackingRevision: Int
+    var snapshotSignature: String
+    var divergenceSignature: String
+}
+
+private struct CanonicalEffectiveStudyProjection {
+    var key: CanonicalEffectiveStudyCacheKey
+    var items: [StudyItemMetadata]
+    var folders: [StudyFolderMetadata]
+    var source: CanonicalReadProjectionSource
+    var divergenceCount: Int
+    var rebuildReason: CanonicalEffectiveReadCacheReason
+    var rebuildDurationMs: Int
+}
+
 @MainActor
 final class StudyLibraryStore: ObservableObject {
     @Published private(set) var allStudyItems: [StudyItemMetadata] = []
@@ -75,6 +136,10 @@ final class StudyLibraryStore: ObservableObject {
     @Published private(set) var hierarchyRules: [StudyHierarchyRule] = [.defaultCourseView]
     @Published private(set) var selectedHierarchyRule: StudyHierarchyRule = .defaultCourseView
     @Published private(set) var filingCandidates: StudyFilingCandidates = .empty
+    @Published private(set) var canonicalReadRuntimeResult: CanonicalReadRuntimeResult?
+    @Published private(set) var canonicalReadRuntimeReturnedSource: CanonicalReadProjectionSource = .legacy
+    @Published private(set) var canonicalReadRuntimeLastDiagnostics: [CanonicalReadRuntimeDiagnostic] = []
+    @Published private(set) var effectiveSyncStatusByObjectID: [CanonicalObjectID: CanonicalEffectiveSyncStatus] = [:]
 
     private let fileManager: FileManager
     private let rootURL: URL
@@ -86,14 +151,33 @@ final class StudyLibraryStore: ObservableObject {
     private let legacyItemMetadataURL: URL
     private let legacyIndexURL: URL
     private let audioFileStore: AudioFileStore
+    private var canonicalReadRuntimeConfigurationOverride: CanonicalReadRuntimeConfiguration?
+    private var canonicalReadRuntimeUsesMasterSwitchConfiguration = false
+    private var canonicalReadRuntimeCanonicalManifest: CanonicalManifest?
+    private var canonicalReadRuntimePeerManifest: CanonicalManifest?
+    private var canonicalReadRuntimeUploadCandidates: [CanonicalAudioUploadCutoverCandidate] = []
+    private var canonicalReadRuntimeSyncResult: CanonicalSyncRuntimeResult?
+    private var canonicalReadRuntimeSyncRunID: String?
+    private var canonicalKernelSwitchObserver: NSObjectProtocol?
+    private var canonicalEffectiveReadCache: CanonicalEffectiveStudyProjection?
+    private var canonicalEffectiveReadCacheMetrics = CanonicalEffectiveReadCacheMetrics()
+    private var canonicalEffectiveReadCacheDiagnostics: [CanonicalReadRuntimeDiagnostic] = []
+    private var canonicalFileRuntimeDiagnostics: [CanonicalKernelDiagnosticRecord] = []
+    private var canonicalEffectiveReadLegacyRevision = 0
+    private let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
+    private var effectiveSyncStatusCacheByObjectID: [CanonicalObjectID: CanonicalEffectiveSyncStatus] = [:]
+    private var effectiveSyncStatusPublishTask: Task<Void, Never>?
+    private var storePublishCounterCancellable: AnyCancellable?
 
     init(
         fileManager: FileManager = .default,
         rootURL: URL? = nil,
-        audioFileStore: AudioFileStore? = nil
+        audioFileStore: AudioFileStore? = nil,
+        canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil
     ) {
         self.fileManager = fileManager
         self.audioFileStore = audioFileStore ?? AudioFileStore(fileManager: fileManager, rootDirectoryURL: rootURL)
+        self.canonicalStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
 
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
@@ -129,10 +213,29 @@ final class StudyLibraryStore: ObservableObject {
             .appendingPathComponent("study-index.json", isDirectory: false)
             .standardizedFileURL
 
+        startPublishCounter(scope: "iPhoneStudyLibraryStore")
+
         try? ensureStudyDirectories()
-        hierarchyRules = loadHierarchyRules()
-        selectedHierarchyRule = hierarchyRules.first ?? .defaultCourseView
+        updatePublished(\.hierarchyRules, to: loadHierarchyRules())
+        updatePublished(\.selectedHierarchyRule, to: hierarchyRules.first ?? .defaultCourseView)
         refresh()
+
+        canonicalKernelSwitchObserver = NotificationCenter.default.addObserver(
+            forName: CanonicalKernelSwitchConfiguration.didChangeNotificationName,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refresh(forceCanonicalReadRuntimeProjection: true)
+            }
+        }
+    }
+
+    deinit {
+        if let canonicalKernelSwitchObserver {
+            NotificationCenter.default.removeObserver(canonicalKernelSwitchObserver)
+        }
+        effectiveSyncStatusPublishTask?.cancel()
     }
 
     var libraryRootURL: URL {
@@ -143,7 +246,61 @@ final class StudyLibraryStore: ObservableObject {
         studyURL.path
     }
 
-    func refresh() {
+    var canonicalReadRuntimeConfigurationOverrideIsSet: Bool {
+        canonicalReadRuntimeConfigurationOverride != nil
+    }
+
+    var canonicalReadEffectiveCacheMetrics: CanonicalEffectiveReadCacheMetrics {
+        canonicalEffectiveReadCacheMetrics
+    }
+
+    var canonicalReadEffectiveCacheDiagnosticEvents: [CanonicalReadRuntimeDiagnostic] {
+        canonicalEffectiveReadCacheDiagnostics
+    }
+
+    var canonicalFileRuntimeDiagnosticRecords: [CanonicalKernelDiagnosticRecord] {
+        canonicalFileRuntimeDiagnostics
+    }
+
+    var canonicalStatusTruthReadPathAvailable: Bool {
+        true
+    }
+
+    func produceCanonicalStatusFact(_ fact: CanonicalStatusFact) async -> CanonicalStatusFactMergeResult {
+        let result = await canonicalStatusTruthRuntime.produce(fact)
+        await refreshEffectiveSyncStatusSnapshot(for: fact.objectID)
+        return result
+    }
+
+    func applyCanonicalStatusProjection(_ snapshot: CanonicalStatusProjectionSnapshot) {
+        applyEffectiveSyncStatusUpdates([snapshot.objectID: snapshot.effectiveStatus])
+    }
+
+    func effectiveSyncStatus(for objectID: CanonicalObjectID) -> CanonicalEffectiveSyncStatus? {
+        effectiveSyncStatusCacheByObjectID[objectID] ?? effectiveSyncStatusByObjectID[objectID]
+    }
+
+    func canonicalDisplaySyncState(for objectID: CanonicalObjectID) -> CanonicalDisplaySyncState? {
+        effectiveSyncStatus(for: objectID).map(CanonicalEffectiveStatusUIProjection.project(_:))
+    }
+
+    var effectiveStudyItems: [StudyItemMetadata] {
+        guard let result = canonicalReadRuntimeResult,
+              result.canonicalReadServed else {
+            return allStudyItems
+        }
+        return canonicalEffectiveProjection(for: result, reason: .cacheMiss)?.items ?? allStudyItems
+    }
+
+    var effectiveStudyFolders: [StudyFolderMetadata] {
+        guard let result = canonicalReadRuntimeResult,
+              result.canonicalReadServed else {
+            return allStudyFolders
+        }
+        return canonicalEffectiveProjection(for: result, reason: .cacheMiss)?.folders ?? allStudyFolders
+    }
+
+    func refresh(forceCanonicalReadRuntimeProjection: Bool = false) {
         let recordings = (try? audioFileStore.loadAllMetadata()) ?? []
         let storedItems = loadAllStoredItemMetadata()
         let receiveItems = loadReceiveRecordDerivedItems()
@@ -185,17 +342,846 @@ final class StudyLibraryStore: ObservableObject {
             items: items
         )
 
-        allStudyItems = items
-        allStudyFolders = folders
-        filingCandidates = StudyFilingCandidates.collect(from: items)
+        var backingChanged = false
+        backingChanged = updatePublished(\.allStudyItems, to: items) || backingChanged
+        backingChanged = updatePublished(\.allStudyFolders, to: folders) || backingChanged
+        backingChanged = updatePublished(\.filingCandidates, to: StudyFilingCandidates.collect(from: items)) || backingChanged
+
+        if backingChanged {
+            canonicalEffectiveReadLegacyRevision += 1
+            refreshCanonicalReadRuntimeProjection(cacheRebuildReason: .explicitRefresh)
+        } else if forceCanonicalReadRuntimeProjection {
+            refreshCanonicalReadRuntimeProjection(cacheRebuildReason: .readRuntimeConfigChanged)
+        }
     }
 
     func item(recordingID: String) -> StudyItemMetadata? {
-        allStudyItems.first { $0.recordingID == recordingID }
+        effectiveStudyItems.first { $0.recordingID == recordingID }
     }
 
     func item(itemID: StudyItemID) -> StudyItemMetadata? {
-        allStudyItems.first { $0.itemID == itemID || $0.recordingID == itemID }
+        effectiveStudyItems.first { $0.itemID == itemID || $0.recordingID == itemID }
+    }
+
+    @discardableResult
+    func setCanonicalReadRuntimeConfiguration(
+        _ configuration: CanonicalReadRuntimeConfiguration?
+    ) -> CanonicalReadRuntimeResult {
+        canonicalReadRuntimeUsesMasterSwitchConfiguration = true
+        canonicalReadRuntimeConfigurationOverride = Self.servingReadConfiguration(configuration)
+        return refreshCanonicalReadRuntimeProjection(cacheRebuildReason: .readRuntimeConfigChanged)
+    }
+
+    @discardableResult
+    func configureCanonicalReadRuntime(
+        configuration: CanonicalReadRuntimeConfiguration,
+        canonicalManifest: CanonicalManifest?,
+        peerCanonicalManifest: CanonicalManifest? = nil,
+        uploadCandidates: [CanonicalAudioUploadCutoverCandidate] = [],
+        syncRuntimeResult: CanonicalSyncRuntimeResult? = nil,
+        syncRunID: String? = nil,
+        canonicalReadFailureReason: String? = nil
+    ) -> CanonicalReadRuntimeResult {
+        canonicalReadRuntimeUsesMasterSwitchConfiguration = configuration.mode == .disabled || configuration.mode == .blocked
+        canonicalReadRuntimeConfigurationOverride = Self.servingReadConfiguration(configuration)
+        canonicalReadRuntimeCanonicalManifest = canonicalManifest
+        canonicalReadRuntimePeerManifest = peerCanonicalManifest
+        canonicalReadRuntimeUploadCandidates = uploadCandidates
+        canonicalReadRuntimeSyncResult = syncRuntimeResult
+        canonicalReadRuntimeSyncRunID = syncRunID
+        return refreshCanonicalReadRuntimeProjection(
+            canonicalReadFailureReason: canonicalReadFailureReason,
+            cacheRebuildReason: .readRuntimeResultChanged
+        )
+    }
+
+    @discardableResult
+    func configureCanonicalReadRuntimeFromSync(
+        configuration: CanonicalReadRuntimeConfiguration,
+        localInventory: LocalNetworkSyncInventory,
+        peerInventory: LocalNetworkSyncInventory?,
+        uploadCandidates: [CanonicalAudioUploadCutoverCandidate] = [],
+        syncRuntimeResult: CanonicalSyncRuntimeResult? = nil,
+        syncRunID: String? = nil,
+        canonicalReadFailureReason: String? = nil
+    ) -> CanonicalReadRuntimeResult {
+        canonicalReadRuntimeUsesMasterSwitchConfiguration = configuration.mode == .disabled || configuration.mode == .blocked
+        canonicalReadRuntimeConfigurationOverride = Self.servingReadConfiguration(configuration)
+        canonicalReadRuntimeCanonicalManifest = localInventory.canonicalManifest
+        canonicalReadRuntimePeerManifest = peerInventory?.canonicalManifest
+        canonicalReadRuntimeUploadCandidates = uploadCandidates
+        canonicalReadRuntimeSyncResult = syncRuntimeResult
+        canonicalReadRuntimeSyncRunID = syncRunID
+        let result = IPhoneCanonicalReadRuntimeAdapter(configuration: configuration).read(
+            legacyInventory: localInventory,
+            canonicalManifest: localInventory.canonicalManifest,
+            peerCanonicalManifest: peerInventory?.canonicalManifest,
+            uploadCandidates: uploadCandidates,
+            syncRuntimeResult: syncRuntimeResult,
+            syncRunID: syncRunID,
+            canonicalReadFailureReason: canonicalReadFailureReason
+        )
+        applyCanonicalReadRuntimeResult(result, cacheRebuildReason: .readRuntimeResultChanged)
+        return result
+    }
+
+    func clearCanonicalReadRuntimeOverride() {
+        canonicalReadRuntimeUsesMasterSwitchConfiguration = false
+        canonicalReadRuntimeConfigurationOverride = nil
+        canonicalReadRuntimeCanonicalManifest = nil
+        canonicalReadRuntimePeerManifest = nil
+        canonicalReadRuntimeUploadCandidates = []
+        canonicalReadRuntimeSyncResult = nil
+        canonicalReadRuntimeSyncRunID = nil
+        refreshCanonicalReadRuntimeProjection(cacheRebuildReason: .readRuntimeConfigChanged)
+    }
+
+    @discardableResult
+    func refreshCanonicalReadRuntimeProjection(
+        canonicalReadFailureReason: String? = nil,
+        cacheRebuildReason: CanonicalEffectiveReadCacheReason = .readRuntimeResultChanged
+    ) -> CanonicalReadRuntimeResult {
+        let configuration = resolvedCanonicalReadRuntimeConfiguration()
+        let legacyManifest = makeReadRuntimeLegacyManifest(
+            deviceID: "iphone-local-read",
+            generatedAt: Date()
+        )
+        let canonicalManifest = canonicalReadRuntimeCanonicalManifest
+            ?? IPhoneCanonicalReadRuntimeAdapter.makeCanonicalManifest(legacyManifest)
+        let result = IPhoneCanonicalReadRuntimeAdapter(configuration: configuration).read(
+            legacyManifest: legacyManifest,
+            canonicalManifest: canonicalManifest,
+            peerCanonicalManifest: canonicalReadRuntimePeerManifest,
+            uploadCandidates: canonicalReadRuntimeUploadCandidates,
+            syncRuntimeResult: canonicalReadRuntimeSyncResult,
+            syncRunID: canonicalReadRuntimeSyncRunID,
+            canonicalReadFailureReason: canonicalReadFailureReason
+        )
+        applyCanonicalReadRuntimeResult(result, cacheRebuildReason: cacheRebuildReason)
+        return result
+    }
+
+    private func applyCanonicalReadRuntimeResult(
+        _ result: CanonicalReadRuntimeResult,
+        cacheRebuildReason: CanonicalEffectiveReadCacheReason
+    ) {
+        updatePublished(\.canonicalReadRuntimeResult, to: result)
+        updatePublished(\.canonicalReadRuntimeReturnedSource, to: result.returnedSource)
+        updatePublished(\.canonicalReadRuntimeLastDiagnostics, to: result.diagnostics)
+        refreshCanonicalEffectiveReadCache(for: result, reason: cacheRebuildReason)
+    }
+
+    private func refreshEffectiveSyncStatusSnapshot(for objectID: CanonicalObjectID) async {
+        guard let snapshot = await canonicalStatusTruthRuntime.projectionSnapshot(for: objectID) else {
+            return
+        }
+        applyEffectiveSyncStatusUpdates([objectID: snapshot.effectiveStatus])
+    }
+
+    @discardableResult
+    private func updatePublished<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<StudyLibraryStore, Value>,
+        to newValue: Value
+    ) -> Bool {
+        guard self[keyPath: keyPath] != newValue else {
+            return false
+        }
+        self[keyPath: keyPath] = newValue
+        return true
+    }
+
+    private func applyEffectiveSyncStatusUpdates(
+        _ updates: [CanonicalObjectID: CanonicalEffectiveSyncStatus]
+    ) {
+        guard updates.isEmpty == false else {
+            return
+        }
+        var changed = false
+        for (objectID, status) in updates {
+            guard effectiveSyncStatusCacheByObjectID[objectID] != status else {
+                continue
+            }
+            effectiveSyncStatusCacheByObjectID[objectID] = status
+            changed = true
+        }
+        guard changed else {
+            return
+        }
+        scheduleEffectiveSyncStatusPublish()
+    }
+
+    private func scheduleEffectiveSyncStatusPublish() {
+        effectiveSyncStatusPublishTask?.cancel()
+        effectiveSyncStatusPublishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.publishEffectiveSyncStatusSnapshotIfChanged()
+        }
+    }
+
+    private func publishEffectiveSyncStatusSnapshotIfChanged() {
+        effectiveSyncStatusPublishTask = nil
+        updatePublished(\.effectiveSyncStatusByObjectID, to: effectiveSyncStatusCacheByObjectID)
+    }
+
+    private func startPublishCounter(scope: String) {
+        storePublishCounterCancellable = objectWillChange.sink { [weak self] _ in
+            self?.recordPublishCounterTick(scope: scope)
+        }
+    }
+
+    private func recordPublishCounterTick(scope: String) {
+        ConnectionDiagnosticsStore.shared.recordRuntimeCounterTick(scope: scope, kind: "published")
+    }
+
+    private func refreshCanonicalEffectiveReadCache(
+        for result: CanonicalReadRuntimeResult,
+        reason: CanonicalEffectiveReadCacheReason
+    ) {
+        guard result.canonicalReadServed else {
+            invalidateCanonicalEffectiveReadCache(reason: reason == .readRuntimeConfigChanged ? .readRuntimeConfigChanged : .fallbackStateChanged)
+            if result.legacyFallbackServed || result.returnedSource == .legacy {
+                canonicalEffectiveReadCacheMetrics.fallbackLegacyCount += 1
+                canonicalEffectiveReadCacheMetrics.lastReadSource = CanonicalReadProjectionSource.legacy.rawValue
+                recordCanonicalEffectiveReadCacheDiagnostic(
+                    .canonicalReadEffectiveFallbackLegacy,
+                    count: canonicalEffectiveReadCacheMetrics.fallbackLegacyCount,
+                    detail: result.fallback.rawValue
+                )
+            }
+            return
+        }
+
+        let key = canonicalEffectiveCacheKey(for: result)
+        if canonicalEffectiveReadCache?.key == key {
+            return
+        }
+
+        if canonicalEffectiveReadCache != nil {
+            invalidateCanonicalEffectiveReadCache(reason: reason)
+        } else {
+            canonicalEffectiveReadCacheMetrics.cacheMissCount += 1
+            recordCanonicalEffectiveReadCacheDiagnostic(
+                .canonicalReadEffectiveCacheMiss,
+                count: canonicalEffectiveReadCacheMetrics.cacheMissCount,
+                detail: reason.rawValue
+            )
+        }
+
+        let startedAt = Date()
+        let items = canonicalEffectiveStudyItems(from: result.readSnapshot)
+        canonicalEffectiveReadCacheMetrics.itemProjectionBuildCount += 1
+        let folders = canonicalEffectiveStudyFolders(from: result.readSnapshot, items: items)
+        canonicalEffectiveReadCacheMetrics.folderProjectionBuildCount += 1
+        let durationMs = max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
+
+        canonicalEffectiveReadCacheMetrics.projectionRebuildCount += 1
+        canonicalEffectiveReadCacheMetrics.lastRebuildReason = reason.rawValue
+        canonicalEffectiveReadCacheMetrics.lastRebuildDurationMs = durationMs
+        canonicalEffectiveReadCacheMetrics.lastReadSource = result.returnedSource.rawValue
+        canonicalEffectiveReadCache = CanonicalEffectiveStudyProjection(
+            key: key,
+            items: items,
+            folders: folders,
+            source: result.returnedSource,
+            divergenceCount: result.diff?.divergenceCount ?? 0,
+            rebuildReason: reason,
+            rebuildDurationMs: durationMs
+        )
+        recordCanonicalEffectiveReadCacheDiagnostic(
+            .canonicalReadEffectiveCacheRebuilt,
+            count: canonicalEffectiveReadCacheMetrics.projectionRebuildCount,
+            detail: reason.rawValue
+        )
+        recordCanonicalEffectiveReadCacheDiagnostic(
+            .canonicalReadEffectiveRebuildDurationMs,
+            count: durationMs,
+            detail: reason.rawValue
+        )
+        recordCanonicalFileRuntimeReadProjectionDiagnostic(
+            durationMs: durationMs,
+            count: canonicalEffectiveReadCacheMetrics.projectionRebuildCount,
+            key: key,
+            reason: reason
+        )
+        ConnectionDiagnosticsStore.shared.recordPerfLog(
+            CanonicalPerfLog.subphaseMeasured(
+                operation: .enterStudyLibrary,
+                subphase: .projectionRebuildMs,
+                durationMs: durationMs,
+                result: reason.rawValue
+            )
+        )
+    }
+
+    private func canonicalEffectiveProjection(
+        for result: CanonicalReadRuntimeResult,
+        reason: CanonicalEffectiveReadCacheReason
+    ) -> CanonicalEffectiveStudyProjection? {
+        let key = canonicalEffectiveCacheKey(for: result)
+        if let cache = canonicalEffectiveReadCache, cache.key == key {
+            canonicalEffectiveReadCacheMetrics.cacheHitCount += 1
+            canonicalEffectiveReadCacheMetrics.lastReadSource = cache.source.rawValue
+            recordCanonicalEffectiveReadCacheDiagnostic(
+                .canonicalReadEffectiveCacheHit,
+                count: canonicalEffectiveReadCacheMetrics.cacheHitCount,
+                detail: cache.rebuildReason.rawValue
+            )
+            if canonicalEffectiveReadCacheMetrics.cacheHitCount > canonicalEffectiveReadCacheMetrics.projectionRebuildCount {
+                canonicalEffectiveReadCacheMetrics.repeatedAccessCount += 1
+                recordCanonicalEffectiveReadCacheDiagnostic(
+                    .canonicalReadEffectiveRepeatedAccessAvoidedRebuild,
+                    count: canonicalEffectiveReadCacheMetrics.repeatedAccessCount,
+                    detail: "sameCacheKey"
+                )
+            }
+            return cache
+        }
+        if canonicalEffectiveReadCache != nil {
+            refreshCanonicalEffectiveReadCache(for: result, reason: reason)
+            return canonicalEffectiveReadCache
+        }
+
+        canonicalEffectiveReadCacheMetrics.cacheMissCount += 1
+        recordCanonicalEffectiveReadCacheDiagnostic(
+            .canonicalReadEffectiveCacheMiss,
+            count: canonicalEffectiveReadCacheMetrics.cacheMissCount,
+            detail: reason.rawValue
+        )
+        refreshCanonicalEffectiveReadCache(for: result, reason: reason)
+        return canonicalEffectiveReadCache
+    }
+
+    private func invalidateCanonicalEffectiveReadCache(reason: CanonicalEffectiveReadCacheReason) {
+        guard let cache = canonicalEffectiveReadCache else {
+            return
+        }
+        canonicalEffectiveReadCache = nil
+        canonicalEffectiveReadCacheMetrics.cacheInvalidationCount += 1
+        canonicalEffectiveReadCacheMetrics.lastRebuildReason = reason.rawValue
+        recordCanonicalEffectiveReadCacheDiagnostic(
+            .canonicalReadEffectiveCacheInvalidated,
+            count: canonicalEffectiveReadCacheMetrics.cacheInvalidationCount,
+            detail: reason.rawValue
+        )
+        recordCanonicalFileRuntimeReadProjectionDiagnostic(
+            durationMs: nil,
+            count: canonicalEffectiveReadCacheMetrics.cacheInvalidationCount,
+            key: cache.key,
+            reason: reason,
+            extra: "invalidation=true"
+        )
+    }
+
+    private func canonicalEffectiveCacheKey(
+        for result: CanonicalReadRuntimeResult
+    ) -> CanonicalEffectiveStudyCacheKey {
+        CanonicalEffectiveStudyCacheKey(
+            mode: result.mode,
+            returnedSource: result.returnedSource,
+            fallback: result.fallback,
+            canonicalReadServed: result.canonicalReadServed,
+            legacyBackingRevision: canonicalEffectiveReadLegacyRevision,
+            snapshotSignature: Self.canonicalReadSnapshotSignature(result.readSnapshot),
+            divergenceSignature: result.diff?.divergences.map(\.id).sorted().joined(separator: "|") ?? "none"
+        )
+    }
+
+    private nonisolated static func canonicalReadSnapshotSignature(_ snapshot: CanonicalReadSnapshot) -> String {
+        [
+            "source=\(snapshot.source.rawValue)",
+            "recordings=\(snapshot.recordingMetadata.records.map(recordingSignature).joined(separator: ";"))",
+            "folders=\(snapshot.libraryMetadata.snapshot.folders.map(folderSignature).joined(separator: ";"))",
+            "items=\(snapshot.libraryMetadata.snapshot.studyItems.map(studyItemSignature).joined(separator: ";"))",
+            "notes=\(snapshot.libraryMetadata.snapshot.standaloneNotes.map(standaloneNoteSignature).joined(separator: ";"))",
+            "artifactItems=\(snapshot.artifactMetadata.snapshot.items.map(artifactSignature).joined(separator: ";"))",
+            "artifactFailures=\(snapshot.artifactMetadata.snapshot.failures.map(\.id).joined(separator: ";"))",
+            "conflicts=\(snapshot.conflictState.snapshot.items.map(conflictSignature).joined(separator: ";"))",
+            "conflictFailures=\(snapshot.conflictState.snapshot.failures.map(\.id).joined(separator: ";"))",
+            "uploads=\(snapshot.uploadState.records.map(uploadSignature).joined(separator: ";"))",
+            "uploadFailures=\(snapshot.uploadState.failures.map(\.id).joined(separator: ";"))",
+            "sync=\(syncStatusSignature(snapshot.syncStatus))",
+            "redacted=\(snapshot.redaction.isRedacted)"
+        ].joined(separator: "|")
+    }
+
+    private nonisolated static func recordingSignature(_ record: CanonicalRecordingReadProjectionRecord) -> String {
+        [
+            record.objectID,
+            record.metadataHashPrefix ?? "metadataHash=none",
+            record.title,
+            record.tagsKey,
+            "\(record.durationSeconds ?? -1)",
+            "\(record.isDeleted)",
+            record.syncState.rawValue
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func folderSignature(_ folder: CanonicalLibraryMetadataReadProjectionFolder) -> String {
+        [
+            folder.folderID.rawValue,
+            folder.metadataHashPrefix ?? "metadataHash=none",
+            folder.title,
+            folder.parentID?.rawValue ?? "root",
+            folder.hierarchyPath.joined(separator: "/"),
+            folder.hierarchyLevel ?? "none",
+            folder.colorToken ?? "none",
+            folder.orderingKey ?? "ordering=none",
+            "\(folder.isDeleted)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func studyItemSignature(_ item: CanonicalLibraryMetadataReadProjectionItem) -> String {
+        [
+            item.itemID.rawValue,
+            item.metadataHashPrefix ?? "metadataHash=none",
+            item.itemKind.rawValue,
+            item.title,
+            item.filingComponents.joined(separator: "/"),
+            item.tags.joined(separator: ","),
+            item.folderIDs.map(\.rawValue).joined(separator: ","),
+            item.parentReferenceKey,
+            item.resourceTokenSummary,
+            item.orderingKey ?? "ordering=none",
+            "\(item.isDeleted)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func standaloneNoteSignature(_ note: CanonicalLibraryMetadataReadProjectionNote) -> String {
+        [
+            note.noteItemID.rawValue,
+            note.metadataHashPrefix ?? "metadataHash=none",
+            note.title,
+            note.filingComponents.joined(separator: "/"),
+            note.tags.joined(separator: ","),
+            note.folderIDs.map(\.rawValue).joined(separator: ","),
+            note.parentReferenceKey,
+            note.resourceTokenSummary,
+            "\(note.isDeleted)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func artifactSignature(_ item: CanonicalGeneratedArtifactReadProjectionItem) -> String {
+        [
+            item.objectID,
+            item.artifactID,
+            item.artifactKind.rawValue,
+            item.availability.rawValue,
+            item.hashPrefix ?? "hash=none",
+            "\(item.byteSize ?? -1)",
+            item.localDownloadedState ?? "local=unknown",
+            item.peerAuthoritativeState ?? "peer=unknown",
+            item.parentObjectStateSummary ?? "parent=unknown",
+            "\(item.localAvailability)",
+            "\(item.peerAuthoritativeAvailability)",
+            "\(item.parentTombstoned)",
+            "\(item.unsafePathTokenObserved)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func conflictSignature(_ item: CanonicalTombstoneConflictReadProjectionItem) -> String {
+        [
+            item.objectID,
+            item.objectKind.rawValue,
+            item.tombstoneState.rawValue,
+            item.deletedDisplayState.rawValue,
+            item.conflictKind,
+            item.conflictStatus.rawValue,
+            item.activeVsTombstoneState,
+            item.antiResurrectionStatus.rawValue,
+            item.parentObjectStateSummary,
+            "\(item.generatedArtifactResurrectionBlocked)",
+            "\(item.softDeleteMarkerPresent)",
+            item.hashPrefix ?? "hash=none",
+            "\(item.physicalDeleteRisk)",
+            "\(item.permanentDeleteRisk)",
+            "\(item.tombstoneGCRisk)",
+            "\(item.autoConflictResolutionRisk)",
+            "\(item.staleLiveResurrectionRisk)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func uploadSignature(_ record: CanonicalUploadReadProjectionRecord) -> String {
+        [
+            record.objectID,
+            "\(record.audioAvailable)",
+            record.audioAvailability.rawValue,
+            "\(record.byteSize ?? -1)",
+            record.audioHashPrefix ?? "hash=none",
+            record.peerState?.rawValue ?? "peer=none",
+            record.uploadAction?.rawValue ?? "action=none",
+            record.uploadEvidenceStatus?.rawValue ?? "evidence=none",
+            record.uploadLedgerPhase?.rawValue ?? "ledger=none",
+            "\(record.retryEligible)"
+        ].joined(separator: ":")
+    }
+
+    private nonisolated static func syncStatusSignature(_ status: CanonicalSyncEngineStatusReadProjection) -> String {
+        [
+            status.source.rawValue,
+            status.mode?.rawValue ?? "mode=none",
+            status.syncRuntimeMode?.rawValue ?? "syncMode=none",
+            "\(status.canonicalPlanUsed)",
+            "\(status.canonicalPlanFallback)",
+            "\(status.canonicalPlanBlocked)",
+            "\(status.canonicalPlanNoCommit)",
+            "\(status.pendingTransferCount)",
+            "\(status.inFlightTransferCount)",
+            "\(status.failedTransferCount)",
+            "\(status.syncOrUploadTriggeredByRead)"
+        ].joined(separator: ":")
+    }
+
+    private func recordCanonicalEffectiveReadCacheDiagnostic(
+        _ kind: CanonicalReadRuntimeDiagnosticKind,
+        count: Int? = nil,
+        detail: String? = nil
+    ) {
+        canonicalEffectiveReadCacheDiagnostics.append(
+            CanonicalReadRuntimeDiagnostic(
+                kind: kind,
+                syncRunID: canonicalReadRuntimeSyncRunID,
+                mode: canonicalReadRuntimeResult?.mode ?? .disabled,
+                source: canonicalReadRuntimeResult?.returnedSource,
+                count: count,
+                detail: detail
+            )
+        )
+        if canonicalEffectiveReadCacheDiagnostics.count > 64 {
+            canonicalEffectiveReadCacheDiagnostics.removeFirst(canonicalEffectiveReadCacheDiagnostics.count - 64)
+        }
+    }
+
+    private func recordCanonicalFileRuntimeReadProjectionDiagnostic(
+        durationMs: Int?,
+        count: Int?,
+        key: CanonicalEffectiveStudyCacheKey,
+        reason: CanonicalEffectiveReadCacheReason,
+        extra: String? = nil
+    ) {
+        let detail = [
+            "cacheKeyPrefix=\(canonicalEffectiveCacheKeyPrefix(key))",
+            "reason=\(reason.rawValue)",
+            extra
+        ].compactMap { $0 }.joined(separator: ",")
+        guard CanonicalKernelDiagnosticRedaction.isSafeForDiagnostics(detail) else {
+            canonicalFileRuntimeDiagnostics.append(
+                CanonicalKernelDiagnosticRecord(
+                    kind: .diagnosticRedactionRejected,
+                    domain: .file,
+                    count: 1,
+                    redactedDetail: "readProjectionDiagnosticRejected"
+                )
+            )
+            trimCanonicalFileRuntimeDiagnostics()
+            return
+        }
+        canonicalFileRuntimeDiagnostics.append(
+            CanonicalKernelDiagnosticRecord(
+                kind: .readProjectionRebuildDurationMs,
+                domain: .file,
+                durationMs: durationMs,
+                count: count,
+                redactedDetail: detail
+            )
+        )
+        trimCanonicalFileRuntimeDiagnostics()
+    }
+
+    private func trimCanonicalFileRuntimeDiagnostics() {
+        if canonicalFileRuntimeDiagnostics.count > 64 {
+            canonicalFileRuntimeDiagnostics.removeFirst(canonicalFileRuntimeDiagnostics.count - 64)
+        }
+    }
+
+    private nonisolated static func canonicalEffectiveCacheKeyPrefix(
+        _ key: CanonicalEffectiveStudyCacheKey
+    ) -> String {
+        let raw = [
+            key.mode.rawValue,
+            key.returnedSource.rawValue,
+            key.fallback.rawValue,
+            "\(key.canonicalReadServed)",
+            "\(key.legacyBackingRevision)",
+            key.snapshotSignature,
+            key.divergenceSignature
+        ].joined(separator: "|")
+        return String(CanonicalHash.sha256String(raw).value.prefix(12))
+    }
+
+    private func canonicalEffectiveCacheKeyPrefix(
+        _ key: CanonicalEffectiveStudyCacheKey
+    ) -> String {
+        Self.canonicalEffectiveCacheKeyPrefix(key)
+    }
+
+    private func resolvedCanonicalReadRuntimeConfiguration() -> CanonicalReadRuntimeConfiguration {
+        if let canonicalReadRuntimeConfigurationOverride {
+            return canonicalReadRuntimeConfigurationOverride
+        }
+        if canonicalReadRuntimeUsesMasterSwitchConfiguration {
+            return .disabled
+        }
+        return CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults()
+            .resolve()
+            .effectiveConfiguration
+            .readRuntimeConfiguration
+    }
+
+    private static func servingReadConfiguration(
+        _ configuration: CanonicalReadRuntimeConfiguration?
+    ) -> CanonicalReadRuntimeConfiguration? {
+        guard let configuration else {
+            return nil
+        }
+        switch configuration.mode {
+        case .disabled, .blocked:
+            return nil
+        case .parallelCompare, .canonicalReadCandidate, .guardedCanonicalReadWithLegacyFallback:
+            return configuration
+        }
+    }
+
+    private func makeReadRuntimeLegacyManifest(
+        deviceID: String,
+        generatedAt: Date
+    ) -> StudyLibrarySyncManifest {
+        let itemsByID = Dictionary(
+            allStudyItems.map { ($0.itemID, $0) },
+            uniquingKeysWith: { _, live in live }
+        )
+        let items = allStudyItems.map { $0.syncSanitized(modifiedByDeviceID: deviceID) }
+        let folders = allStudyFolders.map { $0.syncSanitized(modifiedByDeviceID: deviceID) }
+        let recordings = (try? audioFileStore.loadAllMetadata(includeDeleted: true)) ?? []
+        return StudyLibrarySyncManifest.make(
+            deviceID: deviceID,
+            generatedAt: generatedAt,
+            items: items,
+            folders: folders,
+            tombstones: makeSyncTombstones(items: items, folders: folders, deviceID: deviceID),
+            pendingUploads: makePendingRecordingUploads(
+                recordings: recordings,
+                itemsByID: itemsByID,
+                targetDeviceID: deviceID
+            ),
+            recordings: makeManifestRecordingEntries(recordings: recordings, deviceID: deviceID)
+        )
+    }
+
+    private func canonicalEffectiveStudyItems(
+        from snapshot: CanonicalReadSnapshot
+    ) -> [StudyItemMetadata] {
+        let generatedAt = snapshot.generatedAt.date
+        let legacyByItemID = Dictionary(
+            allStudyItems.map { ($0.itemID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let legacyByRecordingID = Dictionary(
+            allStudyItems.compactMap { item -> (String, StudyItemMetadata)? in
+                guard let recordingID = item.recordingID else { return nil }
+                return (recordingID, item)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var itemsByID: [StudyItemID: StudyItemMetadata] = [:]
+
+        for projection in snapshot.libraryMetadata.snapshot.studyItems {
+            let item = canonicalStudyItem(
+                itemID: projection.itemID.rawValue,
+                kind: projection.itemKind,
+                title: projection.title,
+                filingComponents: projection.filingComponents,
+                tags: projection.tags,
+                folderIDs: projection.folderIDs.map(\.rawValue),
+                isDeleted: projection.isDeleted,
+                generatedAt: generatedAt,
+                legacy: legacyByItemID[projection.itemID.rawValue]
+            )
+            itemsByID[item.itemID] = item
+        }
+
+        for projection in snapshot.libraryMetadata.snapshot.standaloneNotes {
+            let item = canonicalStudyItem(
+                itemID: projection.noteItemID.rawValue,
+                kind: .standaloneNote,
+                title: projection.title,
+                filingComponents: projection.filingComponents,
+                tags: projection.tags,
+                folderIDs: projection.folderIDs.map(\.rawValue),
+                isDeleted: projection.isDeleted,
+                generatedAt: generatedAt,
+                legacy: legacyByItemID[projection.noteItemID.rawValue]
+            )
+            itemsByID[item.itemID] = item
+        }
+
+        for recording in snapshot.recordingMetadata.records {
+            if let legacy = legacyByRecordingID[recording.objectID] {
+                let existing = itemsByID[legacy.itemID] ?? legacy
+                let item = canonicalRecordingMetadataItem(
+                    recording,
+                    overlaying: existing,
+                    generatedAt: generatedAt
+                )
+                itemsByID[item.itemID] = item
+            } else {
+                let filing = canonicalFilingPath(from: [])
+                let item = StudyItemMetadata(
+                    recordingID: recording.objectID,
+                    sanitizedRecordingID: StudyPathSanitizer.sanitizedPathComponent(recording.objectID),
+                    title: recording.title,
+                    createdAt: generatedAt,
+                    duration: TimeInterval(recording.durationSeconds ?? 0),
+                    studyFiling: filing,
+                    tags: canonicalTags(recording.tags),
+                    folderIDs: StudyItemMetadata.defaultFolderIDs(for: filing),
+                    updatedAt: generatedAt,
+                    transcriptionStatus: nil,
+                    noteStatus: nil,
+                    sourceDescription: "canonicalReadRuntime",
+                    isTrashed: recording.isDeleted,
+                    modifiedByDeviceID: "canonicalReadRuntime"
+                )
+                itemsByID[item.itemID] = item
+            }
+        }
+
+        return itemsByID.values.sorted { left, right in
+            if left.createdAt == right.createdAt {
+                return left.title.localizedStandardCompare(right.title) == .orderedAscending
+            }
+            return left.createdAt > right.createdAt
+        }
+    }
+
+    private func canonicalEffectiveStudyFolders(
+        from snapshot: CanonicalReadSnapshot,
+        items: [StudyItemMetadata]
+    ) -> [StudyFolderMetadata] {
+        let generatedAt = snapshot.generatedAt.date
+        let legacyByFolderID = Dictionary(
+            allStudyFolders.map { ($0.folderID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return snapshot.libraryMetadata.snapshot.folders.map { projection in
+            let path = canonicalFilingPath(from: projection.hierarchyPath)
+            let level = StudyFolderLevel(rawValue: projection.hierarchyLevel ?? "")
+                ?? StudyFolderMetadata.level(forDepth: max(0, projection.hierarchyPath.count - 1))
+                ?? .custom
+            var folder = legacyByFolderID[projection.folderID.rawValue] ?? StudyFolderMetadata(
+                folderID: projection.folderID.rawValue,
+                name: projection.title,
+                level: level,
+                path: path,
+                parentFolderID: projection.parentID?.rawValue,
+                createdAt: generatedAt,
+                updatedAt: generatedAt,
+                colorToken: projection.colorToken.flatMap(StudyFolderColorToken.init(rawValue:)),
+                isTrashed: projection.isDeleted,
+                modifiedByDeviceID: "canonicalReadRuntime"
+            )
+            folder.name = projection.title
+            folder.level = level
+            folder.path = path
+            folder.parentFolderID = projection.parentID?.rawValue
+            folder.colorToken = projection.colorToken.flatMap(StudyFolderColorToken.init(rawValue:))
+            folder.isTrashed = projection.isDeleted
+            folder.updatedAt = generatedAt
+            folder.modifiedByDeviceID = "canonicalReadRuntime"
+            folder.itemIDs = items
+                .filter { $0.folderIDs.contains(folder.folderID) }
+                .map(\.itemID)
+                .sorted()
+            return folder
+        }
+        .sorted { $0.folderID < $1.folderID }
+    }
+
+    private func canonicalStudyItem(
+        itemID: String,
+        kind: CanonicalStudyItemKind,
+        title: String,
+        filingComponents: [String],
+        tags: [String],
+        folderIDs: [String],
+        isDeleted: Bool,
+        generatedAt: Date,
+        legacy: StudyItemMetadata?
+    ) -> StudyItemMetadata {
+        let filing = canonicalFilingPath(from: filingComponents)
+        let resolvedKind: StudyItemKind = kind == .recordingBundle ? .recordingBundle : .standaloneNote
+        var item = legacy ?? StudyItemMetadata(
+            itemID: itemID,
+            kind: resolvedKind,
+            title: title,
+            createdAt: generatedAt,
+            updatedAt: generatedAt,
+            filing: filing,
+            tags: canonicalTags(tags),
+            folderIDs: folderIDs.isEmpty ? StudyItemMetadata.defaultFolderIDs(for: filing) : folderIDs,
+            sourceDescription: "canonicalReadRuntime",
+            isTrashed: isDeleted,
+            modifiedByDeviceID: "canonicalReadRuntime"
+        )
+        item.kind = resolvedKind
+        item.title = title
+        item.filing = filing
+        item.tags = canonicalTags(tags)
+        item.folderIDs = folderIDs.isEmpty ? StudyItemMetadata.defaultFolderIDs(for: filing) : folderIDs
+        item.isTrashed = isDeleted
+        item.updatedAt = generatedAt
+        item.modifiedByDeviceID = "canonicalReadRuntime"
+        return item
+    }
+
+    private func canonicalRecordingMetadataItem(
+        _ recording: CanonicalRecordingReadProjectionRecord,
+        overlaying existing: StudyItemMetadata,
+        generatedAt: Date
+    ) -> StudyItemMetadata {
+        var item = existing
+        item.kind = .recordingBundle
+        item.recordingID = recording.objectID
+        item.sanitizedRecordingID = item.sanitizedRecordingID
+            ?? StudyPathSanitizer.sanitizedPathComponent(recording.objectID)
+        if item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            item.title = recording.title
+        }
+        let recordingTags = canonicalTags(recording.tags)
+        if item.tags.isEmpty || !recordingTags.isEmpty {
+            item.tags = StudyTagList.unique(item.tags + recordingTags)
+        }
+        if let durationSeconds = recording.durationSeconds {
+            item.duration = TimeInterval(durationSeconds)
+        }
+        item.isTrashed = item.isTrashed || recording.isDeleted
+        if item.isTrashed, item.trashedAt == nil {
+            item.trashedAt = generatedAt
+        }
+        item.updatedAt = generatedAt
+        item.modifiedByDeviceID = "canonicalReadRuntime"
+        return item
+    }
+
+    private func canonicalFilingPath(from components: [String]) -> StudyFilingPath {
+        StudyFilingPath(
+            type: components.indices.contains(0) ? components[0] : nil,
+            subject: components.indices.contains(1) ? components[1] : nil,
+            chapter: components.indices.contains(2) ? components[2] : nil,
+            topic: components.indices.contains(3) ? components[3] : nil
+        )
+    }
+
+    private func canonicalTags(_ values: [String]) -> [StudyTag] {
+        values.map { value in
+            let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                return StudyTag(namespace: parts[0], value: parts[1])
+            }
+            return StudyTag(namespace: "canonical", value: value)
+        }
     }
 
     func makeSyncManifest(deviceID: String, generatedAt: Date = Date()) -> StudyLibrarySyncManifest {
@@ -232,26 +1218,130 @@ final class StudyLibraryStore: ObservableObject {
             items: items,
             folders: folders,
             tombstones: tombstones,
-            pendingUploads: pendingUploads
+            pendingUploads: pendingUploads,
+            recordings: makeManifestRecordingEntries(recordings: recordings, deviceID: deviceID)
         )
     }
 
+    func makeSyncManifestInBackground(deviceID: String, generatedAt: Date = Date()) async -> StudyLibrarySyncManifest {
+        let rootURL = self.rootURL
+        let startedAt = Date()
+        let manifest = await Task.detached(priority: .utility) {
+            let recordings = LocalNetworkSyncInventoryBackgroundIO.loadRecordings(rootURL: rootURL, includeDeleted: true)
+            return LocalNetworkSyncBackgroundStudyManifestBuilder(
+                fileManager: .default,
+                rootURL: rootURL,
+                recordings: recordings,
+                deviceID: deviceID,
+                generatedAt: generatedAt
+            ).build().manifest
+        }.value
+        let durationMs = CanonicalPerfLog.elapsedMs(since: startedAt)
+        ConnectionDiagnosticsStore.shared.recordPerfLog(
+            CanonicalPerfLog.subphaseMeasured(
+                operation: .immediateSync,
+                subphase: .inventoryBuildMs,
+                durationMs: durationMs,
+                result: "syncManifestBuild"
+            ),
+            deviceID: deviceID
+        )
+        return manifest
+    }
+
     @discardableResult
-    func applySyncManifest(_ manifest: StudyLibrarySyncManifest, localDeviceID: String) throws -> StudyLibrarySyncApplyResult {
+    func applySyncManifest(_ manifest: StudyLibrarySyncManifest, localDeviceID: String) async throws -> StudyLibrarySyncApplyResult {
+        let perfStartedAt = Date()
+        defer {
+            ConnectionDiagnosticsStore.shared.recordPerfLog(
+                CanonicalPerfLog.subphaseMeasured(
+                    operation: .immediateSync,
+                    subphase: .applyMs,
+                    durationMs: CanonicalPerfLog.elapsedMs(since: perfStartedAt),
+                    result: "applySyncManifest"
+                ),
+                deviceID: localDeviceID
+            )
+        }
         guard manifest.hasValidChecksum else {
             throw StudyLibraryStoreError.writeFailed("sync_manifest_checksum_mismatch")
         }
 
+        let rootURL = rootURL
+        let localItems = allStudyItems
+        let localFolders = allStudyFolders
+        let applyOutput = try await Self.applySyncManifestOffMain(
+            manifest,
+            rootURL: rootURL,
+            localItems: localItems,
+            localFolders: localFolders
+        )
+        let result = applyOutput.result
+        if applyOutput.filesChanged {
+            refresh()
+        }
+        if result.tombstoneCount > 0 || result.conflictCount > 0 {
+            LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "StudyLibraryStore.applySyncManifest")
+        } else if result.appliedFolderCount > 0 || result.appliedItemCount > 0 {
+            LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.applySyncManifest")
+        }
+        return result
+    }
+
+    private nonisolated static func applySyncManifestOffMain(
+        _ manifest: StudyLibrarySyncManifest,
+        rootURL: URL,
+        localItems: [StudyItemMetadata],
+        localFolders: [StudyFolderMetadata]
+    ) async throws -> (result: StudyLibrarySyncApplyResult, filesChanged: Bool) {
+        try await Task.detached(priority: .utility) {
+            try applySyncManifestFiles(
+                manifest,
+                rootURL: rootURL,
+                localItems: localItems,
+                localFolders: localFolders
+            )
+        }.value
+    }
+
+    private nonisolated static func applySyncManifestFiles(
+        _ manifest: StudyLibrarySyncManifest,
+        rootURL: URL,
+        localItems: [StudyItemMetadata],
+        localFolders: [StudyFolderMetadata],
+        fileManager: FileManager = .default
+    ) throws -> (result: StudyLibrarySyncApplyResult, filesChanged: Bool) {
+        let urls = studyStorageURLs(rootURL: rootURL)
+        try ensureStudyDirectoriesOffMain(urls: urls, fileManager: fileManager)
+
+        let storedItems = loadAllStoredItemMetadataOffMain(urls: urls, fileManager: fileManager)
+        let storedFolders = loadAllFolderMetadataOffMain(urls: urls, fileManager: fileManager)
+        var itemsByID = Dictionary(storedItems.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
+        for item in localItems {
+            itemsByID[item.itemID] = item
+        }
+        var foldersByID = Dictionary(storedFolders.map { ($0.folderID, $0) }, uniquingKeysWith: { first, _ in first })
+        for folder in localFolders {
+            foldersByID[folder.folderID] = folder
+        }
+        let originalItemsByID = itemsByID
+        let originalFoldersByID = foldersByID
+
         var result = StudyLibrarySyncApplyResult()
+        var changedItemIDs = Set<StudyItemID>()
+        var changedFolderIDs = Set<StudyFolderID>()
 
         for incomingFolder in manifest.folders {
             do {
                 var remote = incomingFolder.syncSanitized(modifiedByDeviceID: manifest.deviceID)
-                let existing = loadStoredFolder(folderID: remote.folderID) ?? allStudyFolders.first { $0.folderID == remote.folderID }
-                guard let merged = mergedSyncFolder(existing: existing, incoming: &remote, result: &result) else {
+                let existing = foldersByID[remote.folderID]
+                guard let merged = mergedSyncFolderOffMain(existing: existing, incoming: &remote, result: &result) else {
                     continue
                 }
-                try save(merged)
+                foldersByID[merged.folderID] = merged
+                if merged != existing {
+                    changedFolderIDs.insert(merged.folderID)
+                }
                 result.appliedFolderCount += 1
             } catch {
                 result.failedChanges += 1
@@ -261,13 +1351,15 @@ final class StudyLibraryStore: ObservableObject {
         for incomingItem in manifest.items {
             do {
                 var remote = incomingItem.syncSanitized(modifiedByDeviceID: manifest.deviceID)
-                markSyncMetadataOnlyIfNeeded(&remote)
-                let existing = editableMetadataIfAvailable(itemID: remote.itemID)
-                guard let merged = mergedSyncItem(existing: existing, incoming: &remote, result: &result) else {
+                markSyncMetadataOnlyIfNeededOffMain(&remote, rootURL: rootURL)
+                let existing = editableMetadataIfAvailableOffMain(itemID: remote.itemID, itemsByID: itemsByID)
+                guard let merged = mergedSyncItemOffMain(existing: existing, incoming: &remote, result: &result) else {
                     continue
                 }
-                try save(merged)
-                try applySyncItemToRecordingMetadata(merged)
+                itemsByID[merged.itemID] = merged
+                if merged != existing {
+                    changedItemIDs.insert(merged.itemID)
+                }
                 result.appliedItemCount += 1
             } catch {
                 result.failedChanges += 1
@@ -276,7 +1368,34 @@ final class StudyLibraryStore: ObservableObject {
 
         for tombstone in manifest.tombstones {
             do {
-                if try applySyncTombstone(tombstone, remoteDeviceID: manifest.deviceID) {
+                switch tombstone.entityKind {
+                case .item:
+                    guard var item = editableMetadataIfAvailableOffMain(itemID: tombstone.entityID, itemsByID: itemsByID),
+                          tombstone.updatedAt >= item.updatedAt else {
+                        continue
+                    }
+                    item.isTrashed = tombstone.operation == .trash || tombstone.operation == .delete || tombstone.operation == .deleteMetadataOnly
+                    item.trashedAt = item.isTrashed ? tombstone.updatedAt : nil
+                    item.updatedAt = tombstone.updatedAt
+                    item.modifiedByDeviceID = tombstone.modifiedByDeviceID ?? manifest.deviceID
+                    itemsByID[item.itemID] = item
+                    if item != originalItemsByID[item.itemID] {
+                        changedItemIDs.insert(item.itemID)
+                    }
+                    result.tombstoneCount += 1
+                case .folder:
+                    guard var folder = foldersByID[tombstone.entityID],
+                          tombstone.updatedAt >= folder.updatedAt else {
+                        continue
+                    }
+                    folder.isTrashed = tombstone.operation == .trash || tombstone.operation == .delete || tombstone.operation == .deleteMetadataOnly
+                    folder.trashedAt = folder.isTrashed ? tombstone.updatedAt : nil
+                    folder.updatedAt = tombstone.updatedAt
+                    folder.modifiedByDeviceID = tombstone.modifiedByDeviceID ?? manifest.deviceID
+                    foldersByID[folder.folderID] = folder
+                    if folder != originalFoldersByID[folder.folderID] {
+                        changedFolderIDs.insert(folder.folderID)
+                    }
                     result.tombstoneCount += 1
                 }
             } catch {
@@ -284,8 +1403,502 @@ final class StudyLibraryStore: ObservableObject {
             }
         }
 
-        refresh()
-        return result
+        rebuildFolderLinksOffMain(
+            foldersByID: &foldersByID,
+            itemsByID: &itemsByID,
+            changedItemIDs: changedItemIDs
+        )
+        for (folderID, folder) in foldersByID where folder != originalFoldersByID[folderID] {
+            changedFolderIDs.insert(folderID)
+        }
+
+        var index = loadIndexOffMain(urls: urls, fileManager: fileManager)
+        var filesChanged = false
+        for itemID in changedItemIDs.sorted() {
+            guard let item = itemsByID[itemID] else {
+                continue
+            }
+            if item != originalItemsByID[itemID] {
+                try writeItemMetadataOffMain(item, urls: urls, index: &index, fileManager: fileManager)
+                filesChanged = true
+            }
+            if try applySyncItemToRecordingMetadataOffMain(item, rootURL: rootURL) {
+                filesChanged = true
+            }
+        }
+        for folderID in changedFolderIDs.sorted() {
+            guard let folder = foldersByID[folderID],
+                  folder != originalFoldersByID[folderID] else {
+                continue
+            }
+            try writeFolderMetadataOffMain(folder, urls: urls, index: &index, fileManager: fileManager)
+            filesChanged = true
+        }
+        try saveIndexIfChangedOffMain(index, urls: urls, fileManager: fileManager)
+        return (result, filesChanged)
+    }
+
+    private nonisolated static func studyStorageURLs(rootURL: URL) -> (
+        studyURL: URL,
+        itemMetadataURL: URL,
+        folderMetadataURL: URL,
+        indexURL: URL,
+        hierarchyRulesURL: URL,
+        legacyItemMetadataURL: URL,
+        legacyIndexURL: URL
+    ) {
+        let studyURL = rootURL.appendingPathComponent("study", isDirectory: true).standardizedFileURL
+        return (
+            studyURL: studyURL,
+            itemMetadataURL: studyURL.appendingPathComponent("items", isDirectory: true).standardizedFileURL,
+            folderMetadataURL: studyURL.appendingPathComponent("folders", isDirectory: true).standardizedFileURL,
+            indexURL: studyURL.appendingPathComponent("index.json", isDirectory: false).standardizedFileURL,
+            hierarchyRulesURL: studyURL.appendingPathComponent("hierarchy-rules.json", isDirectory: false).standardizedFileURL,
+            legacyItemMetadataURL: studyURL.appendingPathComponent("item-metadata", isDirectory: true).standardizedFileURL,
+            legacyIndexURL: studyURL.appendingPathComponent("study-index.json", isDirectory: false).standardizedFileURL
+        )
+    }
+
+    private nonisolated static func ensureStudyDirectoriesOffMain(
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        fileManager: FileManager
+    ) throws {
+        guard isInsideRootOffMain(urls.studyURL, rootURL: urls.studyURL.deletingLastPathComponent()),
+              isInsideStudyDirectoryOffMain(urls.itemMetadataURL, studyURL: urls.studyURL),
+              isInsideStudyDirectoryOffMain(urls.folderMetadataURL, studyURL: urls.studyURL),
+              isInsideStudyDirectoryOffMain(urls.indexURL, studyURL: urls.studyURL),
+              isInsideStudyDirectoryOffMain(urls.hierarchyRulesURL, studyURL: urls.studyURL),
+              isInsideStudyDirectoryOffMain(urls.legacyItemMetadataURL, studyURL: urls.studyURL),
+              isInsideStudyDirectoryOffMain(urls.legacyIndexURL, studyURL: urls.studyURL) else {
+            throw StudyLibraryStoreError.unsafeDestination
+        }
+
+        do {
+            try fileManager.createDirectory(at: urls.itemMetadataURL, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: urls.folderMetadataURL, withIntermediateDirectories: true)
+            if !fileManager.fileExists(atPath: urls.hierarchyRulesURL.path) {
+                try jsonEncoderOffMain().encode([StudyHierarchyRule.defaultCourseView]).write(to: urls.hierarchyRulesURL, options: .atomic)
+            }
+            if !fileManager.fileExists(atPath: urls.indexURL.path) {
+                try jsonEncoderOffMain().encode(StudyMetadataIndex()).write(to: urls.indexURL, options: .atomic)
+            }
+        } catch {
+            throw StudyLibraryStoreError.unableToCreateDirectory
+        }
+    }
+
+    private nonisolated static func loadAllStoredItemMetadataOffMain(
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        fileManager: FileManager
+    ) -> [StudyItemMetadata] {
+        loadMetadataFilesOffMain(from: urls.itemMetadataURL, studyURL: urls.studyURL, as: StudyItemMetadata.self, fileManager: fileManager)
+            + loadMetadataFilesOffMain(from: urls.legacyItemMetadataURL, studyURL: urls.studyURL, as: StudyItemMetadata.self, fileManager: fileManager)
+    }
+
+    private nonisolated static func loadAllFolderMetadataOffMain(
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        fileManager: FileManager
+    ) -> [StudyFolderMetadata] {
+        loadMetadataFilesOffMain(from: urls.folderMetadataURL, studyURL: urls.studyURL, as: StudyFolderMetadata.self, fileManager: fileManager)
+    }
+
+    private nonisolated static func loadMetadataFilesOffMain<T: Decodable>(
+        from directoryURL: URL,
+        studyURL: URL,
+        as type: T.Type,
+        fileManager: FileManager
+    ) -> [T] {
+        guard fileManager.fileExists(atPath: directoryURL.path),
+              isInsideStudyDirectoryOffMain(directoryURL, studyURL: studyURL),
+              let urls = try? fileManager.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+              ) else {
+            return []
+        }
+
+        return urls
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .compactMap { url in
+                let safeURL = url.standardizedFileURL
+                guard isInsideStudyDirectoryOffMain(safeURL, studyURL: studyURL),
+                      let data = try? Data(contentsOf: safeURL) else {
+                    return nil
+                }
+                return try? jsonDecoderOffMain().decode(T.self, from: data)
+            }
+    }
+
+    private nonisolated static func loadIndexOffMain(
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        fileManager: FileManager
+    ) -> StudyMetadataIndex {
+        for url in [urls.indexURL, urls.legacyIndexURL] where fileManager.fileExists(atPath: url.path) {
+            guard isInsideStudyDirectoryOffMain(url, studyURL: urls.studyURL),
+                  let data = try? Data(contentsOf: url),
+                  let index = try? jsonDecoderOffMain().decode(StudyMetadataIndex.self, from: data) else {
+                continue
+            }
+            return index
+        }
+        return StudyMetadataIndex()
+    }
+
+    private nonisolated static func saveIndexIfChangedOffMain(
+        _ index: StudyMetadataIndex,
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        fileManager: FileManager
+    ) throws {
+        guard isInsideStudyDirectoryOffMain(urls.indexURL, studyURL: urls.studyURL) else {
+            throw StudyLibraryStoreError.unsafeDestination
+        }
+        let current = loadIndexOffMain(urls: urls, fileManager: fileManager)
+        guard current != index else {
+            return
+        }
+        try jsonEncoderOffMain().encode(index).write(to: urls.indexURL, options: .atomic)
+    }
+
+    private nonisolated static func writeItemMetadataOffMain(
+        _ metadata: StudyItemMetadata,
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        index: inout StudyMetadataIndex,
+        fileManager: FileManager
+    ) throws {
+        guard !metadata.itemID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw StudyLibraryStoreError.itemMissing
+        }
+        var metadataToSave = metadata
+        metadataToSave.tags = StudyTagList.unique(metadata.tags)
+        if metadataToSave.folderIDs.isEmpty {
+            metadataToSave.folderIDs = StudyItemMetadata.defaultFolderIDs(for: metadataToSave.filing)
+        }
+
+        let fileName = "\(StudyPathSanitizer.sanitizedPathComponent(metadataToSave.itemID)).json"
+        let metadataURL = urls.itemMetadataURL.appendingPathComponent(fileName, isDirectory: false).standardizedFileURL
+        guard isInsideDirectoryOffMain(metadataURL, directoryURL: urls.itemMetadataURL) else {
+            throw StudyLibraryStoreError.unsafeDestination
+        }
+        try jsonEncoderOffMain().encode(metadataToSave).write(to: metadataURL, options: .atomic)
+        if index.itemMetadataFilesByItemID[metadataToSave.itemID] != fileName {
+            index.itemMetadataFilesByItemID[metadataToSave.itemID] = fileName
+            index.updatedAt = Date()
+        }
+        if let recordingID = metadataToSave.recordingID,
+           index.itemMetadataFilesByRecordingID[recordingID] != fileName {
+            index.itemMetadataFilesByRecordingID[recordingID] = fileName
+            index.updatedAt = Date()
+        }
+    }
+
+    private nonisolated static func writeFolderMetadataOffMain(
+        _ folder: StudyFolderMetadata,
+        urls: (
+            studyURL: URL,
+            itemMetadataURL: URL,
+            folderMetadataURL: URL,
+            indexURL: URL,
+            hierarchyRulesURL: URL,
+            legacyItemMetadataURL: URL,
+            legacyIndexURL: URL
+        ),
+        index: inout StudyMetadataIndex,
+        fileManager: FileManager
+    ) throws {
+        let fileName = "\(StudyPathSanitizer.sanitizedPathComponent(folder.folderID)).json"
+        let folderURL = urls.folderMetadataURL.appendingPathComponent(fileName, isDirectory: false).standardizedFileURL
+        guard isInsideDirectoryOffMain(folderURL, directoryURL: urls.folderMetadataURL) else {
+            throw StudyLibraryStoreError.unsafeDestination
+        }
+        try jsonEncoderOffMain().encode(folder).write(to: folderURL, options: .atomic)
+        if index.folderMetadataFilesByFolderID[folder.folderID] != fileName {
+            index.folderMetadataFilesByFolderID[folder.folderID] = fileName
+            index.updatedAt = Date()
+        }
+    }
+
+    private nonisolated static func editableMetadataIfAvailableOffMain(
+        itemID: StudyItemID,
+        itemsByID: [StudyItemID: StudyItemMetadata]
+    ) -> StudyItemMetadata? {
+        if let item = itemsByID[itemID] {
+            return item
+        }
+        return itemsByID.values.first { $0.recordingID == itemID }
+    }
+
+    private nonisolated static func markSyncMetadataOnlyIfNeededOffMain(
+        _ item: inout StudyItemMetadata,
+        rootURL: URL
+    ) {
+        guard let recordingID = item.recordingID,
+              (try? AudioFileStore(fileManager: .default, rootDirectoryURL: rootURL).loadMetadata(id: recordingID)) == nil else {
+            return
+        }
+        item.customProperties["syncedMetadataOnly"] = "true"
+    }
+
+    private nonisolated static func applySyncItemToRecordingMetadataOffMain(
+        _ item: StudyItemMetadata,
+        rootURL: URL
+    ) throws -> Bool {
+        guard let recordingID = item.recordingID else {
+            return false
+        }
+        let audioFileStore = AudioFileStore(fileManager: .default, rootDirectoryURL: rootURL)
+        guard let recording = try? audioFileStore.loadMetadata(id: recordingID) else {
+            return false
+        }
+
+        let updated = RecordingMetadata(
+            id: recording.id,
+            title: item.title,
+            fileName: recording.fileName,
+            relativeAudioPath: recording.relativeAudioPath,
+            relativeMetadataPath: recording.relativeMetadataPath,
+            createdAt: recording.createdAt,
+            endedAt: recording.endedAt,
+            duration: recording.duration,
+            format: recording.format,
+            codec: recording.codec,
+            sampleRate: recording.sampleRate,
+            channels: recording.channels,
+            bitrate: recording.bitrate,
+            fileSize: recording.fileSize,
+            uploadStatus: recording.uploadStatus,
+            transcriptionStatus: item.transcriptionStatus ?? recording.transcriptionStatus,
+            noteStatus: item.noteStatus ?? recording.noteStatus,
+            tags: item.tags.map(\.displayTitle),
+            studyFiling: item.studyFiling,
+            uploadProgressFraction: recording.uploadProgressFraction,
+            uploadProgressConfirmedBytes: recording.uploadProgressConfirmedBytes,
+            uploadProgressTotalBytes: recording.uploadProgressTotalBytes,
+            uploadPhase: recording.uploadPhase,
+            uploadProgressDescription: recording.uploadProgressDescription,
+            isDeleted: item.isTrashed,
+            deletedAt: item.isTrashed ? (item.trashedAt ?? recording.deletedAt ?? item.updatedAt) : nil
+        )
+        guard updated != recording else {
+            return false
+        }
+        try audioFileStore.updateMetadata(updated)
+        return true
+    }
+
+    private nonisolated static func mergedSyncItemOffMain(
+        existing: StudyItemMetadata?,
+        incoming: inout StudyItemMetadata,
+        result: inout StudyLibrarySyncApplyResult
+    ) -> StudyItemMetadata? {
+        guard var existing else {
+            return incoming
+        }
+        if incoming.updatedAt > existing.updatedAt {
+            return incoming
+        }
+        if incoming.updatedAt == existing.updatedAt, incoming != existing {
+            existing.syncConflictStatus = "conflict_preserved_local"
+            result.conflictCount += 1
+            return existing
+        }
+        result.skippedOlderCount += 1
+        return nil
+    }
+
+    private nonisolated static func mergedSyncFolderOffMain(
+        existing: StudyFolderMetadata?,
+        incoming: inout StudyFolderMetadata,
+        result: inout StudyLibrarySyncApplyResult
+    ) -> StudyFolderMetadata? {
+        guard var existing else {
+            return incoming
+        }
+        if incoming.updatedAt > existing.updatedAt {
+            incoming.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
+            incoming.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
+            return incoming
+        }
+        if incoming.updatedAt == existing.updatedAt, incoming != existing {
+            existing.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
+            existing.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
+            existing.syncConflictStatus = "conflict_preserved_local"
+            result.conflictCount += 1
+            return existing
+        }
+        result.skippedOlderCount += 1
+        return nil
+    }
+
+    private nonisolated static func rebuildFolderLinksOffMain(
+        foldersByID: inout [StudyFolderID: StudyFolderMetadata],
+        itemsByID: inout [StudyItemID: StudyItemMetadata],
+        changedItemIDs: Set<StudyItemID>
+    ) {
+        guard !changedItemIDs.isEmpty else {
+            return
+        }
+        let liveItemIDs = Set(itemsByID.values.filter { !$0.isTrashed }.map(\.itemID))
+        for folderID in foldersByID.keys {
+            foldersByID[folderID]?.itemIDs.removeAll { !liveItemIDs.contains($0) }
+        }
+
+        for itemID in changedItemIDs.sorted() {
+            guard var item = itemsByID[itemID],
+                  !item.isTrashed else {
+                continue
+            }
+            if item.folderIDs.isEmpty {
+                item.folderIDs = StudyItemMetadata.defaultFolderIDs(for: item.filing)
+                itemsByID[item.itemID] = item
+            }
+            for folder in folderChainOffMain(for: item.filing, itemID: item.itemID) {
+                var stored = foldersByID[folder.folderID] ?? folder
+                stored.name = folder.name
+                stored.level = folder.level
+                stored.path = folder.path
+                stored.parentFolderID = folder.parentFolderID
+                stored.childFolderIDs = StudyItemMetadata.uniqueIDs(stored.childFolderIDs + folder.childFolderIDs)
+                if item.folderIDs.contains(folder.folderID), !stored.itemIDs.contains(item.itemID) {
+                    stored.itemIDs.append(item.itemID)
+                }
+                foldersByID[folder.folderID] = stored
+            }
+            for folderID in item.folderIDs {
+                guard var folder = foldersByID[folderID] else {
+                    continue
+                }
+                if !folder.itemIDs.contains(item.itemID) {
+                    folder.itemIDs.append(item.itemID)
+                }
+                foldersByID[folderID] = folder
+            }
+        }
+    }
+
+    private nonisolated static func folderChainOffMain(
+        for filing: StudyFilingPath,
+        itemID: StudyItemID?
+    ) -> [StudyFolderMetadata] {
+        let effectiveFiling = StudyItemMetadata.effectiveFolderPath(for: filing)
+        let values: [(StudyFolderLevel, String?)] = [
+            (.type, effectiveFiling.type),
+            (.subject, effectiveFiling.subject),
+            (.chapter, effectiveFiling.chapter),
+            (.topic, effectiveFiling.topic)
+        ]
+
+        var folders: [StudyFolderMetadata] = []
+        var parentFolderID: StudyFolderID?
+        for index in values.indices {
+            let (level, value) = values[index]
+            guard let value else {
+                break
+            }
+            let components = values.prefix(index + 1).compactMap { $0.1 }
+            let path = StudyFolderMetadata.filingPath(for: components)
+            let childFolderIDs: [StudyFolderID]
+            if index + 1 < values.count,
+               values[index + 1].1 != nil {
+                let childPath = StudyFolderMetadata.filingPath(for: values.prefix(index + 2).compactMap { $0.1 })
+                childFolderIDs = [StudyFolderMetadata.folderID(for: values[index + 1].0, path: childPath)]
+            } else {
+                childFolderIDs = []
+            }
+            let isLeaf = index == values.prefix { $0.1 != nil }.count - 1
+            folders.append(
+                StudyFolderMetadata(
+                    name: value,
+                    level: level,
+                    path: path,
+                    parentFolderID: parentFolderID,
+                    childFolderIDs: childFolderIDs,
+                    itemIDs: isLeaf ? itemID.map { [$0] } ?? [] : []
+                )
+            )
+            parentFolderID = folders.last?.folderID
+        }
+        return folders
+    }
+
+    private nonisolated static func jsonEncoderOffMain() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }
+
+    private nonisolated static func jsonDecoderOffMain() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    private nonisolated static func isInsideRootOffMain(_ url: URL, rootURL: URL) -> Bool {
+        let rootPath = rootURL.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path == rootPath || path.hasPrefix(rootPath + "/")
+    }
+
+    private nonisolated static func isInsideStudyDirectoryOffMain(_ url: URL, studyURL: URL) -> Bool {
+        let studyPath = studyURL.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path == studyPath || path.hasPrefix(studyPath + "/")
+    }
+
+    private nonisolated static func isInsideDirectoryOffMain(_ url: URL, directoryURL: URL) -> Bool {
+        let directoryPath = directoryURL.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path == directoryPath || path.hasPrefix(directoryPath + "/")
     }
 
     @discardableResult
@@ -295,6 +1908,7 @@ final class StudyLibraryStore: ObservableObject {
         let metadata = previous?.mergedWithCurrentRecording(recording) ?? fallback
         try save(metadata, previousMetadata: previous)
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.upsertRecordingMetadata", recordingID: recording.id)
         return metadata
     }
 
@@ -306,10 +1920,11 @@ final class StudyLibraryStore: ObservableObject {
         metadata.updatedAt = Date()
         try save(metadata, previousMetadata: previous)
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.updateFiling", recordingID: recordingID)
     }
 
     func folder(folderID: StudyFolderID) -> StudyFolderMetadata? {
-        loadStoredFolder(folderID: folderID) ?? allStudyFolders.first { $0.folderID == folderID }
+        loadStoredFolder(folderID: folderID) ?? effectiveStudyFolders.first { $0.folderID == folderID }
     }
 
     @discardableResult
@@ -337,6 +1952,7 @@ final class StudyLibraryStore: ObservableObject {
             try appendChildFolderID(folder.folderID, toParentFolderID: parentFolderID, parentPath: path)
         }
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.createFolder")
         return folder
     }
 
@@ -411,6 +2027,7 @@ final class StudyLibraryStore: ObservableObject {
         }
 
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.renameFolder")
         return folder
     }
 
@@ -445,6 +2062,7 @@ final class StudyLibraryStore: ObservableObject {
         folder.updatedAt = Date()
         try save(folder)
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.setFolderColor")
         return folder
     }
 
@@ -474,6 +2092,7 @@ final class StudyLibraryStore: ObservableObject {
         folder.updatedAt = Date()
         try save(folder)
         refresh()
+        LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "StudyLibraryStore.moveFolderToTrash")
         return folder
     }
 
@@ -481,6 +2100,7 @@ final class StudyLibraryStore: ObservableObject {
         let previous = editableMetadataIfAvailable(itemID: metadata.itemID)
         try save(metadata, previousMetadata: previous)
         refresh()
+        LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.saveItem")
     }
 
     func save(_ folder: StudyFolderMetadata) throws {
@@ -679,6 +2299,51 @@ final class StudyLibraryStore: ObservableObject {
                 status: PendingRecordingUploadStatus(rawValue: recording.uploadStatus) ?? .pending,
                 createdAt: recording.createdAt,
                 updatedAt: item.updatedAt
+            )
+        }
+    }
+
+    private func makeManifestRecordingEntries(
+        recordings: [RecordingMetadata],
+        deviceID: String
+    ) -> [LocalNetworkSyncRecordingEntry] {
+        recordings.map { recording in
+            let audioURL = try? audioFileStore.audioURL(for: recording)
+            let hasAudio = audioURL.map { fileManager.fileExists(atPath: $0.path) } ?? false
+            let byteSize = hasAudio ? audioURL.flatMap { url -> Int64? in
+                guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                      let size = attributes[.size] as? NSNumber else {
+                    return nil
+                }
+                return size.int64Value
+            } : nil
+            return LocalNetworkSyncRecordingEntry(
+                recordingID: recording.id,
+                metadataHash: LocalNetworkSyncMetadataHash.hash(recording),
+                audioAvailable: hasAudio,
+                audioChecksum: nil,
+                audioSize: byteSize,
+                uploadLedgerState: nil,
+                receiveStatus: nil,
+                processingStatus: nil,
+                updatedAt: recording.deletedAt ?? recording.createdAt,
+                deleted: recording.isDeleted,
+                title: recording.title,
+                createdAt: recording.createdAt,
+                tombstone: recording.isDeleted,
+                audioAvailability: hasAudio ? .local : .missing,
+                uploadStatus: recording.uploadStatus,
+                transcriptionStatus: recording.transcriptionStatus,
+                noteStatus: recording.noteStatus,
+                sourceDeviceID: deviceID,
+                artifactRefs: [
+                    LocalNetworkSyncArtifactID.make(
+                        kind: .metadataJSON,
+                        ownerID: recording.id,
+                        logicalPathToken: recording.relativeMetadataPath
+                    )
+                ],
+                audioLogicalPathToken: recording.relativeAudioPath
             )
         }
     }

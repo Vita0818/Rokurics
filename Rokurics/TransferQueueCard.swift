@@ -17,10 +17,10 @@ struct TransferQueueCard: View {
     }
 
     var body: some View {
-        RokuricsDashboardCard(title: "本地传输队列", systemImage: "arrow.triangle.2.circlepath") {
+        RokuricsDashboardCard(title: RokuricsCopy.text("本地传输队列", "Transfer Queue"), systemImage: "arrow.triangle.2.circlepath") {
             HStack(spacing: 10) {
-                RokuricsMetricTile(title: "待传输", value: "\(pendingUploadCount)", tint: RokuricsColors.aqua)
-                RokuricsMetricTile(title: "已完成", value: "\(completedUploadCount)", tint: RokuricsColors.mint)
+                RokuricsMetricTile(title: RokuricsCopy.text("待传输", "Pending"), value: "\(pendingUploadCount)", tint: RokuricsColors.aqua)
+                RokuricsMetricTile(title: RokuricsCopy.text("已完成", "Done"), value: "\(completedUploadCount)", tint: RokuricsColors.mint)
             }
 
             HStack(spacing: 10) {
@@ -28,13 +28,13 @@ struct TransferQueueCard: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(RokuricsColors.softTeal)
 
-                Text("最近同步")
+                Text(RokuricsCopy.text("最近同步", "Last Sync"))
                     .font(RokuricsTypography.body(size: 14, weight: .medium))
                     .foregroundStyle(RokuricsColors.softText)
 
                 Spacer()
 
-                Text("暂无")
+                Text(RokuricsCopy.text("暂无", "None"))
                     .font(RokuricsTypography.body(size: 14, weight: .semibold))
                     .foregroundStyle(RokuricsColors.deepText.opacity(0.78))
             }

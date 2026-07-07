@@ -460,12 +460,19 @@ struct RokuricsMixedLanguageTitle: View {
     var weight: Font.Weight = .bold
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        if RokuricsCopy.usesChinese {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(english)
+                    .font(RokuricsTypography.englishTitle(size: englishSize, weight: weight))
+
+                Text(chinese)
+                    .font(RokuricsTypography.chineseTitle(size: chineseSize, weight: weight))
+            }
+        } else {
             Text(english)
                 .font(RokuricsTypography.englishTitle(size: englishSize, weight: weight))
-
-            Text(chinese)
-                .font(RokuricsTypography.chineseTitle(size: chineseSize, weight: weight))
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
         }
     }
 }

@@ -8,6 +8,20 @@
 import Combine
 import Foundation
 
+private func canonicalMasterSwitchReadConfigurationForStore(
+    _ configuration: CanonicalReadRuntimeConfiguration?
+) -> CanonicalReadRuntimeConfiguration? {
+    guard let configuration else {
+        return nil
+    }
+    switch configuration.mode {
+    case .disabled, .blocked:
+        return nil
+    case .parallelCompare, .canonicalReadCandidate, .guardedCanonicalReadWithLegacyFallback:
+        return configuration
+    }
+}
+
 enum SecureReceiverPairingFlowState: String, Equatable {
     case idle
     case startingListener
@@ -68,18 +82,34 @@ struct ConnectionDiagnosticEntry: Codable, Equatable {
     let errorCode: String?
     let errorMessage: String?
     let errorCategory: String?
+    var operation: String? = nil
+    var totalMs: Int? = nil
+    var dominantSubphase: String? = nil
+    var dominantSubphaseMs: Int? = nil
+    var inventoryBuildMs: Int? = nil
+    var projectionRebuildMs: Int? = nil
+    var hashMs: Int? = nil
+    var applyMs: Int? = nil
+    var waitBackgroundMs: Int? = nil
 }
 
 @MainActor
 final class ConnectionDiagnosticsStore {
+    static let shared = ConnectionDiagnosticsStore()
+
     private let fileManager: FileManager
     let logURL: URL
     private let maxEntries: Int
+    private let diagnosticsWriter: CanonicalAsyncDiagnosticsWriter
+    private var recentEntries: [ConnectionDiagnosticEntry] = []
+    private var pendingEnqueueTasks: [Task<Void, Never>] = []
+    private var runtimeCounterStateByKey: [String: (pending: Int, total: Int, lastLoggedAt: Date)] = [:]
 
     init(
         fileManager: FileManager = .default,
         rootURL: URL? = nil,
-        maxEntries: Int = 200
+        maxEntries: Int = 200,
+        diagnosticsWriterConfiguration: CanonicalAsyncDiagnosticsWriterConfiguration = CanonicalAsyncDiagnosticsWriterConfiguration()
     ) {
         self.fileManager = fileManager
         self.maxEntries = maxEntries
@@ -87,6 +117,14 @@ final class ConnectionDiagnosticsStore {
         logURL = root
             .appendingPathComponent("Diagnostics", isDirectory: true)
             .appendingPathComponent("connection-diagnostics.jsonl", isDirectory: false)
+        diagnosticsWriter = CanonicalAsyncDiagnosticsWriter(
+            sink: CanonicalFileDiagnosticsSink(
+                logURL: logURL,
+                fileManager: fileManager,
+                maxPersistedLines: maxEntries
+            ),
+            configuration: diagnosticsWriterConfiguration
+        )
     }
 
     func record(
@@ -117,20 +155,21 @@ final class ConnectionDiagnosticsStore {
         errorCode: String? = nil,
         errorMessage: String? = nil,
         errorCategory: String? = nil,
+        perfLog: CanonicalPerfLog.Record? = nil,
         timestamp: Date = Date()
     ) {
         let entry = ConnectionDiagnosticEntry(
             timestamp: timestamp,
-            phase: phase,
-            host: sanitized(host),
+            phase: sanitizedForDiagnostics(phase) ?? "redactionRejected",
+            host: sanitizedForDiagnostics(host),
             port: port,
             fingerprintPrefix: fingerprintPrefix(fingerprint),
-            listenerState: listenerState,
+            listenerState: sanitizedForDiagnostics(listenerState),
             activePort: activePort,
             routeReceivedAt: routeReceivedAt,
-            routePath: sanitized(routePath),
+            routePath: sanitizedForDiagnostics(routePath),
             heartbeatSequence: heartbeatSequence,
-            requestDeviceIDPrefix: sanitized(requestDeviceIDPrefix).map { String($0.prefix(12)) },
+            requestDeviceIDPrefix: sanitizedForDiagnostics(requestDeviceIDPrefix).map { String($0.prefix(12)) },
             verifierStartedAt: verifierStartedAt,
             verifierSucceeded: verifierSucceeded,
             verifierFailed: verifierFailed,
@@ -139,33 +178,82 @@ final class ConnectionDiagnosticsStore {
             pairedDeviceLastSeenAfter: pairedDeviceLastSeenAfter,
             connectionStatusStoreUpdated: connectionStatusStoreUpdated,
             uiObservedLastSeenAt: uiObservedLastSeenAt,
-            syncRunID: sanitized(syncRunID),
+            syncRunID: sanitizedForDiagnostics(syncRunID),
             beginPairingRequested: beginPairingRequested,
             codeIssued: codeIssued,
             beginPairingButtonEnabled: beginPairingButtonEnabled,
             payloadPublished: payloadPublished,
             copyEnabled: copyEnabled,
-            errorCode: errorCode,
-            errorMessage: sanitized(errorMessage),
-            errorCategory: sanitized(errorCategory)
+            errorCode: sanitizedForDiagnostics(errorCode),
+            errorMessage: sanitizedForDiagnostics(errorMessage),
+            errorCategory: sanitizedForDiagnostics(errorCategory),
+            operation: sanitizedForDiagnostics(perfLog?.operation?.rawValue),
+            totalMs: perfLog?.totalMs,
+            dominantSubphase: sanitizedForDiagnostics(perfLog?.dominantSubphase?.rawValue),
+            dominantSubphaseMs: perfLog?.dominantSubphaseMs,
+            inventoryBuildMs: perfLog?.inventoryBuildMs,
+            projectionRebuildMs: perfLog?.projectionRebuildMs,
+            hashMs: perfLog?.hashMs,
+            applyMs: perfLog?.applyMs,
+            waitBackgroundMs: perfLog?.waitBackgroundMs
         )
 
-        do {
-            try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let nextEntries = Array((loadEntries() + [entry]).suffix(maxEntries))
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            let lines = try nextEntries
-                .map { try String(data: encoder.encode($0), encoding: .utf8) ?? "{}" }
-                .joined(separator: "\n")
-            try Data((lines + "\n").utf8).write(to: logURL, options: .atomic)
-        } catch {
-            print("[RokuricsConnectionDiagnostics] write failed: \(error.localizedDescription)")
+        appendRecentEntry(entry)
+        enqueueEntryForAsyncWrite(entry)
+    }
+
+    func recordPerfLog(_ record: CanonicalPerfLog.Record) {
+        self.record(
+            phase: record.phase,
+            host: nil,
+            port: nil,
+            fingerprint: nil,
+            listenerState: nil,
+            activePort: nil,
+            syncRunID: nil,
+            errorCategory: record.result ?? record.dominantSubphase?.rawValue,
+            perfLog: record
+        )
+    }
+
+    func recordRuntimeCounterTick(
+        scope: String,
+        kind: String,
+        now: Date = Date()
+    ) {
+        let safeScope = sanitizedForDiagnostics(scope) ?? "redactionRejected"
+        let safeKind = sanitizedForDiagnostics(kind) ?? "counter"
+        let key = "\(safeScope)|\(safeKind)"
+        var state = runtimeCounterStateByKey[key] ?? (pending: 0, total: 0, lastLoggedAt: now)
+        state.pending += 1
+        state.total += 1
+
+        guard now.timeIntervalSince(state.lastLoggedAt) >= 1 else {
+            runtimeCounterStateByKey[key] = state
+            return
         }
+
+        let delta = state.pending
+        let total = state.total
+        state.pending = 0
+        state.lastLoggedAt = now
+        runtimeCounterStateByKey[key] = state
+
+        record(
+            phase: "runtimeCounterTick",
+            host: nil,
+            port: nil,
+            fingerprint: nil,
+            listenerState: nil,
+            activePort: nil,
+            errorCategory: "scope=\(safeScope),kind=\(safeKind),delta=\(delta),total=\(total)"
+        )
     }
 
     func loadEntries() -> [ConnectionDiagnosticEntry] {
+        if recentEntries.isEmpty == false {
+            return recentEntries
+        }
         guard fileManager.fileExists(atPath: logURL.path),
               let rawText = try? String(contentsOf: logURL, encoding: .utf8) else {
             return []
@@ -180,6 +268,93 @@ final class ConnectionDiagnosticsStore {
             }
     }
 
+    func flushForTests() async {
+        let tasks = pendingEnqueueTasks
+        pendingEnqueueTasks.removeAll(keepingCapacity: true)
+        for task in tasks {
+            await task.value
+        }
+        await diagnosticsWriter.flushForTests()
+        recentEntries.removeAll(keepingCapacity: true)
+    }
+
+    func drainForTests() async {
+        await flushForTests()
+    }
+
+    func diagnosticsWriterMetricsForTests() async -> CanonicalAsyncDiagnosticsWriterMetrics {
+        await diagnosticsWriter.currentMetrics()
+    }
+
+    private func appendRecentEntry(_ entry: ConnectionDiagnosticEntry) {
+        recentEntries.append(entry)
+        if recentEntries.count > maxEntries {
+            recentEntries.removeFirst(recentEntries.count - maxEntries)
+        }
+    }
+
+    private func enqueueEntryForAsyncWrite(_ entry: ConnectionDiagnosticEntry) {
+        let data = Self.encodedJSONLData(for: entry)
+            ?? Self.encodedJSONLData(for: Self.redactionRejectedEntry(timestamp: entry.timestamp))
+        guard let data else {
+            return
+        }
+        let writer = diagnosticsWriter
+        let task = Task {
+            _ = await writer.enqueueJSONLLine(data)
+        }
+        pendingEnqueueTasks.append(task)
+        if pendingEnqueueTasks.count > 2_048 {
+            pendingEnqueueTasks.removeFirst(pendingEnqueueTasks.count - 1_024)
+        }
+    }
+
+    private nonisolated static func encodedJSONLData(for entry: ConnectionDiagnosticEntry) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard var data = try? encoder.encode(entry),
+              let encoded = String(data: data, encoding: .utf8),
+              CanonicalKernelDiagnosticRedaction.isSafeForDiagnostics(encoded) else {
+            return nil
+        }
+        data.append(0x0A)
+        return data
+    }
+
+    private nonisolated static func redactionRejectedEntry(timestamp: Date) -> ConnectionDiagnosticEntry {
+        ConnectionDiagnosticEntry(
+            timestamp: timestamp,
+            phase: "diagnosticRedactionRejected",
+            host: nil,
+            port: nil,
+            fingerprintPrefix: nil,
+            listenerState: nil,
+            activePort: nil,
+            routeReceivedAt: nil,
+            routePath: nil,
+            heartbeatSequence: nil,
+            requestDeviceIDPrefix: nil,
+            verifierStartedAt: nil,
+            verifierSucceeded: nil,
+            verifierFailed: nil,
+            markDeviceSeenCalled: nil,
+            pairedDeviceLastSeenBefore: nil,
+            pairedDeviceLastSeenAfter: nil,
+            connectionStatusStoreUpdated: nil,
+            uiObservedLastSeenAt: nil,
+            syncRunID: nil,
+            beginPairingRequested: nil,
+            codeIssued: nil,
+            beginPairingButtonEnabled: nil,
+            payloadPublished: nil,
+            copyEnabled: nil,
+            errorCode: nil,
+            errorMessage: nil,
+            errorCategory: "redactionRejected"
+        )
+    }
+
     private func fingerprintPrefix(_ fingerprint: String?) -> String? {
         let normalized = fingerprint?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,12 +365,18 @@ final class ConnectionDiagnosticsStore {
         return String(normalized.prefix(12))
     }
 
-    private func sanitized(_ value: String?) -> String? {
+    private func sanitizedForDiagnostics(_ value: String?) -> String? {
         guard let value else {
             return nil
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+        if CanonicalKernelDiagnosticRedaction.isSafeForDiagnostics(trimmed) {
+            return trimmed
+        }
+        return "redactionRejected"
     }
 }
 
@@ -219,6 +400,7 @@ final class SecureReceiverService: ObservableObject {
     @Published private(set) var pairingFlowState: SecureReceiverPairingFlowState = .idle
     @Published private(set) var pairingPayload: SecureReceiverPairingPayload?
     @Published private(set) var presenceObservationRevision = 0
+    @Published private(set) var effectiveSyncStatusByObjectID: [CanonicalObjectID: CanonicalEffectiveSyncStatus] = [:]
 
     let identityManager: MacIdentityManager
     let pairedDeviceStore: PairedDeviceStore
@@ -232,10 +414,41 @@ final class SecureReceiverService: ObservableObject {
     let syncStateStore: StudyLibrarySyncStateStore
     let syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration
     let connectionDiagnosticsStore: ConnectionDiagnosticsStore
+    let canonicalLiveReadOnlyTransportProbePolicy: CanonicalLiveReadOnlyTransportProbePolicy
+    var canonicalLibraryMetadataDebugPilotConfiguration: CanonicalLibraryMetadataDebugPilotConfiguration
+    var canonicalRecordingMetadataCutoverExecutor: (any CanonicalRecordingMetadataCutoverExecutor)?
+    var canonicalGeneratedArtifactCutoverExecutor: (any CanonicalGeneratedArtifactCutoverExecutor)?
+    var canonicalLibraryMetadataCutoverExecutor: (any CanonicalLibraryMetadataCutoverExecutor)?
+    var canonicalTombstoneConflictCutoverExecutor: (any CanonicalTombstoneConflictCutoverExecutor)?
+    var canonicalSyncRuntimeConfiguration: CanonicalSyncRuntimeConfiguration
+    var canonicalApplyRuntimeConfiguration: CanonicalApplyRuntimeConfiguration
+    var canonicalExistenceApplyRuntimeConfiguration: CanonicalExistenceApplyRuntimeConfiguration
+    var canonicalConnectionRuntimeConfiguration: CanonicalConnectionRuntimeConfiguration
+    var canonicalReadRuntimeConfiguration: CanonicalReadRuntimeConfiguration
+    var canonicalKernelMode: CanonicalKernelSwitchMode
+    var canonicalRecordingExistenceApplyPort: (any MacCanonicalRecordingExistenceApplyPort)?
+    var canonicalAudioUploadCutoverExecutor: MacAudioUploadCutoverExecutor?
+    let canonicalKernelSwitchResultProvider: (() -> CanonicalKernelSwitchResult)?
+    let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
+    let canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime
+    var canonicalConnectionRuntime: CanonicalConnectionRuntime
 
     private var httpsServer: SecureLocalHTTPSServer?
     private var pendingPairingStartAfterHTTPSReady = false
     private var storeObservationCancellables: Set<AnyCancellable> = []
+    private var canonicalKernelSwitchObserver: NSObjectProtocol?
+    private var syncEventObserver: NSObjectProtocol?
+    private var macSyncEventDebounceTask: Task<Void, Never>?
+    private var pendingMacSyncEventReasons: Set<SyncTriggerReason> = []
+    private var pendingMacSyncEventRecordingIDPrefix: String?
+    private var pendingMacSyncEventFirstReceivedAt: Date?
+    private var pendingMacSyncEventReceivedCount = 0
+    private var pendingMacSyncEventCoalescedCount = 0
+    private var macSyncEventWindowStartedAt: Date?
+    private var macSyncEventWindowCount = 0
+    private let macSyncEventDebounceInterval: TimeInterval = 0.75
+    private let macSyncEventStormWindow: TimeInterval = 5
+    private let macSyncEventMaxEventsPerWindow = 40
     private let preferredIPAddressProvider: () -> String?
     private let expiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -256,6 +469,22 @@ final class SecureReceiverService: ObservableObject {
         deviceConnectionStatusStore injectedDeviceConnectionStatusStore: DeviceConnectionStatusStore? = nil,
         syncStateStore injectedSyncStateStore: StudyLibrarySyncStateStore? = nil,
         connectionDiagnosticsStore injectedConnectionDiagnosticsStore: ConnectionDiagnosticsStore? = nil,
+        canonicalLiveReadOnlyTransportProbePolicy: CanonicalLiveReadOnlyTransportProbePolicy = .disabled,
+        canonicalLibraryMetadataDebugPilotConfiguration: CanonicalLibraryMetadataDebugPilotConfiguration = .disabled,
+        canonicalRecordingMetadataCutoverExecutor: (any CanonicalRecordingMetadataCutoverExecutor)? = nil,
+        canonicalGeneratedArtifactCutoverExecutor: (any CanonicalGeneratedArtifactCutoverExecutor)? = nil,
+        canonicalLibraryMetadataCutoverExecutor: (any CanonicalLibraryMetadataCutoverExecutor)? = nil,
+        canonicalTombstoneConflictCutoverExecutor: (any CanonicalTombstoneConflictCutoverExecutor)? = nil,
+        canonicalSyncRuntimeConfiguration: CanonicalSyncRuntimeConfiguration = .disabled,
+        canonicalApplyRuntimeConfiguration: CanonicalApplyRuntimeConfiguration = .disabled,
+        canonicalExistenceApplyRuntimeConfiguration: CanonicalExistenceApplyRuntimeConfiguration = .disabled,
+        canonicalConnectionRuntimeConfiguration: CanonicalConnectionRuntimeConfiguration = .disabled,
+        canonicalReadRuntimeConfiguration: CanonicalReadRuntimeConfiguration = .disabled,
+        canonicalRecordingExistenceApplyPort injectedCanonicalRecordingExistenceApplyPort: (any MacCanonicalRecordingExistenceApplyPort)? = nil,
+        canonicalAudioUploadCutoverExecutor injectedCanonicalAudioUploadCutoverExecutor: MacAudioUploadCutoverExecutor? = nil,
+        canonicalKernelSwitchResultProvider: (() -> CanonicalKernelSwitchResult)? = nil,
+        canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
+        canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
         loadIdentityOnInit: Bool = true,
         preferredIPAddressProvider: @escaping () -> String? = {
             MacLocalNetworkAddressProvider.preferredIPv4Address(logPrefix: "[RokuricsSecurity]")
@@ -267,13 +496,64 @@ final class SecureReceiverService: ObservableObject {
         let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
         let receivedFileStore = injectedReceivedFileStore ?? ReceivedFileStore()
         let recordingFileStore = injectedRecordingFileStore ?? MacRecordingFileStore()
-        let studyLibraryStore = injectedStudyLibraryStore ?? StudyLibraryStore(recordingFileStore: recordingFileStore)
+        let resolvedStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
+        let canonicalKernelSwitchResult = canonicalKernelSwitchResultProvider?()
+        let productionPortInjection = canonicalKernelSwitchResult.map {
+            MacCanonicalProductionPortFactory.make(
+                result: $0,
+                productionRootURL: recordingFileStore.libraryRootURL,
+                recordingFileStore: recordingFileStore
+            )
+        }
+        let resolvedCanonicalExistenceApplyRuntimeConfiguration = canonicalKernelSwitchResult?.effectiveConfiguration.existenceApplyRuntimeConfiguration
+            ?? canonicalExistenceApplyRuntimeConfiguration
+        let resolvedCanonicalConnectionRuntimeConfiguration = canonicalKernelSwitchResult?.effectiveConfiguration.connectionRuntimeConfiguration
+            ?? canonicalConnectionRuntimeConfiguration
+        let resolvedCanonicalReadRuntimeConfiguration = canonicalKernelSwitchResult?.effectiveConfiguration.readRuntimeConfiguration
+            ?? canonicalReadRuntimeConfiguration
+        let canonicalRecordingExistenceApplyPort: (any MacCanonicalRecordingExistenceApplyPort)?
+        if let productionPortInjection {
+            canonicalRecordingExistenceApplyPort = productionPortInjection.recordingExistenceApplyPort
+        } else if let injectedCanonicalRecordingExistenceApplyPort {
+            canonicalRecordingExistenceApplyPort = injectedCanonicalRecordingExistenceApplyPort
+        } else if resolvedCanonicalExistenceApplyRuntimeConfiguration.canWriteMetadataOnlyRecord {
+            canonicalRecordingExistenceApplyPort = MacCanonicalRecordingExistenceLedgerPort(rootURL: recordingFileStore.libraryRootURL)
+        } else {
+            canonicalRecordingExistenceApplyPort = nil
+        }
+        let studyLibraryStore = injectedStudyLibraryStore ?? StudyLibraryStore(
+            recordingFileStore: recordingFileStore,
+            canonicalExistenceApplyRuntimeConfiguration: resolvedCanonicalExistenceApplyRuntimeConfiguration,
+            canonicalRecordingExistenceApplyPort: canonicalRecordingExistenceApplyPort,
+            canonicalStatusTruthRuntime: resolvedStatusTruthRuntime
+        )
+        if injectedStudyLibraryStore != nil {
+            studyLibraryStore.configureCanonicalExistenceApplyRuntime(
+                configuration: resolvedCanonicalExistenceApplyRuntimeConfiguration,
+                port: canonicalRecordingExistenceApplyPort
+            )
+        }
+        studyLibraryStore.setCanonicalReadRuntimeConfiguration(
+            canonicalMasterSwitchReadConfigurationForStore(resolvedCanonicalReadRuntimeConfiguration)
+        )
         let resolvedGitBackedStudyMetadataStore = syncRuntimeConfiguration.gitBackedSyncEnabled
             ? (gitBackedStudyMetadataStore ?? GitBackedStudyMetadataStore())
             : gitBackedStudyMetadataStore
         let deviceConnectionStatusStore = injectedDeviceConnectionStatusStore ?? DeviceConnectionStatusStore()
         let syncStateStore = injectedSyncStateStore ?? StudyLibrarySyncStateStore()
         let connectionDiagnosticsStore = injectedConnectionDiagnosticsStore ?? ConnectionDiagnosticsStore()
+        let resolvedStatusExchangeRuntime = canonicalStatusExchangeRuntime ?? CanonicalStatusExchangeRuntime(
+            nodeID: CanonicalNodeID("mac-local"),
+            truthRuntime: resolvedStatusTruthRuntime
+        )
+        let resolvedConnectionRuntime = CanonicalConnectionRuntime(
+            configuration: resolvedCanonicalConnectionRuntimeConfiguration,
+            localNode: CanonicalNodeIdentity(
+                nodeID: CanonicalNodeID("mac-local"),
+                role: .mac,
+                displayName: "Rokurics Mac"
+            )
+        )
         UploadFlightRecorder.configureLogURL(
             recordingFileStore.libraryRootURL
                 .appendingPathComponent("system", isDirectory: true)
@@ -292,6 +572,34 @@ final class SecureReceiverService: ObservableObject {
         self.syncStateStore = syncStateStore
         self.syncRuntimeConfiguration = syncRuntimeConfiguration
         self.connectionDiagnosticsStore = connectionDiagnosticsStore
+        self.canonicalLiveReadOnlyTransportProbePolicy = canonicalLiveReadOnlyTransportProbePolicy
+        if let productionPortInjection {
+            self.canonicalLibraryMetadataDebugPilotConfiguration = productionPortInjection.libraryMetadataDebugPilotConfiguration
+            self.canonicalRecordingMetadataCutoverExecutor = productionPortInjection.recordingMetadataCutoverExecutor
+            self.canonicalGeneratedArtifactCutoverExecutor = productionPortInjection.generatedArtifactCutoverExecutor
+            self.canonicalLibraryMetadataCutoverExecutor = productionPortInjection.libraryMetadataCutoverExecutor
+            self.canonicalTombstoneConflictCutoverExecutor = productionPortInjection.tombstoneConflictCutoverExecutor
+            self.canonicalAudioUploadCutoverExecutor = productionPortInjection.audioUploadCutoverExecutor
+        } else {
+            self.canonicalLibraryMetadataDebugPilotConfiguration = canonicalLibraryMetadataDebugPilotConfiguration
+            self.canonicalRecordingMetadataCutoverExecutor = canonicalRecordingMetadataCutoverExecutor
+            self.canonicalGeneratedArtifactCutoverExecutor = canonicalGeneratedArtifactCutoverExecutor
+            self.canonicalLibraryMetadataCutoverExecutor = canonicalLibraryMetadataCutoverExecutor
+            self.canonicalTombstoneConflictCutoverExecutor = canonicalTombstoneConflictCutoverExecutor
+            self.canonicalAudioUploadCutoverExecutor = injectedCanonicalAudioUploadCutoverExecutor
+        }
+        self.canonicalSyncRuntimeConfiguration = canonicalKernelSwitchResult?.effectiveConfiguration.syncRuntimeConfiguration ?? canonicalSyncRuntimeConfiguration
+        self.canonicalApplyRuntimeConfiguration = canonicalKernelSwitchResult?.effectiveConfiguration.applyRuntimeConfiguration ?? canonicalApplyRuntimeConfiguration
+        self.canonicalExistenceApplyRuntimeConfiguration = resolvedCanonicalExistenceApplyRuntimeConfiguration
+        self.canonicalConnectionRuntimeConfiguration = resolvedCanonicalConnectionRuntimeConfiguration
+        self.canonicalReadRuntimeConfiguration = resolvedCanonicalReadRuntimeConfiguration
+        self.canonicalKernelMode = canonicalKernelSwitchResult?.effectiveMode
+            ?? CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve().effectiveMode
+        self.canonicalRecordingExistenceApplyPort = canonicalRecordingExistenceApplyPort
+        self.canonicalKernelSwitchResultProvider = canonicalKernelSwitchResultProvider
+        self.canonicalStatusTruthRuntime = resolvedStatusTruthRuntime
+        self.canonicalStatusExchangeRuntime = resolvedStatusExchangeRuntime
+        self.canonicalConnectionRuntime = resolvedConnectionRuntime
         self.preferredIPAddressProvider = preferredIPAddressProvider
         self.port = port
 
@@ -299,8 +607,45 @@ final class SecureReceiverService: ObservableObject {
             identityManager.loadOrCreateIdentity()
         }
         bindPresenceStores()
+        bindCanonicalKernelSwitch()
+        bindSyncEventTriggers()
         acceptedUploadCount = receivedFileStore.savedFileCount()
         refreshSecurityState()
+    }
+
+    deinit {
+        if let canonicalKernelSwitchObserver {
+            NotificationCenter.default.removeObserver(canonicalKernelSwitchObserver)
+        }
+        if let syncEventObserver {
+            NotificationCenter.default.removeObserver(syncEventObserver)
+        }
+        macSyncEventDebounceTask?.cancel()
+    }
+
+    var canonicalStatusTruthReadPathAvailable: Bool {
+        true
+    }
+
+    func produceCanonicalStatusFact(_ fact: CanonicalStatusFact) async -> CanonicalStatusFactMergeResult {
+        let result = await canonicalStatusTruthRuntime.produce(fact)
+        await refreshEffectiveSyncStatusSnapshot(for: fact.objectID)
+        return result
+    }
+
+    func effectiveSyncStatus(for objectID: CanonicalObjectID) -> CanonicalEffectiveSyncStatus? {
+        effectiveSyncStatusByObjectID[objectID]
+    }
+
+    func canonicalDisplaySyncState(for objectID: CanonicalObjectID) -> CanonicalDisplaySyncState? {
+        effectiveSyncStatus(for: objectID).map(CanonicalEffectiveStatusUIProjection.project(_:))
+    }
+
+    private func refreshEffectiveSyncStatusSnapshot(for objectID: CanonicalObjectID) async {
+        guard let snapshot = await canonicalStatusTruthRuntime.projectionSnapshot(for: objectID) else {
+            return
+        }
+        effectiveSyncStatusByObjectID[objectID] = snapshot.effectiveStatus
     }
 
     var canStartHTTPS: Bool {
@@ -365,6 +710,7 @@ final class SecureReceiverService: ObservableObject {
     func appBecameActive() {
         recordConnectionDiagnostic(phase: "appBecameActive")
         resumeConnectionIfUserWantsConnected()
+        queueMacSyncEvent(reason: .appForegroundedWithPendingChanges, source: "SecureReceiverService.appBecameActive")
     }
 
     func appBecameInactive() {
@@ -469,6 +815,7 @@ final class SecureReceiverService: ObservableObject {
             listenerState: "starting",
             beginPairingRequested: pendingPairingStartAfterHTTPSReady
         )
+        refreshCanonicalKernelSwitchConfiguration(restartServerIfNeeded: false)
 
         let server = SecureLocalHTTPSServer(
             port: port,
@@ -482,6 +829,11 @@ final class SecureReceiverService: ObservableObject {
             deviceConnectionStatusStore: deviceConnectionStatusStore,
             syncStateStore: syncStateStore,
             syncRuntimeConfiguration: syncRuntimeConfiguration,
+            canonicalLibraryMetadataDebugPilotConfiguration: canonicalLibraryMetadataDebugPilotConfiguration,
+            canonicalRecordingMetadataCutoverExecutor: canonicalRecordingMetadataCutoverExecutor,
+            canonicalGeneratedArtifactCutoverExecutor: canonicalGeneratedArtifactCutoverExecutor,
+            canonicalLibraryMetadataCutoverExecutor: canonicalLibraryMetadataCutoverExecutor,
+            canonicalTombstoneConflictCutoverExecutor: canonicalTombstoneConflictCutoverExecutor,
             onReady: { [weak self] in
                 Task { @MainActor [weak self] in
                     guard let self else {
@@ -528,10 +880,15 @@ final class SecureReceiverService: ObservableObject {
                     self?.lastError = nil
                 }
             },
-            onRecordingAccepted: { [weak self] recordingID in
+            onRecordingAccepted: { [weak self] recordingID, reason in
                 Task { @MainActor [weak self] in
                     self?.lastReceivedRecordingID = recordingID
                     self?.lastError = nil
+                    self?.queueMacSyncEvent(
+                        reason: reason,
+                        source: "SecureReceiverService.onRecordingAccepted",
+                        recordingID: recordingID
+                    )
                 }
             },
             onConnectionDiagnostic: { [weak self] event in
@@ -558,7 +915,18 @@ final class SecureReceiverService: ObservableObject {
                         errorCategory: event.errorCategory
                     )
                 }
-            }
+            },
+            canonicalSyncRuntimeConfiguration: canonicalSyncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonicalApplyRuntimeConfiguration,
+            canonicalExistenceApplyRuntimeConfiguration: canonicalExistenceApplyRuntimeConfiguration,
+            canonicalReadRuntimeConfiguration: canonicalReadRuntimeConfiguration,
+            canonicalKernelMode: canonicalKernelMode,
+            canonicalRecordingExistenceApplyPort: canonicalRecordingExistenceApplyPort,
+            canonicalLiveReadOnlyTransportProbePolicy: canonicalLiveReadOnlyTransportProbePolicy,
+            canonicalAudioUploadCutoverExecutor: canonicalAudioUploadCutoverExecutor,
+            canonicalStatusTruthRuntime: canonicalStatusTruthRuntime,
+            canonicalStatusExchangeRuntime: canonicalStatusExchangeRuntime,
+            canonicalConnectionRuntime: canonicalConnectionRuntime
         )
 
         httpsServer = server
@@ -756,72 +1124,350 @@ final class SecureReceiverService: ObservableObject {
             .store(in: &storeObservationCancellables)
     }
 
+    private func bindCanonicalKernelSwitch() {
+        guard canonicalKernelSwitchResultProvider != nil else {
+            return
+        }
+        canonicalKernelSwitchObserver = NotificationCenter.default.addObserver(
+            forName: CanonicalKernelSwitchConfiguration.didChangeNotificationName,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else {
+                return
+            }
+            Task { @MainActor in
+                self.refreshCanonicalKernelSwitchConfiguration(restartServerIfNeeded: true)
+            }
+        }
+    }
+
+    private func bindSyncEventTriggers() {
+        syncEventObserver = NotificationCenter.default.addObserver(
+            forName: .localNetworkSyncEventTriggered,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let reason = LocalNetworkSyncEventTrigger.reason(from: notification) else {
+                return
+            }
+            let recordingID = notification.userInfo?[LocalNetworkSyncEventTrigger.recordingIDUserInfoKey] as? String
+            let source = notification.userInfo?[LocalNetworkSyncEventTrigger.sourceUserInfoKey] as? String ?? "Notification"
+            Task { @MainActor [weak self] in
+                self?.queueMacSyncEvent(reason: reason, source: source, recordingID: recordingID)
+            }
+        }
+    }
+
+    private func queueMacSyncEvent(
+        reason: SyncTriggerReason,
+        source: String,
+        recordingID: String? = nil,
+        now: Date = Date()
+    ) {
+        if macSyncEventWindowStartedAt == nil || now.timeIntervalSince(macSyncEventWindowStartedAt ?? now) > macSyncEventStormWindow {
+            macSyncEventWindowStartedAt = now
+            macSyncEventWindowCount = 0
+        }
+        macSyncEventWindowCount += 1
+        if macSyncEventWindowCount > macSyncEventMaxEventsPerWindow {
+            recordConnectionDiagnostic(
+                phase: "syncEventStormSuppressed",
+                requestDeviceIDPrefix: recordingID.map { String($0.prefix(12)) },
+                errorCode: "event_storm_suppressed",
+                errorCategory: "reason=\(reason.rawValue),stormSuppressedCount=1"
+            )
+            return
+        }
+
+        let alreadyPending = pendingMacSyncEventReasons.contains(reason)
+        pendingMacSyncEventReasons.insert(reason)
+        pendingMacSyncEventRecordingIDPrefix = pendingMacSyncEventRecordingIDPrefix ?? recordingID.map { String($0.prefix(12)) }
+        pendingMacSyncEventFirstReceivedAt = pendingMacSyncEventFirstReceivedAt ?? now
+        pendingMacSyncEventReceivedCount += 1
+        if alreadyPending {
+            pendingMacSyncEventCoalescedCount += 1
+            recordConnectionDiagnostic(
+                phase: "syncEventTriggerCoalesced",
+                requestDeviceIDPrefix: pendingMacSyncEventRecordingIDPrefix,
+                errorCategory: "reason=\(reason.rawValue),eventTriggerCoalescedCount=1,coalescedReasonCount=\(pendingMacSyncEventCoalescedCount)"
+            )
+        }
+        recordConnectionDiagnostic(
+            phase: "syncEventTriggerReceived",
+            requestDeviceIDPrefix: recordingID.map { String($0.prefix(12)) },
+            errorCategory: "reason=\(reason.rawValue),source=\(source),eventTriggerReceivedCount=1,pendingReasonCount=\(pendingMacSyncEventReasons.count)"
+        )
+        if reason == .transcriptionStatusChanged || reason == .noteStatusChanged || reason == .syncStatusRefreshRequested {
+            recordConnectionDiagnostic(
+                phase: "statusConvergenceRefreshRequested",
+                requestDeviceIDPrefix: recordingID.map { String($0.prefix(12)) },
+                errorCategory: "reason=\(reason.rawValue),statusProjectionRefreshCount=1"
+            )
+            recordConnectionDiagnostic(
+                phase: "statusConvergencePeerProofUnavailable",
+                requestDeviceIDPrefix: recordingID.map { String($0.prefix(12)) },
+                errorCategory: "reason=\(reason.rawValue)"
+            )
+        } else if reason == .macAudioReceiveFinalized {
+            recordConnectionDiagnostic(
+                phase: "statusConvergenceFinalizeProofAccepted",
+                requestDeviceIDPrefix: recordingID.map { String($0.prefix(12)) },
+                errorCategory: "reason=\(reason.rawValue)"
+            )
+        }
+
+        macSyncEventDebounceTask?.cancel()
+        macSyncEventDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.macSyncEventDebounceInterval ?? 0.75) * 1_000_000_000))
+            self?.drainMacSyncEventQueue()
+        }
+    }
+
+    private func drainMacSyncEventQueue(now: Date = Date()) {
+        macSyncEventDebounceTask = nil
+        guard !pendingMacSyncEventReasons.isEmpty else {
+            return
+        }
+
+        let reasons = pendingMacSyncEventReasons
+        let reasonsSummary = Self.syncEventReasonSummary(reasons)
+        let firstReceivedAt = pendingMacSyncEventFirstReceivedAt ?? now
+        let receivedCount = pendingMacSyncEventReceivedCount
+        let coalescedCount = pendingMacSyncEventCoalescedCount
+        let recordingIDPrefix = pendingMacSyncEventRecordingIDPrefix
+        pendingMacSyncEventReasons = []
+        pendingMacSyncEventRecordingIDPrefix = nil
+        pendingMacSyncEventFirstReceivedAt = nil
+        pendingMacSyncEventReceivedCount = 0
+        pendingMacSyncEventCoalescedCount = 0
+
+        studyLibraryStore.refresh()
+        presenceObservationRevision += 1
+        recordConnectionDiagnostic(
+            phase: "statusConvergenceProjectionUpdated",
+            requestDeviceIDPrefix: recordingIDPrefix,
+            errorCategory: "reason=\(reasonsSummary),statusProjectionRefreshCount=1"
+        )
+
+        guard let device = latestPairedDevice else {
+            recordConnectionDiagnostic(
+                phase: "statusConvergencePeerProofUnavailable",
+                requestDeviceIDPrefix: recordingIDPrefix,
+                errorCode: "no_wants_connected_peer",
+                errorCategory: "reason=\(reasonsSummary)"
+            )
+            return
+        }
+
+        let syncRunID = UUID().uuidString
+        let latencyMs = max(0, Int(now.timeIntervalSince(firstReceivedAt) * 1_000))
+        let pendingRecord = deviceConnectionStatusStore.recordPendingSyncRequestDetails(
+            deviceID: device.id,
+            displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
+            statusText: "等待 iPhone 拉取状态",
+            syncRunID: syncRunID,
+            initiatorDeviceID: "mac-\(String(fingerprint.prefix(16)))",
+            reason: reasonsSummary,
+            at: now
+        )
+        let effectiveSyncRunID = pendingRecord.signal.syncRunID
+        if !pendingRecord.isDuplicate {
+            syncStateStore.recordControlPlane(
+                deviceID: device.id,
+                syncRunID: effectiveSyncRunID,
+                state: .syncStartSignalSent,
+                at: now
+            )
+        }
+        recordConnectionDiagnostic(
+            phase: "syncEventImmediateTickQueued",
+            requestDeviceIDPrefix: String(device.id.prefix(12)),
+            syncRunID: effectiveSyncRunID,
+            errorCategory: "macHintQueued=1,duplicatePending=\(pendingRecord.isDuplicate ? 1 : 0),reasons=\(reasonsSummary),eventTriggerReceivedCount=\(receivedCount),eventTriggerCoalescedCount=\(coalescedCount),eventToSyncStartLatencyMs=\(latencyMs)"
+        )
+        recordConnectionDiagnostic(
+            phase: "macSyncRequestedHintSetForEvent",
+            requestDeviceIDPrefix: String(device.id.prefix(12)),
+            syncRunID: effectiveSyncRunID,
+            errorCategory: "reasons=\(reasonsSummary)"
+        )
+    }
+
+    private static func syncEventReasonSummary(_ reasons: Set<SyncTriggerReason>) -> String {
+        reasons
+            .map(\.rawValue)
+            .sorted()
+            .joined(separator: "+")
+            .prefix(240)
+            .description
+    }
+
+    private func refreshCanonicalKernelSwitchConfiguration(restartServerIfNeeded: Bool) {
+        guard let canonicalKernelSwitchResultProvider else {
+            return
+        }
+        let result = canonicalKernelSwitchResultProvider()
+        let productionPortInjection = MacCanonicalProductionPortFactory.make(
+            result: result,
+            productionRootURL: recordingFileStore.libraryRootURL,
+            recordingFileStore: recordingFileStore
+        )
+        canonicalSyncRuntimeConfiguration = result.effectiveConfiguration.syncRuntimeConfiguration
+        canonicalApplyRuntimeConfiguration = result.effectiveConfiguration.applyRuntimeConfiguration
+        canonicalExistenceApplyRuntimeConfiguration = result.effectiveConfiguration.existenceApplyRuntimeConfiguration
+        canonicalConnectionRuntimeConfiguration = result.effectiveConfiguration.connectionRuntimeConfiguration
+        canonicalConnectionRuntime = CanonicalConnectionRuntime(
+            configuration: canonicalConnectionRuntimeConfiguration,
+            localNode: CanonicalNodeIdentity(
+                nodeID: CanonicalNodeID("mac-local"),
+                role: .mac,
+                displayName: "Rokurics Mac"
+            )
+        )
+        canonicalReadRuntimeConfiguration = result.effectiveConfiguration.readRuntimeConfiguration
+        canonicalKernelMode = result.effectiveMode
+        canonicalLibraryMetadataDebugPilotConfiguration = productionPortInjection.libraryMetadataDebugPilotConfiguration
+        canonicalRecordingMetadataCutoverExecutor = productionPortInjection.recordingMetadataCutoverExecutor
+        canonicalGeneratedArtifactCutoverExecutor = productionPortInjection.generatedArtifactCutoverExecutor
+        canonicalLibraryMetadataCutoverExecutor = productionPortInjection.libraryMetadataCutoverExecutor
+        canonicalTombstoneConflictCutoverExecutor = productionPortInjection.tombstoneConflictCutoverExecutor
+        canonicalRecordingExistenceApplyPort = productionPortInjection.recordingExistenceApplyPort
+        canonicalAudioUploadCutoverExecutor = productionPortInjection.audioUploadCutoverExecutor
+        studyLibraryStore.configureCanonicalExistenceApplyRuntime(
+            configuration: canonicalExistenceApplyRuntimeConfiguration,
+            port: canonicalRecordingExistenceApplyPort
+        )
+        studyLibraryStore.setCanonicalReadRuntimeConfiguration(
+            canonicalMasterSwitchReadConfigurationForStore(canonicalReadRuntimeConfiguration)
+        )
+        recordConnectionDiagnostic(
+            phase: "canonicalKernelSwitchEvaluated",
+            listenerState: httpsServer?.isReady == true ? "ready" : "not_ready",
+            errorCode: result.isBlocked ? "canonical_kernel_switch_blocked" : nil,
+            errorMessage: result.diagnosticsSummary
+        )
+        guard restartServerIfNeeded, httpsServer != nil else {
+            return
+        }
+        httpsServer?.stop()
+        httpsServer = nil
+        isHTTPSRunning = false
+        if canStartHTTPS {
+            startSecureReceiving()
+        }
+    }
+
     @discardableResult
     func prepareManualStudyLibrarySync(for device: PairedDevice?) -> DeviceConnectionStatus {
+        let perfStartedAt = Date()
+        recordPerfLog(CanonicalPerfLog.started(operation: .immediateSync))
+        defer {
+            let totalMs = CanonicalPerfLog.elapsedMs(since: perfStartedAt)
+            let stages = CanonicalPerfLog.StageDurations(waitBackgroundMs: totalMs)
+            for record in CanonicalPerfLog.finishedRecords(
+                operation: .immediateSync,
+                totalMs: totalMs,
+                stages: stages
+            ) {
+                recordPerfLog(record)
+            }
+        }
         recordConnectionDiagnostic(phase: "manualSyncTapped")
         recordConnectionDiagnostic(phase: "manualSyncActionFired")
         guard let device else {
-            return deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
+            let status = deviceConnectionStatusStore.markUnpaired(displayName: "iPhone")
+            publishManualSyncStatus(status)
+            return status
         }
         guard device.wantsConnection else {
             recordConnectionDiagnostic(phase: "syncSkippedBecauseUserDoesNotWantConnection")
-            return deviceConnectionStatusStore.markUserDisconnected(
+            let status = deviceConnectionStatusStore.markUserDisconnected(
                 deviceID: device.id,
                 displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName
             )
+            publishManualSyncStatus(status)
+            return status
         }
 
         guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
             let syncRunID = UUID().uuidString
             let initiatorDeviceID = "mac-\(String(fingerprint.prefix(16)))"
-            syncStateStore.recordControlPlane(
-                deviceID: device.id,
-                syncRunID: syncRunID,
-                state: .syncStartSignalSent
-            )
-            recordConnectionDiagnostic(
-                phase: "syncRunIDCreated",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: syncRunID
-            )
-            recordConnectionDiagnostic(
-                phase: "syncStartSignalSent",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: syncRunID
-            )
-            let status = deviceConnectionStatusStore.recordPendingSyncRequest(
+            let pendingRecord = deviceConnectionStatusStore.recordPendingSyncRequestDetails(
                 deviceID: device.id,
                 displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
                 statusText: "等待 iPhone 执行同步",
                 syncRunID: syncRunID,
                 initiatorDeviceID: initiatorDeviceID
             )
-            recordConnectionDiagnostic(
-                phase: "pendingSyncRequestCreated",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: syncRunID
-            )
+            let effectiveSyncRunID = pendingRecord.signal.syncRunID
+            if !pendingRecord.isDuplicate {
+                syncStateStore.recordControlPlane(
+                    deviceID: device.id,
+                    syncRunID: effectiveSyncRunID,
+                    state: .syncStartSignalSent
+                )
+            }
+            if pendingRecord.isDuplicate {
+                recordConnectionDiagnostic(
+                    phase: "pendingSyncRequestDuplicate",
+                    requestDeviceIDPrefix: String(device.id.prefix(12)),
+                    syncRunID: effectiveSyncRunID,
+                    errorCategory: "manualSyncDuplicate=1"
+                )
+            } else {
+                recordConnectionDiagnostic(
+                    phase: "syncRunIDCreated",
+                    requestDeviceIDPrefix: String(device.id.prefix(12)),
+                    syncRunID: effectiveSyncRunID
+                )
+                recordConnectionDiagnostic(
+                    phase: "syncStartSignalSent",
+                    requestDeviceIDPrefix: String(device.id.prefix(12)),
+                    syncRunID: effectiveSyncRunID
+                )
+                recordConnectionDiagnostic(
+                    phase: "pendingSyncRequestCreated",
+                    requestDeviceIDPrefix: String(device.id.prefix(12)),
+                    syncRunID: effectiveSyncRunID
+                )
+            }
             recordConnectionDiagnostic(
                 phase: "manualSyncPendingCreated",
                 requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: syncRunID
+                syncRunID: effectiveSyncRunID
             )
             recordConnectionDiagnostic(
                 phase: "pendingSyncRequestSet",
                 requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: syncRunID
+                syncRunID: effectiveSyncRunID
             )
+            recordConnectionDiagnostic(
+                phase: "manualSyncRequestedPendingSet",
+                requestDeviceIDPrefix: String(device.id.prefix(12)),
+                syncRunID: effectiveSyncRunID,
+                errorCategory: "manualSyncRequestedPendingCount=1"
+            )
+            let status = pendingRecord.status
+            publishManualSyncStatus(status)
             return status
         }
 
         studyLibraryStore.refresh()
         let manifest = studyLibraryStore.makeSyncManifest(deviceID: "mac-\(String(fingerprint.prefix(16)))")
         syncStateStore.recordPush(deviceID: device.id, remoteManifestHash: nil, pendingUploads: manifest.pendingUploads.count)
-        return deviceConnectionStatusStore.recordSyncStatus(
+        let status = deviceConnectionStatusStore.recordSyncStatus(
             deviceID: device.id,
             displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             statusText: "已准备 \(manifest.summaryText)"
         )
+        publishManualSyncStatus(status)
+        return status
+    }
+
+    private func publishManualSyncStatus(_ status: DeviceConnectionStatus) {
+        _ = status
+        presenceObservationRevision += 1
     }
 
     func refreshSecurityState() {
@@ -1034,7 +1680,8 @@ final class SecureReceiverService: ObservableObject {
         syncRunID: String? = nil,
         errorCode: String? = nil,
         errorMessage: String? = nil,
-        errorCategory: String? = nil
+        errorCategory: String? = nil,
+        perfLog: CanonicalPerfLog.Record? = nil
     ) {
         connectionDiagnosticsStore.record(
             phase: phase,
@@ -1063,7 +1710,16 @@ final class SecureReceiverService: ObservableObject {
             syncRunID: syncRunID,
             errorCode: errorCode,
             errorMessage: errorMessage,
-            errorCategory: errorCategory
+            errorCategory: errorCategory,
+            perfLog: perfLog
+        )
+    }
+
+    private func recordPerfLog(_ record: CanonicalPerfLog.Record) {
+        recordConnectionDiagnostic(
+            phase: record.phase,
+            errorCategory: record.result ?? record.dominantSubphase?.rawValue,
+            perfLog: record
         )
     }
 }

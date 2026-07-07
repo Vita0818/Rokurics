@@ -14,32 +14,32 @@ struct RecordingStatusView: View {
     ]
 
     var body: some View {
-        RokuricsDashboardCard(title: "录音状态", systemImage: "waveform") {
+        RokuricsDashboardCard(title: RokuricsCopy.text("录音状态", "Recording"), systemImage: "waveform") {
             LazyVGrid(columns: columns, spacing: 10) {
-                RokuricsMetricTile(title: "今日录音", value: "0", unit: "min", tint: RokuricsColors.aqua)
-                RokuricsMetricTile(title: "当前状态", value: "空闲", tint: RokuricsColors.softTeal)
+                RokuricsMetricTile(title: RokuricsCopy.text("今日录音", "Today"), value: "0", unit: "min", tint: RokuricsColors.aqua)
+                RokuricsMetricTile(title: RokuricsCopy.text("当前状态", "Status"), value: RokuricsCopy.text("空闲", "Idle"), tint: RokuricsColors.softTeal)
 
                 HStack {
-                    Text("本地保存")
+                    Text(RokuricsCopy.text("本地保存", "Local Save"))
                         .font(RokuricsTypography.caption(size: 12, weight: .semibold))
                         .foregroundStyle(RokuricsColors.softText)
 
                     Spacer()
 
-                    RokuricsStatusPill(text: "开启", systemImage: "lock.fill", tint: RokuricsColors.aqua)
+                    RokuricsStatusPill(text: RokuricsCopy.text("开启", "On"), systemImage: "lock.fill", tint: RokuricsColors.aqua)
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, minHeight: 58)
                 .rokuricsLiquidGlassCard(cornerRadius: 20, material: .ultraThinMaterial, fillOpacity: 0.34, strokeOpacity: 0.30, shadowOpacity: 0.05, shadowRadius: 8, shadowY: 4)
 
                 HStack {
-                    Text("云端上传")
+                    Text(RokuricsCopy.text("云端上传", "Cloud Upload"))
                         .font(RokuricsTypography.caption(size: 12, weight: .semibold))
                         .foregroundStyle(RokuricsColors.softText)
 
                     Spacer()
 
-                    RokuricsStatusPill(text: "关闭", systemImage: "icloud.slash", tint: RokuricsColors.tertiaryText)
+                    RokuricsStatusPill(text: RokuricsCopy.text("关闭", "Off"), systemImage: "icloud.slash", tint: RokuricsColors.tertiaryText)
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, minHeight: 58)

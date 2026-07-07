@@ -106,6 +106,82 @@ struct RokuricsTests {
         #expect(audioObject?.autoDownloadAllowed == false)
     }
 
+    @Test func uploadDecisionBlockersAreNotSilentNoOps() {
+        let localSignature = RecordingAudioSignature(
+            sha256: String(repeating: "a", count: 64),
+            size: 128
+        )
+        let sourceUnavailable = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .missing,
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .manualUploadButton,
+            syncRunID: nil,
+            objectID: "recordingAudio:decision-audio",
+            recordingID: "decision-audio"
+        )
+        #expect(sourceUnavailable.kind == .fail)
+        #expect(sourceUnavailable.reasonCode == "local_audio_missing")
+        #expect(sourceUnavailable.displayState == .failed("local_audio_missing"))
+
+        let activeTransfer = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(localSignature),
+            peerAudioState: .unknown,
+            transferJobState: .inFlight,
+            ledgerState: .none,
+            triggerSource: .manualUploadButton,
+            syncRunID: nil,
+            objectID: "recordingAudio:decision-audio",
+            recordingID: "decision-audio"
+        )
+        #expect(activeTransfer.kind == .suppress)
+        #expect(activeTransfer.reasonCode == "transfer_in_flight")
+        #expect(activeTransfer.displayState.shouldAnimateTransfer)
+
+        let retryPending = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(localSignature),
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .retryPending,
+            triggerSource: .periodicSync,
+            syncRunID: "sync-periodic",
+            objectID: "recordingAudio:decision-audio",
+            recordingID: "decision-audio"
+        )
+        #expect(retryPending.kind == .suppress)
+        #expect(retryPending.reasonCode == "ledger_retry_pending")
+        #expect(retryPending.displayState.shouldAnimateTransfer)
+
+        let peerUnknownDeferred = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(localSignature),
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .manualSyncIPhone,
+            syncRunID: "sync-manual",
+            objectID: "recordingAudio:decision-audio",
+            recordingID: "decision-audio"
+        )
+        #expect(peerUnknownDeferred.kind == .suppress)
+        #expect(peerUnknownDeferred.reasonCode == "peer_audio_unknown_deferred")
+        #expect(peerUnknownDeferred.displayState == .waiting)
+
+        let triggerCannotCreate = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(localSignature),
+            peerAudioState: .metadataOnly,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .studyLibraryRefresh,
+            syncRunID: nil,
+            objectID: "recordingAudio:decision-audio",
+            recordingID: "decision-audio"
+        )
+        #expect(triggerCannotCreate.kind == .suppress)
+        #expect(triggerCannotCreate.reasonCode == "view_refresh_only")
+        #expect(triggerCannotCreate.shouldCreateUploadJob == false)
+    }
+
     @Test func iphoneTypographyTokensExistAndChatStylesStaySeparate() {
         #expect(RokuricsTypographyToken.allCases == [
             .pageTitle,
@@ -911,6 +987,7 @@ struct RokuricsTests {
             safeErrorMessage: "/Users/vita/private/audio.m4a"
         )
 
+        UploadFlightRecorder.flushForTests()
         let events = try UploadFlightRecorder.loadEvents(from: traceURL)
         let event = try #require(events.first)
         let rawText = try String(contentsOf: traceURL, encoding: .utf8)
@@ -1272,6 +1349,7 @@ struct RokuricsTests {
             recordingManager: manager,
             traceID: "upl-test-uploaded-redrive"
         )
+        UploadFlightRecorder.flushForTests()
         let stages = Set(try UploadFlightRecorder.loadEvents(from: traceURL).map(\.stage))
 
         #expect(status == .uploaded)
@@ -1687,7 +1765,13 @@ struct RokuricsTests {
         job.audioConfirmedBytes = 3
         job.audioTotalBytes = 9
         job.audioChunkSize = 3
-        job.audioTotalSHA256 = try SecureUploadUtilities.sha256Hex(fileURL: store.audioURL(for: metadata))
+        let retryAudioChecksum = await CanonicalChecksumRuntime().checksum(
+            fileURL: try store.audioURL(for: metadata),
+            logicalToken: "Recordings/\(metadata.id)/audio.m4a",
+            nodeRole: .iPhone,
+            cacheDirectoryURL: rootURL.appendingPathComponent("Sync", isDirectory: true).appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+        )
+        job.audioTotalSHA256 = try #require(retryAudioChecksum.sha256)
         try jobStore.saveJob(job)
         let transport = FakeRecordingSecureUploadTransport()
         transport.statusConfirmedBytes = 6
@@ -1777,6 +1861,20 @@ struct RokuricsTests {
         #expect(!source.contains("Data(contentsOf: fileURL)"))
     }
 
+    @Test func iPhoneSyncButtonKeepsRecentTerminalControlPlaneStatusVisible() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Rokurics/MacConnectionView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("state.isSyncProgressActive || shouldShowRecentTerminalSyncState(state)"))
+        #expect(source.contains("syncControlPlaneUpdatedAt"))
+        #expect(source.contains("case .completed, .failed, .cancelled:"))
+    }
+
     @Test func doubleTapRecordingIconResolvesMoveToTrashIntent() {
         #expect(RecordingRowIconInteraction.intent(for: .singleTap) == .none)
         #expect(RecordingRowIconInteraction.intent(for: .doubleTap) == .moveToTrash)
@@ -1829,7 +1927,7 @@ struct RokuricsTests {
         #expect(manifest.items.first?.customProperties == ["safePreview": "保留"])
     }
 
-    @Test func applyingNewerMacMetadataUpdatesIPhoneMetadataWithoutDeletingAudio() throws {
+    @Test func applyingNewerMacMetadataUpdatesIPhoneMetadataWithoutDeletingAudio() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let recording = try saveRecording(id: "sync-lww-iphone", title: "iPhone 标题", store: audioStore)
@@ -1849,7 +1947,7 @@ struct RokuricsTests {
             folders: []
         )
 
-        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
+        let result = try await studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
         let updatedRecording = try audioStore.loadMetadata(id: recording.id)
 
         #expect(result.appliedItemCount == 1)
@@ -1859,7 +1957,7 @@ struct RokuricsTests {
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
     }
 
-    @Test func applyingTrashTombstoneDoesNotDeleteRealFiles() throws {
+    @Test func applyingTrashTombstoneDoesNotDeleteRealFiles() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let recording = try saveRecording(id: "sync-trash-safe", title: "保留文件", store: audioStore)
@@ -1884,7 +1982,7 @@ struct RokuricsTests {
             tombstones: [tombstone]
         )
 
-        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
+        let result = try await studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
         let updatedRecording = try audioStore.loadMetadata(id: recording.id)
 
         #expect(result.tombstoneCount == 1)
@@ -2003,10 +2101,116 @@ struct RokuricsTests {
         #expect(reloaded.state.lastError == "sync_failed")
     }
 
+    @Test func studyLibrarySyncControlPlaneIgnoresRegressionsAndExpiresEarlyStages() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 10
+        )
+        let startedAt = Date(timeIntervalSince1970: 2_100)
+
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt
+        )
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(1)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(2)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(11)))
+        #expect(store.state.syncControlPlaneState == .failed)
+        #expect(store.state.lastError == "sync_control_plane_timeout")
+
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt.addingTimeInterval(12)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(13)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(23)))
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(24)
+        )
+        #expect(store.state.activeSyncRunID == "sync-2")
+        #expect(store.state.syncControlPlaneState == .syncStartSignalSent)
+    }
+
+    @Test func studyLibrarySyncControlPlaneWatchdogExpiresStartAckWithoutNextRequest() async throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 0.02
+        )
+
+        store.recordControlPlane(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-start-ack",
+            state: .syncStartAcked
+        )
+
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline,
+              store.state.syncControlPlaneState != .failed {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        #expect(store.state.activeSyncRunID == "sync-start-ack")
+        #expect(store.state.syncControlPlaneState == .failed)
+        #expect(store.state.lastError == "sync_control_plane_timeout")
+    }
+
     @Test func gitBackedStudySyncRuntimeDefaultsToDisabled() {
         #expect(!StudyLibrarySyncRuntimeConfiguration.default.gitBackedSyncEnabled)
         #expect(!StudyLibrarySyncRuntimeConfiguration.disabled.gitBackedSyncEnabled)
         #expect(StudyLibrarySyncRuntimeConfiguration.disabledReason == "Git-backed study sync is disabled")
+    }
+
+    @Test func deviceStatusResponseMissingSyncRequestedDecodesFalse() throws {
+        let response = try Self.studyDecoder.decode(DeviceStatusResponse.self, from: Data(#"{"ok":true}"#.utf8))
+
+        #expect(response.ok)
+        #expect(response.syncRequested == false)
+        #expect(response.syncStartSignal == nil)
+    }
+
+    @Test func deviceStatusResponseMalformedSyncRequestedDecodesFalse() throws {
+        let response = try Self.studyDecoder.decode(DeviceStatusResponse.self, from: Data(#"{"ok":true,"syncRequested":"yes"}"#.utf8))
+
+        #expect(response.ok)
+        #expect(response.syncRequested == false)
     }
 
     @Test func disabledSyncCoordinatorDoesNotStartAutomationOrClearPendingState() async throws {
@@ -2091,22 +2295,22 @@ struct RokuricsTests {
     }
 
     @MainActor
-    @Test func localNetworkInventoryBuilderIncludesVersionedRecordingStudyAndArtifactSchema() throws {
+    @Test func localNetworkInventoryBuilderIncludesVersionedRecordingStudyAndArtifactSchema() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = try saveRecording(id: "schema-recording-01", title: "Schema Recording", store: audioStore)
         let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
         let jobStore = RecordingUploadJobStore(audioFileStore: audioStore)
-        let inventory = LocalNetworkSyncInventoryBuilder(
+        let inventory = await LocalNetworkSyncInventoryBuilder(
             audioFileStore: audioStore,
             studyLibraryStore: studyStore,
             uploadJobStore: jobStore
-        ).build(
+        ).buildRuntimeSnapshot(
             deviceID: "iphone-schema",
             deviceName: "Schema iPhone",
             lastKnownPeerRevision: "peer-revision",
             generatedAt: Date(timeIntervalSince1970: 4_000)
-        )
+        ).inventory
 
         let recording = try #require(inventory.recordings.first { $0.recordingID == metadata.id })
         let studyItem = try #require(inventory.studyItems.first { $0.recordingID == metadata.id })
@@ -2510,7 +2714,7 @@ struct RokuricsTests {
         #expect(retryDrainer.reasonCode == "retry_drainer_peer_unknown")
     }
 
-    @Test func localNetworkChecksumCacheHitsAndInvalidatesBySizeAndModificationDate() throws {
+    @Test func localNetworkChecksumCacheHitsAndInvalidatesBySizeAndModificationDate() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("RokuricsChecksumCacheTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
@@ -2520,32 +2724,39 @@ struct RokuricsTests {
         try Data("first-audio".utf8).write(to: fileURL)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 10)], ofItemAtPath: fileURL.path)
 
-        let cache = LocalNetworkChecksumCache()
-        var computeCount = 0
-        let first = try #require(cache.checksum(fileURL: fileURL, pathToken: "Recordings/audio.m4a", sourceSide: "iPhone") { url in
-            computeCount += 1
-            return try SecureUploadUtilities.sha256Hex(fileURL: url)
-        })
-        let second = try #require(cache.checksum(fileURL: fileURL, pathToken: "Recordings/audio.m4a", sourceSide: "iPhone") { url in
-            computeCount += 1
-            return try SecureUploadUtilities.sha256Hex(fileURL: url)
-        })
+        let runtime = CanonicalChecksumRuntime()
+        let cacheDirectoryURL = rootURL.appendingPathComponent("ChecksumCache", isDirectory: true)
+        let first = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: "Recordings/audio.m4a",
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
+        let second = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: "Recordings/audio.m4a",
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
 
-        #expect(first.event == .miss)
-        #expect(second.event == .hit)
+        #expect(first.event == CanonicalChecksumCacheEvent.miss)
+        #expect(second.event == CanonicalChecksumCacheEvent.hit)
         #expect(first.sha256 == second.sha256)
-        #expect(computeCount == 1)
+        #expect(first.hashComputed)
+        #expect(!second.hashComputed)
 
         try Data("changed-audio-size".utf8).write(to: fileURL)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 20)], ofItemAtPath: fileURL.path)
-        let third = try #require(cache.checksum(fileURL: fileURL, pathToken: "Recordings/audio.m4a", sourceSide: "iPhone") { url in
-            computeCount += 1
-            return try SecureUploadUtilities.sha256Hex(fileURL: url)
-        })
+        let third = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: "Recordings/audio.m4a",
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
 
-        #expect(third.event == .invalidated)
+        #expect(third.event == CanonicalChecksumCacheEvent.stale)
+        #expect(third.hashComputed)
         #expect(third.sha256 != first.sha256)
-        #expect(computeCount == 2)
     }
 
     @Test func localNetworkDiffPlannerMarksBothChangedConflictAndTombstoneWinner() {
@@ -2637,6 +2848,126 @@ struct RokuricsTests {
         #expect(try audioStore.loadMetadata(id: "state-corruption-audio").id == "state-corruption-audio")
     }
 
+    @Test func localNetworkSyncStateControlPlaneIgnoresRegressionsAndExpiresEarlyStages() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let stateStore = LocalNetworkSyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 10
+        )
+        let startedAt = Date(timeIntervalSince1970: 2_200)
+
+        stateStore.recordControlPlane(
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt
+        )
+        stateStore.recordControlPlane(
+            syncRunID: "sync-1",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(1)
+        )
+        #expect(stateStore.state.activeSyncRunID == "sync-1")
+        #expect(stateStore.state.controlPlaneState == .inventoryExchanging)
+
+        stateStore.recordControlPlane(
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(2)
+        )
+        #expect(stateStore.state.activeSyncRunID == "sync-1")
+        #expect(stateStore.state.controlPlaneState == .inventoryExchanging)
+
+        #expect(stateStore.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(11)))
+        #expect(stateStore.state.controlPlaneState == .failed)
+        #expect(stateStore.state.lastErrorCode == "sync_control_plane_timeout")
+
+        stateStore.recordControlPlane(
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt.addingTimeInterval(12)
+        )
+        #expect(stateStore.state.activeSyncRunID == "sync-1")
+        #expect(stateStore.state.controlPlaneState == .inventoryExchanging)
+
+        stateStore.recordControlPlane(
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(13)
+        )
+        #expect(stateStore.state.activeSyncRunID == "sync-1")
+        #expect(stateStore.state.controlPlaneState == .inventoryExchanging)
+
+        #expect(stateStore.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(23)))
+        stateStore.recordControlPlane(
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(24)
+        )
+        #expect(stateStore.state.activeSyncRunID == "sync-2")
+        #expect(stateStore.state.controlPlaneState == .syncStartSignalSent)
+    }
+
+    @Test func localNetworkProgressStoreIgnoresRegressionsAndExpiresEarlyStages() {
+        let progressStore = LocalNetworkSyncProgressStore(controlPlaneInactivityTimeout: 10)
+        let startedAt = Date(timeIntervalSince1970: 2_300)
+
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt
+        )
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(1)
+        )
+        #expect(progressStore.syncRunID == "sync-1")
+        #expect(progressStore.controlPlaneState == .inventoryExchanging)
+
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(2)
+        )
+        #expect(progressStore.syncRunID == "sync-1")
+        #expect(progressStore.controlPlaneState == .inventoryExchanging)
+
+        #expect(progressStore.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(11)))
+        #expect(progressStore.controlPlaneState == .failed)
+
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt.addingTimeInterval(12)
+        )
+        #expect(progressStore.syncRunID == "sync-1")
+        #expect(progressStore.controlPlaneState == .inventoryExchanging)
+
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(13)
+        )
+        #expect(progressStore.syncRunID == "sync-1")
+        #expect(progressStore.controlPlaneState == .inventoryExchanging)
+
+        #expect(progressStore.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(23)))
+        progressStore.record(
+            deviceID: "mac-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(24)
+        )
+        #expect(progressStore.syncRunID == "sync-2")
+        #expect(progressStore.controlPlaneState == .syncStartSignalSent)
+    }
+
     @Test func localNetworkSchedulerQueuesOneTickWhenReentrant() async {
         var tickCount = 0
         var triggers: [String] = []
@@ -2664,6 +2995,23 @@ struct RokuricsTests {
         #expect(queuedTriggers == ["second"])
     }
 
+    @Test func localNetworkSchedulerExposesPendingRequestForHeartbeatDedupe() async {
+        var pendingObserved = false
+        let scheduler = LocalNetworkSyncScheduler(interval: 0.01) { _, _ in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        async let first: Bool = scheduler.requestTick(trigger: "first")
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        async let second: Bool = scheduler.requestTick(trigger: "manual-sync-requested")
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        pendingObserved = scheduler.hasPendingRequestAfterCurrentRun
+        _ = await first
+        _ = await second
+
+        #expect(pendingObserved)
+    }
+
     @Test func localNetworkSyncSchedulerDefaultsToSixtyAndAllowsTenThirtySixtySecondIntervals() {
         let defaultScheduler = LocalNetworkSyncScheduler { _, _ in }
         let ten = LocalNetworkSyncScheduler(interval: 10) { _, _ in }
@@ -2676,6 +3024,52 @@ struct RokuricsTests {
         #expect(thirty.configuredInterval == 30)
         #expect(sixty.configuredInterval == 60)
         #expect(fallback.configuredInterval == 60)
+    }
+
+    @Test func syncEventReasonParsesNotificationUserInfo() {
+        let notification = Notification(
+            name: .localNetworkSyncEventTriggered,
+            object: nil,
+            userInfo: [
+                LocalNetworkSyncEventTrigger.reasonUserInfoKey: SyncTriggerReason.recordingCreated.rawValue
+            ]
+        )
+
+        #expect(LocalNetworkSyncEventTrigger.reason(from: notification) == .recordingCreated)
+    }
+
+    @Test func eventDrivenStatusOnlyTriggerCannotCreateUploadJob() {
+        let statusOnly = RecordingAudioSyncTriggerSource(syncTrigger: "event-driven:syncStatusRefreshRequested")
+        let newRecording = RecordingAudioSyncTriggerSource(syncTrigger: "event-driven:recordingCreated")
+        let aggregatedDataChange = RecordingAudioSyncTriggerSource(
+            syncTrigger: "event-driven:recordingCreated+syncStatusRefreshRequested"
+        )
+
+        #expect(statusOnly == .studyLibraryRefresh)
+        #expect(!statusOnly.canCreateUploadJob)
+        #expect(newRecording.canCreateUploadJob)
+        #expect(aggregatedDataChange.canCreateUploadJob)
+    }
+
+    @Test func studyLibraryFolderMetadataChangePostsImmediateSyncEvent() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        var receivedReasons: [SyncTriggerReason] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: .localNetworkSyncEventTriggered,
+            object: nil,
+            queue: nil
+        ) { notification in
+            if let reason = LocalNetworkSyncEventTrigger.reason(from: notification) {
+                receivedReasons.append(reason)
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        _ = try studyStore.createFolder(named: "Linear Algebra", at: StudyBrowsePath())
+
+        #expect(receivedReasons.contains(.studyLibraryMetadataChanged))
     }
 
     @Test func localNetworkSyncStartGateRequiresActivePairedAndOnline() throws {
@@ -3015,6 +3409,125 @@ struct RokuricsTests {
         #expect(heartbeatClient.ackRequests.map(\.syncRunID) == ["signal-run-01"])
         #expect(phases.contains("syncStartSignalReceived"))
         #expect(phases.contains("syncStartAckSent"))
+    }
+
+    @Test func liveDeviceStatusHeartbeatSyncRequestedQueuesImmediateSync() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let snapshot = makePairedMacSnapshot()
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        var queuedSyncRunIDs: [String?] = []
+        var heartbeatReturnedBeforeTickStarted = false
+        var heartbeatReturned = false
+        let signal = LocalNetworkSyncStartSignal(
+            syncRunID: "device-status-sync-run",
+            initiatorDeviceID: "mac-test",
+            initiatorPlatform: .Mac,
+            requestedAt: Date(timeIntervalSince1970: 9),
+            reason: "manual"
+        )
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: snapshot),
+            studyLibraryStore: StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore),
+            deviceStatusSender: { _, _ in
+                DeviceStatusResponse(
+                    ok: true,
+                    status: nil,
+                    syncState: nil,
+                    syncRequested: true,
+                    syncStartSignal: signal,
+                    error: nil
+                )
+            },
+            heartbeatRequestedSyncHandler: { syncRunID in
+                heartbeatReturnedBeforeTickStarted = heartbeatReturned
+                queuedSyncRunIDs.append(syncRunID)
+                return true
+            },
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore,
+            runtimeConfiguration: .gitBackedEnabled,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+
+        await coordinator.performHeartbeat()
+        heartbeatReturned = true
+        for _ in 0..<20 where queuedSyncRunIDs.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(queuedSyncRunIDs == ["device-status-sync-run"])
+        #expect(heartbeatReturnedBeforeTickStarted)
+        #expect(phases.contains("heartbeatSyncRequestedHintReceived"))
+        #expect(phases.contains("heartbeatSyncRequestedTickQueued"))
+        #expect(phases.contains("heartbeatSyncRequestedTickStarted"))
+        #expect(phases.contains("heartbeatSyncRequestedTickCompleted"))
+    }
+
+    @Test func liveDeviceStatusHeartbeatSyncRequestedFalseDoesNotQueueSync() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        var queuedCount = 0
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            studyLibraryStore: StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore),
+            deviceStatusSender: { _, _ in
+                DeviceStatusResponse(ok: true, status: nil, syncState: nil, syncRequested: false, error: nil)
+            },
+            heartbeatRequestedSyncHandler: { _ in
+                queuedCount += 1
+                return true
+            },
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: rootURL),
+            diagnosticsStore: ConnectionDiagnosticsStore(rootURL: rootURL),
+            runtimeConfiguration: .gitBackedEnabled,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+
+        await coordinator.performHeartbeat()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        #expect(queuedCount == 0)
+    }
+
+    @Test func liveDeviceStatusHeartbeatDuplicateSyncRequestedIsDebounced() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        var queuedCount = 0
+        let coordinator = StudyLibrarySyncCoordinator(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            studyLibraryStore: StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore),
+            deviceStatusSender: { _, _ in
+                DeviceStatusResponse(ok: true, status: nil, syncState: nil, syncRequested: true, error: nil)
+            },
+            heartbeatRequestedSyncHandler: { _ in
+                queuedCount += 1
+                return true
+            },
+            statusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore,
+            runtimeConfiguration: .gitBackedEnabled,
+            heartbeatInterval: 0.01,
+            syncInterval: 0.01
+        )
+
+        await coordinator.performHeartbeat()
+        for _ in 0..<20 where queuedCount == 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await coordinator.performHeartbeat()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(queuedCount == 1)
+        #expect(phases.contains("heartbeatSyncRequestedTickDebounced"))
     }
 
     @Test func heartbeatMonitorSendsRepeatedSequencesAndRecordsTraceDiagnostics() async throws {
@@ -3793,7 +4306,7 @@ struct RokuricsTests {
             transcriptionStatus: "transcribed",
             noteStatus: "notStarted"
         )
-        _ = try studyStore.applySyncManifest(
+        _ = try await studyStore.applySyncManifest(
             StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(), items: [item], folders: []),
             localDeviceID: makePairedMacSnapshot().deviceID
         )
@@ -4002,7 +4515,7 @@ struct RokuricsTests {
             transcriptionStatus: "transcribed",
             noteStatus: "notStarted"
         )
-        _ = try studyStore.applySyncManifest(
+        _ = try await studyStore.applySyncManifest(
             StudyLibrarySyncManifest.make(
                 deviceID: makePairedMacSnapshot().deviceID,
                 generatedAt: Date(timeIntervalSince1970: 2_020),
@@ -4077,7 +4590,7 @@ struct RokuricsTests {
             transcriptionStatus: "transcribed",
             noteStatus: "notStarted"
         )
-        _ = try studyStore.applySyncManifest(
+        _ = try await studyStore.applySyncManifest(
             StudyLibrarySyncManifest.make(
                 deviceID: makePairedMacSnapshot().deviceID,
                 generatedAt: Date(timeIntervalSince1970: 2_020),
@@ -4138,7 +4651,7 @@ struct RokuricsTests {
             transcriptionStatus: "transcribed",
             noteStatus: "notStarted"
         )
-        _ = try studyStore.applySyncManifest(
+        _ = try await studyStore.applySyncManifest(
             StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(timeIntervalSince1970: 2_020), items: [item], folders: []),
             localDeviceID: makePairedMacSnapshot().deviceID
         )
@@ -4202,7 +4715,7 @@ struct RokuricsTests {
             transcriptionStatus: "transcribed",
             noteStatus: "notStarted"
         )
-        _ = try studyStore.applySyncManifest(
+        _ = try await studyStore.applySyncManifest(
             StudyLibrarySyncManifest.make(deviceID: makePairedMacSnapshot().deviceID, generatedAt: Date(timeIntervalSince1970: 2_020), items: [item], folders: []),
             localDeviceID: makePairedMacSnapshot().deviceID
         )
@@ -4474,11 +4987,11 @@ struct RokuricsTests {
             stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
             diagnosticsStore: diagnosticsStore
         )
-        let localInventory = LocalNetworkSyncInventoryBuilder(
+        let localInventory = await LocalNetworkSyncInventoryBuilder(
             audioFileStore: audioStore,
             studyLibraryStore: studyStore,
             uploadJobStore: uploadJobStore
-        ).build(deviceID: "iphone-01", deviceName: "iPhone", lastKnownPeerRevision: nil)
+        ).buildRuntimeSnapshot(deviceID: "iphone-01", deviceName: "iPhone", lastKnownPeerRevision: nil).inventory
         let peerInventory = peerInventoryMissingAudio(for: metadata)
         let action = LocalNetworkSyncDiffAction(
             id: "uploadRecordingAudio:recording:\(metadata.id)",
@@ -4750,6 +5263,120 @@ struct RokuricsTests {
         #expect(visible.contains(.customOpenAICompatible))
         #expect(!visible.contains(.lmStudioLocal))
         #expect(!visible.contains(.ollamaLocal))
+    }
+
+    @Test func localNetworkSyncEngineDefaultRuntimeDoesNotUseCanonicalPrimary() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "v838-default-owner", title: "默认 legacy owner", store: audioStore)
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: uploadJobStore,
+            client: FakeLocalNetworkSyncClient(peerInventory: peerInventoryMissingAudio(for: metadata)),
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000), syncRunID: "v838-default-owner")
+        let phases = Set(diagnosticsStore.loadEntries().map(\.phase))
+
+        #expect(plan?.uploadRecordingAudioActions.contains { $0.entityID == metadata.id } == true)
+        #expect(phases.contains("canonicalSyncRuntimePlanUsed") == false)
+        #expect(phases.contains("canonicalSyncRuntimePlanFallback"))
+    }
+
+    @Test func localNetworkSyncEnginePrimaryRuntimeUsesCanonicalMetadataNoOpWithoutAudioJob() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let audioData = Data("canonical same audio".utf8)
+        let metadata = try saveRecording(id: "v838-canonical-primary", title: "Canonical primary", store: audioStore, audioData: audioData)
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let localInventory = await LocalNetworkSyncInventoryBuilder(
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: uploadJobStore,
+            diagnosticsStore: diagnosticsStore
+        ).buildRuntimeSnapshot(
+            deviceID: "iphone-01",
+            deviceName: "iPhone",
+            lastKnownPeerRevision: nil,
+            shadowSyncRunID: "v838-canonical-primary"
+        ).inventory
+        let localRecording = try #require(localInventory.recordings.first { $0.recordingID == metadata.id })
+        let peerInventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(timeIntervalSince1970: 2_020),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            recordings: [
+                LocalNetworkSyncRecordingEntry(
+                    recordingID: metadata.id,
+                    metadataHash: "legacy-mismatch-\(metadata.id)",
+                    audioAvailable: true,
+                    audioChecksum: localRecording.audioChecksum,
+                    audioSize: localRecording.audioSize,
+                    uploadLedgerState: nil,
+                    receiveStatus: "completed",
+                    processingStatus: "notStarted",
+                    updatedAt: metadata.createdAt.addingTimeInterval(10),
+                    deleted: false,
+                    title: metadata.title,
+                    createdAt: metadata.createdAt,
+                    tombstone: false,
+                    audioAvailability: .local,
+                    uploadStatus: nil,
+                    transcriptionStatus: metadata.transcriptionStatus,
+                    noteStatus: metadata.noteStatus,
+                    sourceDeviceID: "iphone-01",
+                    artifactRefs: nil,
+                    audioLogicalPathToken: metadata.relativeAudioPath
+                )
+            ],
+            canonicalManifest: localInventory.canonicalManifest
+        )
+        let runtimeConfiguration = CanonicalSyncRuntimeConfiguration(
+            mode: .canonicalPlanPrimaryWithLegacyFallback,
+            policy: CanonicalSyncRuntimePolicy(
+                debugInternalBuild: true,
+                ownerApproved: true,
+                releaseDefaultBuild: false,
+                allowDocumentedModifiedAtFallback: true,
+                enabledScopes: [.recordingMetadata]
+            )
+        )
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: uploadJobStore,
+            client: FakeLocalNetworkSyncClient(peerInventory: peerInventory),
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore,
+            canonicalSyncRuntimeConfiguration: runtimeConfiguration
+        )
+
+        let plan = await engine.performTick(trigger: "manual", now: Date(timeIntervalSince1970: 3_000), syncRunID: "v838-canonical-primary")
+        let entries = diagnosticsStore.loadEntries()
+        let phases = Set(entries.map(\.phase))
+
+        #expect(plan?.uploadMetadataActions.contains { $0.entityKind == "recording" && $0.entityID == metadata.id } == false)
+        #expect(plan?.downloadMetadataActions.contains { $0.entityKind == "recording" && $0.entityID == metadata.id } == false)
+        #expect(plan?.noOps.contains { $0.entityKind == "recording" && $0.entityID == metadata.id && $0.reason == CanonicalSyncPlanReason.metadataHashEqual.rawValue } == true)
+        #expect((try? uploadJobStore.loadJobs())?.isEmpty == true)
+        #expect(phases.contains("canonicalSyncRuntimePlanUsed"))
+        #expect(phases.contains("canonicalSyncRuntimeLegacyHashMismatchIgnored"))
+        #expect(phases.contains("canonicalSyncRuntimeDuplicateLegacySuppressed") == false)
     }
 
     private func makeStore() throws -> (AudioFileStore, URL) {
@@ -5430,4 +6057,379 @@ private func makeUnpairedMacSnapshot() -> SecureMacConnectionSnapshot {
         sharedSecretBase64URL: "",
         pairedAt: ""
     )
+}
+
+struct CanonicalManifestRecordingsSchemaTests {
+    @Test func oldManifestWithoutRecordingsDecodesToEmpty() throws {
+        let manifest = try Self.decoder.decode(StudyLibrarySyncManifest.self, from: Data("""
+        {
+          "deviceID": "old-device",
+          "generatedAt": "2026-06-11T00:00:00Z",
+          "libraryVersion": 1,
+          "items": [],
+          "folders": [],
+          "tombstones": [],
+          "pendingUploads": [],
+          "checksum": ""
+        }
+        """.utf8))
+
+        #expect(manifest.recordings.isEmpty)
+        #expect(manifest.items.isEmpty)
+        #expect(manifest.folders.isEmpty)
+    }
+
+    @Test func newManifestWithRecordingsDecodesAndMissingAudioFactsRemainUnavailable() throws {
+        let manifest = try Self.decoder.decode(StudyLibrarySyncManifest.self, from: Data("""
+        {
+          "deviceID": "iphone-device",
+          "generatedAt": "2026-06-11T00:00:00Z",
+          "libraryVersion": 1,
+          "items": [],
+          "folders": [],
+          "tombstones": [],
+          "pendingUploads": [],
+          "recordings": [
+            {
+              "recordingID": "recording-schema",
+              "metadataHash": "metadata-hash",
+              "updatedAt": "2026-06-11T00:00:00Z",
+              "deleted": false,
+              "title": "Schema Recording"
+            }
+          ],
+          "checksum": ""
+        }
+        """.utf8))
+        let recording = try #require(manifest.recordings.first)
+
+        #expect(recording.recordingID == "recording-schema")
+        #expect(recording.audioAvailable == false)
+        #expect(recording.audioChecksum == nil)
+        #expect(recording.audioSize == nil)
+    }
+
+    @Test func malformedRecordingFactFailsClosed() {
+        let data = Data("""
+        {
+          "deviceID": "iphone-device",
+          "generatedAt": "2026-06-11T00:00:00Z",
+          "libraryVersion": 1,
+          "items": [],
+          "folders": [],
+          "tombstones": [],
+          "pendingUploads": [],
+          "recordings": [
+            {
+              "metadataHash": "metadata-hash",
+              "updatedAt": "2026-06-11T00:00:00Z",
+              "deleted": false
+            }
+          ],
+          "checksum": ""
+        }
+        """.utf8)
+
+        #expect(throws: DecodingError.self) {
+            _ = try Self.decoder.decode(StudyLibrarySyncManifest.self, from: data)
+        }
+    }
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}
+
+struct CanonicalAudioUploadCandidateTests {
+    @Test func peerMetadataOnlyCreatesUploadCandidate() {
+        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(Self.localSignature),
+            peerAudioState: .metadataOnly,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .periodicSync,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+
+        #expect(decision.shouldCreateUploadJob)
+        #expect(decision.reasonCode == "peer_metadata_only")
+    }
+
+    @Test func receiveRecordOnlyAndStudyItemOnlyTruthCreateUploadCandidateWithoutAudioProof() {
+        let receiveRecordOnly = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "candidate",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: nil,
+            peerReceiveRecordExists: true
+        )
+        let studyItemOnly = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "candidate",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: nil,
+            peerStudyItemExists: true
+        )
+
+        #expect(receiveRecordOnly.decision == .uploadAudioCandidate)
+        #expect(receiveRecordOnly.peerAudioAvailable == false)
+        #expect(studyItemOnly.decision == .uploadAudioCandidate)
+        #expect(studyItemOnly.peerAudioAvailable == false)
+    }
+
+    @Test func peerSameHashSizeNoOpsPeerUnknownDefersAndDifferentHashConflicts() {
+        let same = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(Self.localSignature),
+            peerAudioState: .available(Self.localSignature),
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .periodicSync,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+        let unknown = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(Self.localSignature),
+            peerAudioState: .unknown,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .periodicSync,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+        let conflict = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(Self.localSignature),
+            peerAudioState: .different(RecordingAudioSignature(sha256: Self.hash("b"), size: 10)),
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .periodicSync,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+
+        #expect(same.kind == .noOp)
+        #expect(same.reasonCode == "peer_already_has_same_audio")
+        #expect(unknown.kind == .suppress)
+        #expect(unknown.reasonCode == "peer_audio_unknown_deferred")
+        #expect(conflict.kind == .fail)
+        #expect(conflict.reasonCode == "peer_audio_conflict")
+    }
+
+    @Test func localAudioMissingOrViewRefreshDoesNotCreateUploadCandidate() {
+        let localMissing = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .missing,
+            peerAudioState: .metadataOnly,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .periodicSync,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+        let viewRefresh = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
+            localAudioState: .available(Self.localSignature),
+            peerAudioState: .metadataOnly,
+            transferJobState: .none,
+            ledgerState: .none,
+            triggerSource: .folderViewRefresh,
+            syncRunID: "candidate-run",
+            objectID: "recordingAudio:candidate",
+            recordingID: "candidate"
+        )
+
+        #expect(localMissing.shouldCreateUploadJob == false)
+        #expect(localMissing.reasonCode == "local_audio_missing")
+        #expect(viewRefresh.shouldCreateUploadJob == false)
+        #expect(viewRefresh.reasonCode == "view_refresh_only")
+    }
+
+    private static let localSignature = RecordingAudioSignature(sha256: hash("a"), size: 10)
+
+    private static func recordingObject(
+        objectID: String = "candidate",
+        audioHash: String?,
+        byteSize: Int64?
+    ) -> CanonicalRecordingObject {
+        let metadata = CanonicalRecordingMetadata(
+            objectID: objectID,
+            title: "Candidate",
+            createdAt: CanonicalTimestamp(Date(timeIntervalSince1970: 1)),
+            modifiedAt: CanonicalTimestamp(Date(timeIntervalSince1970: 2))
+        )
+        let artifacts: [CanonicalArtifact]
+        if let audioHash {
+            artifacts = [
+                CanonicalArtifact(
+                    artifactID: CanonicalArtifact.Kind.audio.artifactID(for: objectID),
+                    objectID: objectID,
+                    kind: .audio,
+                    availability: .available,
+                    contentHash: CanonicalHash(audioHash),
+                    byteSize: byteSize
+                )
+            ]
+        } else {
+            artifacts = []
+        }
+        return CanonicalRecordingObject(
+            objectID: objectID,
+            nodeID: "iphone-test",
+            metadata: metadata,
+            artifacts: artifacts
+        )
+    }
+
+    private static func hash(_ character: Character) -> String {
+        String(repeating: String(character), count: 64)
+    }
+}
+
+struct CanonicalRecordingExistenceTruthTests {
+    @Test func metadataOnlyIsNotAudioAvailable() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: Self.recordingObject(audioHash: nil, byteSize: nil)
+        )
+
+        #expect(truth.peerState == .metadataOnly)
+        #expect(truth.peerAudioAvailable == false)
+        #expect(truth.decision == .uploadAudioCandidate)
+    }
+
+    @Test func receiveRecordOnlyWithoutAudioIsNotAudioAvailable() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: nil,
+            peerReceiveRecordExists: true
+        )
+
+        #expect(truth.peerState == .receiveRecordOnly)
+        #expect(truth.peerAudioAvailable == false)
+        #expect(truth.blockers.contains(.receiveRecordNotAudioProof))
+    }
+
+    @Test func completedLedgerAloneIsNotAudioNoOp() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: Self.recordingObject(audioHash: nil, byteSize: nil),
+            peerCompletedLedgerOnly: true
+        )
+
+        #expect(truth.decision != .audioSameNoOp)
+        #expect(truth.blockers.contains(.completedLedgerNotAudioProof))
+    }
+
+    @Test func sameHashAndSizeIsAudioNoOp() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10)
+        )
+
+        #expect(truth.peerState == .audioHashSizeMatched)
+        #expect(truth.decision == .audioSameNoOp)
+    }
+
+    @Test func differentHashOrSizeIsConflict() {
+        let hashConflict = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: Self.recordingObject(audioHash: Self.hash("b"), byteSize: 10)
+        )
+        let sizeConflict = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 11)
+        )
+
+        #expect(hashConflict.decision == .conflict)
+        #expect(hashConflict.blockers.contains(.audioHashMismatch))
+        #expect(sizeConflict.decision == .conflict)
+        #expect(sizeConflict.blockers.contains(.audioSizeMismatch))
+    }
+
+    @Test func peerUnknownIsDeferred() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: nil,
+            peerKnown: false
+        )
+
+        #expect(truth.peerState == .peerUnknown)
+        #expect(truth.decision == .deferred)
+    }
+
+    @Test func tombstonedObjectBlocksApplyAndUpload() {
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "recording-existence",
+            local: Self.recordingObject(audioHash: Self.hash("a"), byteSize: 10),
+            peer: nil,
+            tombstonedParent: true
+        )
+
+        #expect(truth.decision == .blocked)
+        #expect(truth.blockers.contains(.tombstonedParent))
+    }
+
+    @Test func diagnosticsAreRedacted() {
+        let fullHash = Self.hash("a")
+        let truth = CanonicalRecordingExistenceTruth.evaluate(
+            objectID: "/Users/private/recording-existence",
+            local: Self.recordingObject(objectID: "/Users/private/recording-existence", audioHash: fullHash, byteSize: 10),
+            peer: nil,
+            peerKnown: false
+        )
+        let diagnostics = truth.diagnostics(syncRunID: "existence-test", mode: .diagnosticsOnly)
+        let diagnosticsRedacted = diagnostics.allSatisfy(\.isRedacted)
+
+        #expect(diagnosticsRedacted)
+        #expect(!diagnostics.map { $0.summary() }.joined().contains(fullHash))
+        #expect(!diagnostics.map { $0.summary() }.joined().contains("/Users/private"))
+    }
+
+    private static func recordingObject(
+        objectID: String = "recording-existence",
+        audioHash: String?,
+        byteSize: Int64?
+    ) -> CanonicalRecordingObject {
+        let metadata = CanonicalRecordingMetadata(
+            objectID: objectID,
+            title: "Existence Test",
+            createdAt: CanonicalTimestamp(Date(timeIntervalSince1970: 1)),
+            modifiedAt: CanonicalTimestamp(Date(timeIntervalSince1970: 2))
+        )
+        let artifacts: [CanonicalArtifact]
+        if let audioHash {
+            artifacts = [
+                CanonicalArtifact(
+                    artifactID: CanonicalArtifact.Kind.audio.artifactID(for: objectID),
+                    objectID: objectID,
+                    kind: .audio,
+                    availability: .available,
+                    contentHash: CanonicalHash(audioHash),
+                    byteSize: byteSize
+                )
+            ]
+        } else {
+            artifacts = []
+        }
+        return CanonicalRecordingObject(
+            objectID: objectID,
+            nodeID: "iphone-test",
+            metadata: metadata,
+            artifacts: artifacts
+        )
+    }
+
+    private static func hash(_ character: Character) -> String {
+        String(repeating: String(character), count: 64)
+    }
 }

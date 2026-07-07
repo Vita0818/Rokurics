@@ -16,6 +16,11 @@ struct SecureUploadPreparedRequest {
     let headers: [String: String]
 }
 
+struct SecureUploadRawResponse {
+    let statusCode: Int
+    let responseByteCount: Int
+}
+
 struct SecurePairingResult {
     let deviceID: String
     let sharedSecretBase64URL: String
@@ -81,17 +86,17 @@ enum SecureMacUploadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notPaired:
-            return "请先完成安全配对。"
+            return RokuricsCopy.text("请先完成安全配对。", "Complete secure pairing first.")
         case .invalidURL:
-            return "Mac 地址或端口无效。"
+            return RokuricsCopy.text("Mac 地址或端口无效。", "Mac address or port is invalid.")
         case .invalidSecret:
-            return "配对密钥无效，请重新配对。"
+            return RokuricsCopy.text("配对密钥无效，请重新配对。", "Pairing secret is invalid. Pair again.")
         case .invalidFingerprint:
-            return "请输入完整的 Mac 证书 SHA256 指纹。"
+            return RokuricsCopy.text("请输入完整的 Mac 证书 SHA256 指纹。", "Enter the full Mac certificate SHA256 fingerprint.")
         case .fingerprintMismatch:
-            return "Mac 指纹不匹配，已阻断连接。"
+            return RokuricsCopy.text("Mac 指纹不匹配，已阻断连接。", "Mac fingerprint mismatch. Connection blocked.")
         case .invalidResponse:
-            return "Mac 响应无法解析。"
+            return RokuricsCopy.text("Mac 响应无法解析。", "Mac response could not be parsed.")
         case .serverRejected(let reason):
             return reason
         case .httpsUnavailable(let reason):
@@ -102,6 +107,17 @@ enum SecureMacUploadError: LocalizedError {
 
 final class SecureMacUploadClient: ObservableObject {
     static let isHTTPSUploadEnabled = true
+
+    private let canonicalChecksumRuntime: CanonicalChecksumRuntime
+    private let canonicalChecksumCacheDirectoryURL: URL?
+
+    init(
+        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil,
+        canonicalChecksumCacheDirectoryURL: URL? = nil
+    ) {
+        self.canonicalChecksumRuntime = canonicalChecksumRuntime ?? CanonicalChecksumRuntime()
+        self.canonicalChecksumCacheDirectoryURL = canonicalChecksumCacheDirectoryURL
+    }
 
     private struct PairRequest: Encodable {
         let pairingCode: String
@@ -414,6 +430,20 @@ final class SecureMacUploadClient: ObservableObject {
         localInventory: LocalNetworkSyncInventory,
         syncRunID: String? = nil
     ) async throws -> LocalNetworkSyncInventoryResponse {
+        try await fetchLocalNetworkSyncInventory(
+            settings: settings,
+            localInventory: localInventory,
+            syncRunID: syncRunID,
+            statusExchangeEnvelope: nil
+        )
+    }
+
+    func fetchLocalNetworkSyncInventory(
+        settings: SecureMacConnectionSnapshot,
+        localInventory: LocalNetworkSyncInventory,
+        syncRunID: String? = nil,
+        statusExchangeEnvelope: CanonicalStatusExchangeEnvelope?
+    ) async throws -> LocalNetworkSyncInventoryResponse {
         try await postSignedJSON(
             settings: settings,
             path: "/sync/inventory",
@@ -421,7 +451,8 @@ final class SecureMacUploadClient: ObservableObject {
                 deviceID: localInventory.device.deviceID,
                 generatedAt: Date(),
                 localInventoryHash: localInventory.inventoryHash,
-                syncRunID: syncRunID
+                syncRunID: syncRunID,
+                statusExchangeEnvelope: statusExchangeEnvelope
             ),
             requestTimeout: 10,
             resourceTimeout: 20
@@ -718,6 +749,57 @@ final class SecureMacUploadClient: ObservableObject {
         }
     }
 
+    private func canonicalUploadChecksum(
+        fileURL: URL,
+        uploadType: String,
+        recordingID: String,
+        fileName: String,
+        httpPath: String
+    ) async throws -> String {
+        let safeUploadType = uploadType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "upload" : uploadType
+        let safeRecordingID = recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "unknown-recording" : recordingID
+        let safeFileName = fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fileURL.lastPathComponent : fileName
+        let result = await canonicalChecksumRuntime.checksum(
+            fileURL: fileURL,
+            logicalToken: "\(safeUploadType)-\(safeRecordingID)-\(safeFileName)",
+            nodeRole: .iPhone,
+            cacheDirectoryURL: canonicalChecksumCacheDirectoryURL ?? Self.defaultCanonicalChecksumCacheDirectoryURL()
+        )
+        if let checksum = result.sha256 {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "secureUploadFileChecksumResolved",
+                recordingID: recordingID,
+                eventResult: result.hashComputed ? "computed" : "cacheHit",
+                reasonCode: result.event.rawValue,
+                httpPath: httpPath,
+                fileSize: result.byteSize,
+                safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);cachePersisted=\(result.cachePersisted)"
+            )
+            return checksum
+        }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "secureUploadFileChecksumResolved",
+            recordingID: recordingID,
+            eventResult: "fail",
+            reasonCode: result.failure.map(String.init(describing:)) ?? "checksum_unavailable",
+            httpPath: httpPath,
+            fileSize: result.byteSize,
+            safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);cacheState=\(result.event.rawValue)"
+        )
+        throw SecureMacUploadError.invalidResponse
+    }
+
+    private static func defaultCanonicalChecksumCacheDirectoryURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return baseURL
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+            .standardizedFileURL
+    }
+
     func uploadSignedFile(
         settings: SecureMacConnectionSnapshot,
         path: String,
@@ -736,7 +818,13 @@ final class SecureMacUploadClient: ObservableObject {
         let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
         let url = try secureURL(host: settings.macHost, port: settings.macPort, path: path)
         let now = Date()
-        let bodySHA256 = try SecureUploadUtilities.sha256Hex(fileURL: fileURL)
+        let bodySHA256 = try await canonicalUploadChecksum(
+            fileURL: fileURL,
+            uploadType: uploadType,
+            recordingID: recordingID,
+            fileName: fileName,
+            httpPath: path
+        )
         let traceID = UploadFlightRecorder.currentTraceID
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? -1
         UploadFlightRecorder.record(
@@ -1226,7 +1314,8 @@ final class SecureMacUploadClient: ObservableObject {
         settings: SecureMacConnectionSnapshot,
         path: String,
         body: Body,
-        now: Date = Date()
+        now: Date = Date(),
+        additionalHeaders: [String: String] = [:]
     ) throws -> SecureUploadPreparedRequest {
         guard settings.isPaired else {
             throw SecureMacUploadError.notPaired
@@ -1252,7 +1341,7 @@ final class SecureMacUploadClient: ObservableObject {
             throw SecureMacUploadError.invalidSecret
         }
 
-        let headers = [
+        var headers = [
             "Content-Type": "application/json",
             "X-Rokurics-Device-ID": settings.deviceID,
             "X-Rokurics-Timestamp": timestamp,
@@ -1260,12 +1349,80 @@ final class SecureMacUploadClient: ObservableObject {
             "X-Rokurics-Body-SHA256": bodySHA256,
             "X-Rokurics-Signature": signature
         ]
+        additionalHeaders.forEach { key, value in
+            headers[key] = value
+        }
         var tracedHeaders = headers
         if let traceID = UploadFlightRecorder.currentTraceID {
             tracedHeaders[UploadFlightRecorder.traceHeaderName] = traceID
         }
 
         return SecureUploadPreparedRequest(url: url, body: bodyData, headers: tracedHeaders)
+    }
+
+    func prepareCanonicalLiveReadOnlyProbeRequest<Body: Encodable>(
+        settings: SecureMacConnectionSnapshot,
+        policy: CanonicalLiveReadOnlyTransportProbePolicy,
+        body: Body,
+        syncRunID: String?,
+        now: Date = Date()
+    ) throws -> SecureUploadPreparedRequest {
+        guard policy.route.method == "POST" else {
+            throw SecureMacUploadError.serverRejected("read_only_probe_requires_signed_post_route")
+        }
+        return try prepareSignedJSONRequest(
+            settings: settings,
+            path: policy.route.path,
+            body: body,
+            now: now,
+            additionalHeaders: CanonicalLiveReadOnlyTransportProbeHTTP.markerHeaders(
+                mode: policy.mode,
+                route: policy.route,
+                syncRunID: syncRunID
+            )
+        )
+    }
+
+    func sendCanonicalLiveReadOnlyProbe(
+        settings: SecureMacConnectionSnapshot,
+        preparedRequest: SecureUploadPreparedRequest,
+        route: CanonicalLiveReadOnlyTransportProbeRoute,
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval
+    ) async throws -> SecureUploadRawResponse {
+        let expectedFingerprint = try normalizedExpectedFingerprint(settings.macFingerprint)
+        let pinnedSession = makePinnedSession(
+            expectedFingerprint: expectedFingerprint,
+            diagnostics: nil,
+            traceID: UploadFlightRecorder.currentTraceID,
+            recordingID: nil,
+            httpPath: route.path,
+            requestTimeout: requestTimeout,
+            resourceTimeout: resourceTimeout
+        )
+        defer {
+            pinnedSession.session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: preparedRequest.url)
+        request.httpMethod = route.method
+        preparedRequest.headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        do {
+            let (data, response) = try await pinnedSession.session.upload(for: request, from: preparedRequest.body)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200..<300).contains(statusCode) else {
+                throw SecureMacUploadError.serverRejected(Self.serverErrorMessage(from: data) ?? "read_only_probe_failed")
+            }
+            return SecureUploadRawResponse(statusCode: statusCode, responseByteCount: data.count)
+        } catch {
+            if let pinningError = pinnedSession.context.currentPinningError {
+                throw pinningError
+            }
+            throw error
+        }
     }
 
     private func postSignedJSON<Body: Encodable, Response: Decodable>(

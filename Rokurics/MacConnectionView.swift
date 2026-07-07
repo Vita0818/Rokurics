@@ -84,6 +84,7 @@ struct MacConnectionView: View {
 
     @StateObject private var uploadClient = SecureMacUploadClient()
     @StateObject private var syncCoordinator: StudyLibrarySyncCoordinator
+    @ObservedObject private var syncProgressStore = LocalNetworkSyncProgressStore.shared
 
     init(
         connectionStore: SecureMacConnectionStore,
@@ -93,11 +94,27 @@ struct MacConnectionView: View {
     ) {
         self.connectionStore = connectionStore
         _studyLibraryStore = ObservedObject(wrappedValue: studyLibraryStore)
+        let kernelSwitchResultProvider: () -> CanonicalKernelSwitchResult = {
+            CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
+        }
+        let kernelSwitchResult = kernelSwitchResultProvider()
+        let productionPortInjection = IPhoneCanonicalProductionPortFactory.make(
+            result: kernelSwitchResult,
+            productionRootURL: studyLibraryStore.libraryRootURL
+        )
         _syncCoordinator = StateObject(wrappedValue: StudyLibrarySyncCoordinator(
             connectionStore: connectionStore,
             studyLibraryStore: studyLibraryStore,
             recordingManager: recordingManager,
-            uploadCoordinator: uploadCoordinator
+            uploadCoordinator: uploadCoordinator,
+            canonicalLibraryMetadataDebugPilotConfiguration: productionPortInjection.libraryMetadataDebugPilotConfiguration,
+            canonicalRecordingMetadataCutoverExecutor: productionPortInjection.recordingMetadataCutoverExecutor,
+            canonicalGeneratedArtifactCutoverExecutor: productionPortInjection.generatedArtifactCutoverExecutor,
+            canonicalLibraryMetadataCutoverExecutor: productionPortInjection.libraryMetadataCutoverExecutor,
+            canonicalTombstoneConflictCutoverExecutor: productionPortInjection.tombstoneConflictCutoverExecutor,
+            canonicalSyncRuntimeConfiguration: kernelSwitchResult.effectiveConfiguration.syncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: kernelSwitchResult.effectiveConfiguration.applyRuntimeConfiguration,
+            canonicalKernelSwitchResultProvider: kernelSwitchResultProvider
         ))
     }
 
@@ -197,7 +214,7 @@ struct MacConnectionView: View {
             },
             trailing: {
                 if !shouldShowPairedContent {
-                    MacConnectionStateCapsule(text: settingsSnapshot.isPaired ? "未连接" : "未配对")
+                    MacConnectionStateCapsule(text: settingsSnapshot.isPaired ? RokuricsCopy.text("未连接", "Disconnected") : RokuricsCopy.text("未配对", "Not Paired"))
                 }
             }
         ) {
@@ -226,7 +243,7 @@ struct MacConnectionView: View {
                 Button {
                     pastePairingInfo()
                 } label: {
-                    Label("粘贴配对信息", systemImage: "doc.on.clipboard")
+                    Label(RokuricsCopy.text("粘贴配对信息", "Paste Pairing Info"), systemImage: "doc.on.clipboard")
                         .font(RokuricsTypography.caption(size: 13, weight: .semibold))
                         .foregroundStyle(RokuricsColors.softTeal)
                         .frame(maxWidth: .infinity)
@@ -242,7 +259,7 @@ struct MacConnectionView: View {
                 Button {
                     startHealthCheck()
                 } label: {
-                    Label(isCheckingHTTPS ? "测试中" : "测试连接", systemImage: isCheckingHTTPS ? "arrow.triangle.2.circlepath" : "checkmark.shield")
+                    Label(isCheckingHTTPS ? RokuricsCopy.text("测试中", "Testing") : RokuricsCopy.text("测试连接", "Test Connection"), systemImage: isCheckingHTTPS ? "arrow.triangle.2.circlepath" : "checkmark.shield")
                 }
                 .buttonStyle(.rokuricsPrimary)
                 .disabled(!canRunHTTPSCheck)
@@ -260,7 +277,7 @@ struct MacConnectionView: View {
                 Button {
                     startUploadTest()
                 } label: {
-                    Label(isUploading ? "上传中" : "上传测试", systemImage: isUploading ? "arrow.triangle.2.circlepath" : "lock.doc.fill")
+                    Label(isUploading ? RokuricsCopy.text("上传中", "Uploading") : RokuricsCopy.text("上传测试", "Upload Test"), systemImage: isUploading ? "arrow.triangle.2.circlepath" : "lock.doc.fill")
                 }
                 .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.softTeal))
                 .disabled(!canUploadSecurely || isUploading)
@@ -285,6 +302,10 @@ struct MacConnectionView: View {
             ConnectedDeviceCardView(
                 snapshot: settingsSnapshot,
                 status: syncCoordinator.connectionStatus,
+                syncState: syncCoordinator.syncState,
+                progressDeviceID: syncProgressStore.deviceID,
+                progressState: syncProgressStore.controlPlaneState,
+                progressIsActive: syncProgressStore.isActive,
                 isSyncing: syncCoordinator.isSyncing,
                 onShowDetails: {
                     isDetailPresented = true
@@ -309,7 +330,7 @@ struct MacConnectionView: View {
     }
 
     private var pairingActionTitle: String {
-        isPairing ? "配对中" : "配对"
+        isPairing ? RokuricsCopy.text("配对中", "Pairing") : RokuricsCopy.text("配对", "Pair")
     }
 
     private var canUploadSecurely: Bool {
@@ -386,15 +407,15 @@ struct MacConnectionView: View {
 
         guard canRunHTTPSCheck else {
             feedbackKind = .connectionTest
-            recentStatus = "未测试"
-            errorMessage = "请输入 Mac 地址、端口和完整指纹。"
+            recentStatus = RokuricsCopy.text("未测试", "Not tested")
+            errorMessage = RokuricsCopy.text("请输入 Mac 地址、端口和完整指纹。", "Enter the Mac address, port, and full fingerprint.")
             return
         }
 
         isCheckingHTTPS = true
         focusedField = nil
         feedbackKind = .connectionTest
-        recentStatus = "正在测试连接"
+        recentStatus = RokuricsCopy.text("正在测试连接", "Testing connection")
         errorMessage = nil
 
         do {
@@ -408,21 +429,21 @@ struct MacConnectionView: View {
                 return
             }
 
-            recentStatus = "测试连接成功"
+            recentStatus = RokuricsCopy.text("测试连接成功", "Connection OK")
             errorMessage = nil
         } catch SecureMacUploadError.fingerprintMismatch {
             guard canUpdateViewState(for: runID, currentRunID: healthCheckRunID) else {
                 return
             }
 
-            recentStatus = "指纹不匹配"
+            recentStatus = RokuricsCopy.text("指纹不匹配", "Fingerprint mismatch")
             errorMessage = SecureMacUploadError.fingerprintMismatch.localizedDescription
         } catch {
             guard canUpdateViewState(for: runID, currentRunID: healthCheckRunID) else {
                 return
             }
 
-            recentStatus = "连接失败"
+            recentStatus = RokuricsCopy.text("连接失败", "Connection failed")
             errorMessage = error.localizedDescription
         }
 
@@ -441,29 +462,29 @@ struct MacConnectionView: View {
 
         guard !normalizedHost(connectionStore.macHost).isEmpty, connectionStore.macPort > 0 else {
             feedbackKind = .pairing
-            recentStatus = "配对未开始"
-            errorMessage = "请输入 Mac 地址和端口。"
+            recentStatus = RokuricsCopy.text("配对未开始", "Pairing not started")
+            errorMessage = RokuricsCopy.text("请输入 Mac 地址和端口。", "Enter the Mac address and port.")
             return
         }
 
         guard pairingCode.count == 6 else {
             feedbackKind = .pairing
-            recentStatus = "配对未开始"
-            errorMessage = "请输入 Mac 上显示的 6 位配对码。"
+            recentStatus = RokuricsCopy.text("配对未开始", "Pairing not started")
+            errorMessage = RokuricsCopy.text("请输入 Mac 上显示的 6 位配对码。", "Enter the 6-digit code shown on Mac.")
             return
         }
 
         guard connectionStore.normalizedFingerprint.count == 64 else {
             feedbackKind = .pairing
-            recentStatus = "配对未开始"
-            errorMessage = "请输入 Mac 上显示的完整 certificate-sha256 指纹。"
+            recentStatus = RokuricsCopy.text("配对未开始", "Pairing not started")
+            errorMessage = RokuricsCopy.text("请输入 Mac 上显示的完整 certificate-sha256 指纹。", "Enter the full certificate-sha256 fingerprint shown on Mac.")
             return
         }
 
         isPairing = true
         focusedField = nil
         feedbackKind = .pairing
-        recentStatus = "正在配对"
+        recentStatus = RokuricsCopy.text("正在配对", "Pairing")
         errorMessage = nil
 
         do {
@@ -500,14 +521,14 @@ struct MacConnectionView: View {
                 return
             }
 
-            recentStatus = "指纹不匹配"
+            recentStatus = RokuricsCopy.text("指纹不匹配", "Fingerprint mismatch")
             errorMessage = SecureMacUploadError.fingerprintMismatch.localizedDescription
         } catch {
             guard canUpdateViewState(for: runID, currentRunID: pairingRunID) else {
                 return
             }
 
-            recentStatus = "配对失败"
+            recentStatus = RokuricsCopy.text("配对失败", "Pairing failed")
             errorMessage = error.localizedDescription
         }
 
@@ -536,7 +557,7 @@ struct MacConnectionView: View {
                 uploadTestBlockedReason: blockedReason
             )
             feedbackKind = .upload
-            recentStatus = "上传测试已阻断"
+            recentStatus = RokuricsCopy.text("上传测试已阻断", "Upload test blocked")
             errorMessage = uploadTestBlockedMessage(for: blockedReason)
             return
         }
@@ -544,7 +565,7 @@ struct MacConnectionView: View {
         isUploading = true
         focusedField = nil
         feedbackKind = .upload
-        recentStatus = "正在上传测试"
+        recentStatus = RokuricsCopy.text("正在上传测试", "Running upload test")
         errorMessage = nil
 
         do {
@@ -554,21 +575,21 @@ struct MacConnectionView: View {
             }
 
             syncCoordinator.recordSignedRequestSucceeded(settings: settingsSnapshot)
-            recentStatus = "上传测试成功：\(result.fileName)"
+            recentStatus = RokuricsCopy.text("上传测试成功：\(result.fileName)", "Upload test OK: \(result.fileName)")
             errorMessage = nil
         } catch SecureMacUploadError.fingerprintMismatch {
             guard canUpdateViewState(for: runID, currentRunID: uploadRunID) else {
                 return
             }
 
-            recentStatus = "指纹不匹配"
+            recentStatus = RokuricsCopy.text("指纹不匹配", "Fingerprint mismatch")
             errorMessage = SecureMacUploadError.fingerprintMismatch.localizedDescription
         } catch {
             guard canUpdateViewState(for: runID, currentRunID: uploadRunID) else {
                 return
             }
 
-            recentStatus = "上传测试已阻断"
+            recentStatus = RokuricsCopy.text("上传测试已阻断", "Upload test blocked")
             errorMessage = error.localizedDescription
         }
 
@@ -586,15 +607,15 @@ struct MacConnectionView: View {
         case "not_paired":
             return SecureMacUploadError.notPaired.localizedDescription
         case "user_does_not_want_connection":
-            return "当前已断开连接，请重新配对。"
+            return RokuricsCopy.text("当前已断开连接，请重新配对。", "Disconnected. Pair again.")
         case "security_error":
-            return "连接处于安全错误状态，请重新配对。"
+            return RokuricsCopy.text("连接处于安全错误状态，请重新配对。", "Security error. Pair again.")
         case "heartbeat_interrupted", "heartbeat_stale", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
-            return "Mac 当前未在线，请等待前台心跳恢复后再测试上传。"
+            return RokuricsCopy.text("Mac 当前未在线，请等待前台心跳恢复后再测试上传。", "Mac is offline. Wait for heartbeat, then test again.")
         case "https_upload_disabled":
-            return "HTTPS 上传未启用。"
+            return RokuricsCopy.text("HTTPS 上传未启用。", "HTTPS upload is off.")
         default:
-            return "Mac 当前未在线，请等待前台心跳恢复后再测试上传。"
+            return RokuricsCopy.text("Mac 当前未在线，请等待前台心跳恢复后再测试上传。", "Mac is offline. Wait for heartbeat, then test again.")
         }
     }
 
@@ -655,7 +676,7 @@ struct MacConnectionView: View {
     private func pastePairingInfo() {
         guard let text = UIPasteboard.general.string,
               let pairingInfo = RokuricsPairingInfoParser.parse(text) else {
-            showTransientNotice("剪贴板中没有可识别的配对信息")
+            showTransientNotice(RokuricsCopy.text("剪贴板中没有可识别的配对信息", "No pairing info found in clipboard"))
             return
         }
 
@@ -668,7 +689,7 @@ struct MacConnectionView: View {
     @MainActor
     private func copyFingerprint() {
         UIPasteboard.general.string = settingsSnapshot.macFingerprint
-        showTransientNotice("指纹已复制")
+        showTransientNotice(RokuricsCopy.text("指纹已复制", "Fingerprint copied"))
     }
 
     private func normalizedHost(_ value: String) -> String {
@@ -687,7 +708,7 @@ struct MacConnectionView: View {
         connectionStore.refreshFromStorage()
 
         if let storageError = connectionStore.storageError {
-            showTransientNotice("Keychain 读取失败：\(storageError)")
+            showTransientNotice(RokuricsCopy.text("Keychain 读取失败：\(storageError)", "Keychain read failed: \(storageError)"))
         } else if settingsSnapshot.isPaired {
             clearFeedback()
         }
@@ -816,7 +837,7 @@ private struct PairingInfoFormView: View {
     var body: some View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
-                TextField("Mac 地址", text: $host)
+                TextField(RokuricsCopy.text("Mac 地址", "Mac Address"), text: $host)
                     .font(RokuricsTypography.technical(size: 17, weight: .semibold))
                     .foregroundStyle(RokuricsColors.deepText)
                     .textInputAutocapitalization(.never)
@@ -825,7 +846,7 @@ private struct PairingInfoFormView: View {
                     .focused(focusedField, equals: .host)
                     .macInputCapsule()
 
-                TextField("端口", text: $portText)
+                TextField(RokuricsCopy.text("端口", "Port"), text: $portText)
                     .font(RokuricsTypography.technical(size: 17, weight: .semibold))
                     .foregroundStyle(RokuricsColors.deepText)
                     .keyboardType(.numberPad)
@@ -841,7 +862,7 @@ private struct PairingInfoFormView: View {
                 focusedField: focusedField
             )
 
-            TextField("配对码", text: $pairingCode)
+            TextField(RokuricsCopy.text("配对码", "Pairing Code"), text: $pairingCode)
                 .font(RokuricsTypography.technical(size: 18, weight: .bold))
                 .foregroundStyle(RokuricsColors.deepText)
                 .keyboardType(.numberPad)
@@ -880,7 +901,7 @@ private struct MacFingerprintField: View {
     private var inputRow: some View {
         HStack(spacing: 10) {
             if isVisible {
-                TextField("Mac 指纹", text: groupedFingerprintBinding, axis: .vertical)
+                TextField(RokuricsCopy.text("Mac 指纹", "Mac Fingerprint"), text: groupedFingerprintBinding, axis: .vertical)
                     .font(RokuricsTypography.fingerprint(size: 15, weight: .semibold))
                     .foregroundStyle(RokuricsColors.deepText)
                     .textInputAutocapitalization(.characters)
@@ -891,7 +912,7 @@ private struct MacFingerprintField: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 ZStack(alignment: .leading) {
-                    TextField("Mac 指纹", text: rawFingerprintBinding)
+                    TextField(RokuricsCopy.text("Mac 指纹", "Mac Fingerprint"), text: rawFingerprintBinding)
                         .font(RokuricsTypography.fingerprint(size: 15, weight: .semibold))
                         .foregroundStyle(fingerprint.isEmpty ? RokuricsColors.deepText : .clear)
                         .textInputAutocapitalization(.characters)
@@ -913,7 +934,7 @@ private struct MacFingerprintField: View {
             Button {
                 isVisible.toggle()
             } label: {
-                Text(isVisible ? "隐藏" : "显示")
+                Text(isVisible ? RokuricsCopy.text("隐藏", "Hide") : RokuricsCopy.text("显示", "Show"))
                     .font(RokuricsTypography.caption(size: 12, weight: .bold))
                     .foregroundStyle(RokuricsColors.softTeal)
                     .frame(minWidth: 36)
@@ -1041,6 +1062,10 @@ private struct ConnectedDeviceBubbleView: View {
 private struct ConnectedDeviceCardView: View {
     let snapshot: SecureMacConnectionSnapshot
     let status: DeviceConnectionStatus
+    let syncState: StudyLibrarySyncState
+    let progressDeviceID: String?
+    let progressState: LocalNetworkSyncControlPlaneState
+    let progressIsActive: Bool
     let isSyncing: Bool
     let onShowDetails: () -> Void
     let onSyncNow: () -> Void
@@ -1066,9 +1091,10 @@ private struct ConnectedDeviceCardView: View {
             }
 
             VStack(spacing: 10) {
-                MacConnectionStatusLine(title: "状态", value: stateText, tint: stateTint)
-                MacConnectionStatusLine(title: "最近连接", value: presence.recentOnlineText, tint: RokuricsColors.softText)
-                MacConnectionStatusLine(title: "最近同步", value: lastSyncText, tint: RokuricsColors.softText)
+                MacConnectionStatusLine(title: RokuricsCopy.text("状态", "Status"), value: stateText, tint: stateTint)
+                MacConnectionStatusLine(title: RokuricsCopy.text("同步内核", "Sync Kernel"), value: kernelSwitchSourceText, tint: RokuricsColors.softText)
+                MacConnectionStatusLine(title: RokuricsCopy.text("最近连接", "Last Online"), value: presence.recentOnlineText, tint: RokuricsColors.softText)
+                MacConnectionStatusLine(title: RokuricsCopy.text("最近同步", "Last Sync"), value: lastSyncText, tint: RokuricsColors.softText)
             }
             .padding(14)
             .rokuricsLiquidGlassCard(cornerRadius: 20, material: .thinMaterial, fillOpacity: 0.30, strokeOpacity: 0.26, shadowOpacity: 0.04, shadowRadius: 7, shadowY: 3)
@@ -1077,16 +1103,16 @@ private struct ConnectedDeviceCardView: View {
                 Button {
                     onSyncNow()
                 } label: {
-                    Text(isSyncing ? "同步中" : "立即同步")
+                    LocalNetworkSyncButtonLabel(presentation: syncButtonPresentation)
                 }
                 .buttonStyle(.rokuricsPrimary)
-                .disabled(isSyncing || !snapshot.isPaired)
-                .opacity(isSyncing || !snapshot.isPaired ? 0.62 : 1)
+                .disabled(syncButtonPresentation.isActive || !snapshot.isPaired)
+                .opacity(syncButtonPresentation.isActive || !snapshot.isPaired ? 0.62 : 1)
 
-                Button("查看连接信息", action: onShowDetails)
+                Button(RokuricsCopy.text("查看连接信息", "Connection Info"), action: onShowDetails)
                     .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.softTeal, verticalPadding: 13))
 
-                Button("断开连接", action: onDisconnect)
+                Button(RokuricsCopy.text("断开连接", "Disconnect"), action: onDisconnect)
                     .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.coral))
             }
         }
@@ -1099,6 +1125,44 @@ private struct ConnectedDeviceCardView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+    }
+
+    private var syncButtonPresentation: LocalNetworkSyncButtonPresentation {
+        if progressDeviceID == snapshot.deviceID,
+           progressIsActive || isSyncing {
+            return LocalNetworkSyncButtonPresentation(state: progressState)
+        }
+
+        if isSyncing {
+            return LocalNetworkSyncButtonPresentation(state: syncState.syncControlPlaneState ?? .inventoryExchanging)
+        }
+
+        if let state = syncState.syncControlPlaneState,
+           syncState.deviceID == snapshot.deviceID || syncState.deviceID.isEmpty {
+            if state.isSyncProgressActive || shouldShowRecentTerminalSyncState(state) {
+                return LocalNetworkSyncButtonPresentation(state: state)
+            }
+        }
+
+        return .idle
+    }
+
+    private func shouldShowRecentTerminalSyncState(_ state: LocalNetworkSyncControlPlaneState) -> Bool {
+        switch state {
+        case .completed, .failed, .cancelled:
+            return isRecentTerminalSyncState
+        case .idle, .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated,
+             .transferring, .pausedDisconnected, .resuming:
+            return false
+        }
+    }
+
+    private var isRecentTerminalSyncState: Bool {
+        guard let updatedAt = syncState.syncControlPlaneUpdatedAt else {
+            return false
+        }
+        return presenceNow.timeIntervalSince(updatedAt) <= 12
     }
 
     private var displayName: String {
@@ -1127,6 +1191,12 @@ private struct ConnectedDeviceCardView: View {
         }
     }
 
+    private var kernelSwitchSourceText: String {
+        CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults()
+            .resolve()
+            .effectiveStatusSourceText
+    }
+
     private var presence: ConnectionPresenceSnapshot {
         status.presenceSnapshot(now: presenceNow)
     }
@@ -1140,15 +1210,67 @@ private struct ConnectedDeviceCardView: View {
             return relative
         }
 
-        return status.lastSyncStatus ?? "暂无"
+        return status.lastSyncStatus ?? RokuricsCopy.text("暂无", "None")
     }
 
     private static let relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.unitsStyle = .short
         return formatter
     }()
+}
+
+private struct LocalNetworkSyncButtonPresentation: Equatable {
+    var title: String
+    var progressFraction: Double?
+    var isActive: Bool
+
+    static let idle = LocalNetworkSyncButtonPresentation(
+        title: RokuricsCopy.text("立即同步", "Sync Now"),
+        progressFraction: nil,
+        isActive: false
+    )
+
+    init(state: LocalNetworkSyncControlPlaneState) {
+        let fraction = state.syncButtonProgressFraction
+        if let fraction, state.isSyncProgressActive {
+            let percent = min(max(Int((fraction * 100).rounded()), 0), 100)
+            title = "\(state.syncButtonStatusText) \(percent)%"
+        } else {
+            title = state.syncButtonStatusText
+        }
+        progressFraction = fraction
+        isActive = state.isSyncProgressActive
+    }
+
+    private init(title: String, progressFraction: Double?, isActive: Bool) {
+        self.title = title
+        self.progressFraction = progressFraction
+        self.isActive = isActive
+    }
+}
+
+private struct LocalNetworkSyncButtonLabel: View {
+    let presentation: LocalNetworkSyncButtonPresentation
+
+    var body: some View {
+        if presentation.isActive {
+            VStack(spacing: 5) {
+                Text(presentation.title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.76)
+
+                ProgressView(value: presentation.progressFraction)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 118)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            Text(presentation.title)
+                .frame(maxWidth: .infinity)
+        }
+    }
 }
 
 private struct MacConnectionStatusLine: View {
@@ -1187,18 +1309,18 @@ private struct MacConnectionDetailView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    MacConnectionDetailRow(title: "Mac 地址", value: snapshot.macHost.isEmpty ? "-" : snapshot.macHost, isTechnical: true)
-                    MacConnectionDetailRow(title: "端口", value: snapshot.macPort > 0 ? "\(snapshot.macPort)" : "\(SecureMacConnectionSettings.defaultPort)", isTechnical: true)
+                    MacConnectionDetailRow(title: RokuricsCopy.text("Mac 地址", "Mac Address"), value: snapshot.macHost.isEmpty ? "-" : snapshot.macHost, isTechnical: true)
+                    MacConnectionDetailRow(title: RokuricsCopy.text("端口", "Port"), value: snapshot.macPort > 0 ? "\(snapshot.macPort)" : "\(SecureMacConnectionSettings.defaultPort)", isTechnical: true)
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Mac 指纹")
+                            Text(RokuricsCopy.text("Mac 指纹", "Mac Fingerprint"))
                                 .font(RokuricsTypography.caption(size: 12, weight: .bold))
                                 .foregroundStyle(RokuricsColors.tertiaryText)
 
                             Spacer()
 
-                            Button("复制", action: onCopyFingerprint)
+                            Button(RokuricsCopy.text("复制", "Copy"), action: onCopyFingerprint)
                                 .font(RokuricsTypography.caption(size: 12, weight: .bold))
                                 .foregroundStyle(RokuricsColors.softTeal)
                         }
@@ -1214,15 +1336,15 @@ private struct MacConnectionDetailView: View {
                     .rokuricsLiquidGlassCard(cornerRadius: 22, material: .thinMaterial, fillOpacity: 0.36, strokeOpacity: 0.32, shadowOpacity: 0.06, shadowRadius: 10, shadowY: 5)
 
                     MacConnectionPairingStatusRow(
-                        title: "配对状态",
-                        stateText: snapshot.isPaired ? "已配对" : "未配对",
+                        title: RokuricsCopy.text("配对状态", "Pairing Status"),
+                        stateText: snapshot.isPaired ? RokuricsCopy.text("已配对", "Paired") : RokuricsCopy.text("未配对", "Not Paired"),
                         deviceIDPrefix: deviceIDPrefix
                     )
 
                     Button {
                         onUploadTest()
                     } label: {
-                        Label(isUploading ? "上传中" : "上传测试", systemImage: isUploading ? "arrow.triangle.2.circlepath" : "lock.doc.fill")
+                        Label(isUploading ? RokuricsCopy.text("上传中", "Uploading") : RokuricsCopy.text("上传测试", "Upload Test"), systemImage: isUploading ? "arrow.triangle.2.circlepath" : "lock.doc.fill")
                     }
                     .buttonStyle(RokuricsTintedCapsuleButtonStyle(tint: RokuricsColors.softTeal))
                     .disabled(isUploading)
@@ -1238,11 +1360,11 @@ private struct MacConnectionDetailView: View {
                 .padding(.bottom, 34)
             }
             .background(RokuricsColors.pageGradient.ignoresSafeArea())
-            .navigationTitle("连接信息")
+            .navigationTitle(RokuricsCopy.text("连接信息", "Connection Info"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
+                    Button(RokuricsCopy.text("完成", "Done")) {
                         dismiss()
                     }
                 }

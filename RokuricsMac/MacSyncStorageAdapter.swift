@@ -12,15 +12,18 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
     let recordingFileStore: MacRecordingFileStore
     let studyLibraryStore: StudyLibraryStore
     let fileManager: FileManager
+    let checksumRuntime: CanonicalChecksumRuntime
 
     init(
         recordingFileStore: MacRecordingFileStore,
         studyLibraryStore: StudyLibraryStore,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        checksumRuntime: CanonicalChecksumRuntime = CanonicalChecksumRuntime()
     ) {
         self.recordingFileStore = recordingFileStore
         self.studyLibraryStore = studyLibraryStore
         self.fileManager = fileManager
+        self.checksumRuntime = checksumRuntime
     }
 
     func buildDirectorySnapshot() throws -> [SyncDirectory] {
@@ -104,11 +107,24 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
         return tempDirectory.appendingPathComponent("\(object.objectID.safeSyncFileComponent)-\(UUID().uuidString).tmp")
     }
 
-    func verifyChecksum(for object: SyncObject, at url: URL) throws -> Bool {
+    func verifyChecksum(for object: SyncObject, at url: URL) async throws -> Bool {
         guard let expected = object.sha256 else {
             return true
         }
-        return try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: url) == expected
+        let cacheDirectoryURL = recordingFileStore.libraryRootURL
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+            .standardizedFileURL
+        var configuration = CanonicalInventoryRuntimeConfiguration()
+        configuration.persistentChecksumCacheEnabled = false
+        let result = await checksumRuntime.checksum(
+            fileURL: url,
+            logicalToken: object.logicalPathToken,
+            nodeRole: .mac,
+            cacheDirectoryURL: cacheDirectoryURL,
+            configuration: configuration
+        )
+        return result.sha256 == expected
     }
 
     func atomicApply(tempURL: URL, for object: SyncObject) throws {
@@ -217,7 +233,7 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
                 artifactID: LocalNetworkSyncArtifactID.make(kind: kind, ownerID: ownerID, logicalPathToken: relativePath),
                 kind: kind,
                 ownerID: ownerID,
-                checksum: includeChecksum ? try? LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: url) : nil,
+                checksum: nil,
                 size: metadata.size,
                 updatedAt: metadata.updatedAt,
                 availability: .local,

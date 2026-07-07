@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum RecordingUploadStatus: String, Codable, Equatable {
+nonisolated enum RecordingUploadStatus: String, Codable, Equatable {
     case localOnly
     case uploading
     case uploaded
@@ -20,13 +20,13 @@ enum RecordingUploadStatus: String, Codable, Equatable {
     var displayText: String {
         switch self {
         case .localOnly:
-            return "未上传"
+            return RokuricsCopy.text("未上传", "Not uploaded")
         case .uploading:
-            return "上传中"
+            return RokuricsCopy.text("上传中", "Uploading")
         case .uploaded:
-            return "已上传"
+            return RokuricsCopy.text("已上传", "Uploaded")
         case .failed:
-            return "上传失败"
+            return RokuricsCopy.text("上传失败", "Upload failed")
         }
     }
 }

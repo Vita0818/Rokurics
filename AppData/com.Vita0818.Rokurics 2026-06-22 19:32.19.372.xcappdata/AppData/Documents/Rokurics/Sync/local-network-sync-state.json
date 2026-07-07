@@ -1,0 +1,536 @@
+{
+  "activeSyncRunID" : "5F6B3AB8-DE10-4D8A-89F9-123E88689DE3",
+  "activeTransfers" : [
+    {
+      "objectID" : "rokurics_2026-05-26_14-21-39_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1219
+    },
+    {
+      "objectID" : "rokurics_2026-06-02_14-33-43_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1174
+    },
+    {
+      "objectID" : "rokurics_2026-05-17_14-27-55_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-59-57_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-52-03_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_11-40-31_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_19-01-43_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1171
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_10-34-12_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-31_23-33-15_fallback",
+      "objectKind" : "transcriptMarkdown",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 2933
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-59-42_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-28_08-02-38_fallback",
+      "objectKind" : "transcriptMarkdown",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 9864
+    },
+    {
+      "objectID" : "rokurics_2026-06-18_08-02-22_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1263
+    },
+    {
+      "objectID" : "rokurics_2026-05-14_09-35-24_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1171
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_00-14-26_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_12-02-59_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-51-50_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_12-01-44_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1133
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_00-05-50_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1171
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_11-46-52_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_19-01-47_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-12_19-33-28_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-21_08-00-04_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1306
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-52-10_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_10-39-09_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-06-01_16-34-38_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1171
+    },
+    {
+      "objectID" : "rokurics_2026-05-12_21-02-13_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 2163
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_11-40-37_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-12_20-52-53_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-31_22-41-46_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 2944
+    },
+    {
+      "objectID" : "rokurics_2026-06-04_08-04-17_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1200
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-51-46_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_00-00-17_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_13-25-17_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-16_15-01-46_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_13-24-41_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-22_10-01-31_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1248
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_13-24-21_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1136
+    },
+    {
+      "objectID" : "rokurics_2026-05-31_15-14-59_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_00-08-55_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_00-14-31_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_15-22-01_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_11-40-39_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-11_19-00-36_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-51-57_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-05-31_22-38-36_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 2201
+    },
+    {
+      "objectID" : "rokurics_2026-05-21_14-30-01_fallback",
+      "objectKind" : "transcriptJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 2310
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_11-46-48_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-09_23-51-24_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    },
+    {
+      "objectID" : "rokurics_2026-05-21_13-50-16_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 3838
+    },
+    {
+      "objectID" : "rokurics_2026-05-10_13-24-58_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1173
+    },
+    {
+      "objectID" : "rokurics_2026-06-22_19-27-24_fallback",
+      "objectKind" : "receiveJSON",
+      "progressFraction" : 0,
+      "receivedBytes" : 0,
+      "sourceDeviceID" : "mac-d6c0ef1617bf4af1",
+      "state" : "pending",
+      "statusText" : "等待传输",
+      "totalBytes" : 1172
+    }
+  ],
+  "consecutiveFailureCount" : 78,
+  "controlPlaneState" : "failed",
+  "lastAppliedPeerRevision" : "38b9b27b61fcda24f43c6ff75ffb5b56c35418834fbf924bc97c64c9dc300810",
+  "lastConflictCount" : 62,
+  "lastControlPlaneUpdatedAt" : "2026-06-22T11:32:05Z",
+  "lastErrorCode" : "presence_not_online",
+  "lastErrorMessage" : "Mac presence is disconnected.",
+  "lastLocalInventoryHash" : "26c7063343acede869ec92adeb22b942a89b8c59ddbe01e747faa5ac909129c3",
+  "lastPeerDeviceID" : "mac-d6c0ef1617bf4af1",
+  "lastPeerInventoryHash" : "5d8e2a75071922d883705ba9cb34a37383dde92955163d295420f450801b7fc8",
+  "lastPlanSummary" : "upload:57,download:116,conflict:62",
+  "lastSuccessfulSyncAt" : "2026-06-07T07:36:08Z",
+  "lastSyncAt" : "2026-06-22T11:32:05Z",
+  "lastSyncCompletedAt" : "2026-06-22T11:32:05Z",
+  "lastSyncStartedAt" : "2026-06-22T11:31:53Z",
+  "localDeviceID" : "iphone-eaa22979-36d3-4356-95d8-d56231ed8320",
+  "nextAllowedSyncAt" : "2026-06-22T11:42:05Z",
+  "peerDeviceID" : "mac-d6c0ef1617bf4af1",
+  "pendingDownloadCount" : 116,
+  "pendingUploadCount" : 57,
+  "version" : 1
+}

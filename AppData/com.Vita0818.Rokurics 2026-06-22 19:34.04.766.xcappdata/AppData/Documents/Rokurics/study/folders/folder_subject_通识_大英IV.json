@@ -1,0 +1,25 @@
+{
+  "childFolderIDs" : [
+    "folder_chapter_通识_大英IV_Unit6",
+    "folder_chapter_通识_大英IV_Unit8"
+  ],
+  "createdAt" : "2026-05-26T07:49:14Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_subject_通识_大英IV",
+  "isTrashed" : false,
+  "itemIDs" : [
+    "item_recording_rokurics_2026-05-26_14-21-39_fallback",
+    "item_recording_rokurics_2026-06-04_08-04-17_fallback"
+  ],
+  "level" : "subject",
+  "modifiedByDeviceID" : "iphone-1158bb44-fa4c-4683-a6b6-abeb9eaaac2e",
+  "name" : "大英IV",
+  "parentFolderID" : "folder_type_通识",
+  "path" : {
+    "subject" : "大英IV",
+    "type" : "通识"
+  },
+  "updatedAt" : "2026-06-22T11:32:03Z"
+}

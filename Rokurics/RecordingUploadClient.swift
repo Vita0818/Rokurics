@@ -16,12 +16,12 @@ struct RecordingUploadResult {
     let audioDisposition: String?
 }
 
-enum RecordingUploadMode: String, Codable, Equatable {
+nonisolated enum RecordingUploadMode: String, Codable, Equatable {
     case singleRequest
     case resumableChunks
 }
 
-enum RecordingResumableUploadState: String, Codable, Equatable {
+nonisolated enum RecordingResumableUploadState: String, Codable, Equatable {
     case notStarted
     case starting
     case uploading
@@ -32,7 +32,7 @@ enum RecordingResumableUploadState: String, Codable, Equatable {
     case fatalFailed
 }
 
-struct RecordingUploadResumeContext: Equatable {
+nonisolated struct RecordingUploadResumeContext: Equatable {
     var metadataStage: RecordingUploadJobStageState
     var metadataDisposition: RecordingUploadJobDisposition
     var resumableSessionID: String?
@@ -98,6 +98,13 @@ enum RecordingUploadProgressEvent: Equatable {
 typealias RecordingUploadProgressHandler = @MainActor (RecordingUploadProgressEvent) throws -> Void
 
 protocol RecordingUploadClientProtocol: AnyObject {
+    func uploadMetadataIfNeeded(
+        metadata: RecordingMetadata,
+        settings: SecureMacConnectionSnapshot,
+        progress: RecordingUploadProgressHandler?,
+        resumeContext: RecordingUploadResumeContext?
+    ) async throws -> SecureUploadServerResponse
+
     func uploadRecording(
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
@@ -113,6 +120,15 @@ protocol RecordingUploadClientProtocol: AnyObject {
 }
 
 extension RecordingUploadClientProtocol {
+    func uploadMetadataIfNeeded(
+        metadata _: RecordingMetadata,
+        settings _: SecureMacConnectionSnapshot,
+        progress _: RecordingUploadProgressHandler?,
+        resumeContext _: RecordingUploadResumeContext?
+    ) async throws -> SecureUploadServerResponse {
+        throw RecordingUploadError.metadataUploadFailed("metadata_preflight_unavailable")
+    }
+
     func uploadRecording(
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
@@ -194,19 +210,19 @@ enum RecordingUploadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notPaired:
-            return "请先连接 Mac。"
+            return RokuricsCopy.text("请先连接 Mac。", "Connect to Mac first.")
         case .audioFileMissing:
-            return "找不到音频文件。"
+            return RokuricsCopy.text("找不到音频文件。", "Audio file not found.")
         case .fileTooLarge(let limitBytes):
-            return "文件过大，当前限制为 \(Self.fileSizeFormatter.string(fromByteCount: Int64(limitBytes)))。"
+            return RokuricsCopy.text("文件过大，当前限制为 \(Self.fileSizeFormatter.string(fromByteCount: Int64(limitBytes)))。", "File is too large. Limit: \(Self.fileSizeFormatter.string(fromByteCount: Int64(limitBytes))).")
         case .metadataUploadFailed(let reason):
-            return "metadata 上传失败：\(reason)"
+            return RokuricsCopy.text("metadata 上传失败：\(reason)", "Metadata upload failed: \(reason)")
         case .audioUploadFailed(let reason):
-            return "audio 上传失败：\(reason)"
+            return RokuricsCopy.text("audio 上传失败：\(reason)", "Audio upload failed: \(reason)")
         case .macRejected(let reason):
-            return "Mac 拒绝：\(reason)"
+            return RokuricsCopy.text("Mac 拒绝：\(reason)", "Mac rejected: \(reason)")
         case .networkFailed(let reason):
-            return "网络失败：\(reason)"
+            return RokuricsCopy.text("网络失败：\(reason)", "Network failed: \(reason)")
         }
     }
 
@@ -226,17 +242,20 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
 
     private let secureClient: any RecordingSecureUploadTransport
     private let audioFileStore: AudioFileStore
+    private let canonicalChecksumRuntime: CanonicalChecksumRuntime
     private let resumableThresholdBytes: Int64
     private let resumableChunkSize: Int
 
     init(
         secureClient: any RecordingSecureUploadTransport = SecureMacUploadClient(),
         audioFileStore: AudioFileStore = AudioFileStore(),
+        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil,
         resumableThresholdBytes: Int64 = RecordingUploadClient.defaultResumableThresholdBytes,
         resumableChunkSize: Int = RecordingUploadClient.defaultResumableChunkSize
     ) {
         self.secureClient = secureClient
         self.audioFileStore = audioFileStore
+        self.canonicalChecksumRuntime = canonicalChecksumRuntime ?? CanonicalChecksumRuntime()
         self.resumableThresholdBytes = resumableThresholdBytes
         self.resumableChunkSize = resumableChunkSize
     }
@@ -432,7 +451,7 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         )
     }
 
-    private func uploadMetadataIfNeeded(
+    func uploadMetadataIfNeeded(
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
         progress: RecordingUploadProgressHandler?,
@@ -563,7 +582,7 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         if let existingSHA256 = resumeContext?.audioTotalSHA256 {
             totalSHA256 = existingSHA256
         } else {
-            totalSHA256 = try SecureUploadUtilities.sha256Hex(fileURL: audioURL)
+            totalSHA256 = try await canonicalAudioChecksum(metadata: metadata, audioURL: audioURL)
         }
         var sessionID = resumeContext?.resumableSessionID
         var confirmedBytes: Int64 = 0
@@ -836,6 +855,42 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
             metadataDisposition: metadataResponse.disposition,
             audioDisposition: finalizeResponse.disposition ?? audioDisposition
         )
+    }
+
+    private func canonicalAudioChecksum(metadata: RecordingMetadata, audioURL: URL) async throws -> String {
+        let cacheDirectoryURL = try audioFileStore.baseDirectory()
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+        let result = await canonicalChecksumRuntime.checksum(
+            fileURL: audioURL,
+            logicalToken: metadata.relativeAudioPath,
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
+        if let checksum = result.sha256 {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "audioChecksumResolved",
+                recordingID: metadata.id,
+                eventResult: result.hashComputed ? "computed" : "cacheHit",
+                reasonCode: result.event.rawValue,
+                uploadStatus: metadata.uploadStatus,
+                fileSize: result.byteSize,
+                safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);cachePersisted=\(result.cachePersisted)"
+            )
+            return checksum
+        }
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "audioChecksumResolved",
+            recordingID: metadata.id,
+            eventResult: "fail",
+            reasonCode: result.failure.map(String.init(describing:)) ?? "checksum_unavailable",
+            uploadStatus: metadata.uploadStatus,
+            fileSize: result.byteSize,
+            safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);cacheState=\(result.event.rawValue)"
+        )
+        throw RecordingUploadError.audioUploadFailed("audio_checksum_unavailable")
     }
 
     private func readChunk(from fileHandle: FileHandle, offset: Int64, maximumLength: Int) throws -> Data {

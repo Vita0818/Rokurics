@@ -1,0 +1,28 @@
+{
+  "audioRelativePath" : "Recordings\/rokurics_2026-06-14_13-48-03_fallback.m4a",
+  "createdAt" : "2026-06-14T05:48:03Z",
+  "customProperties" : {
+
+  },
+  "duration" : 15.450340136054422,
+  "filing" : {
+
+  },
+  "folderIDs" : [
+    "folder_type_未分类"
+  ],
+  "isTrashed" : false,
+  "itemID" : "item_recording_rokurics_2026-06-14_13-48-03_fallback",
+  "kind" : "recordingBundle",
+  "noteStatus" : "notStarted",
+  "recordingID" : "rokurics_2026-06-14_13-48-03_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-06-14_13-48-03_fallback",
+  "sourceDescription" : "iPhone",
+  "syncConflictStatus" : "conflict_preserved_local",
+  "tags" : [
+
+  ],
+  "title" : "录音 2026-06-14 13:48aaa",
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-06-14T05:52:26Z"
+}

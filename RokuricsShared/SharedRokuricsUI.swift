@@ -114,7 +114,7 @@ struct RokuricsMobileBackButton: View {
     var body: some View {
         RokuricsGlassIconButton(
             systemImage: "chevron.left",
-            accessibilityTitle: "返回",
+            accessibilityTitle: RokuricsCopy.text("返回", "Back"),
             tint: tint ?? RokuricsSharedStyle.deepText(for: colorScheme),
             isEnabled: isEnabled,
             action: action

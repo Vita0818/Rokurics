@@ -22,7 +22,7 @@ enum RecordingTitleEditRules {
             ? fallback.trimmingCharacters(in: .whitespacesAndNewlines)
             : singleLineTitle
 
-        let nonEmptyCandidate = candidate.isEmpty ? "未命名录音" : candidate
+        let nonEmptyCandidate = candidate.isEmpty ? RokuricsCopy.text("未命名录音", "Untitled Recording") : candidate
         guard nonEmptyCandidate.count > maxTitleLength else {
             return nonEmptyCandidate
         }
@@ -36,12 +36,12 @@ enum RecordingTitleEditRules {
 }
 
 enum RecordingLocalOperationCopy {
-    static let renameTitle = "重命名录音"
-    static let moveToTrashTitle = "移入废纸篓？"
-    static let permanentDeleteTitle = "永久删除录音？"
-    static let iPhoneMoveToTrashMessage = "这会将 iPhone 上的本地录音移入废纸篓，不会删除 Mac 上已接收的副本。"
-    static let iPhonePermanentDeleteMessage = "将永久删除 iPhone 上的音频和元数据，不会删除 Mac 上已接收的副本。"
-    static let renameFailure = "名称保存失败"
-    static let deleteFailure = "删除失败"
-    static let restoreFailure = "恢复失败"
+    static var renameTitle: String { RokuricsCopy.text("重命名录音", "Rename Recording") }
+    static var moveToTrashTitle: String { RokuricsCopy.text("移入废纸篓？", "Move to Trash?") }
+    static var permanentDeleteTitle: String { RokuricsCopy.text("永久删除录音？", "Delete Recording?") }
+    static var iPhoneMoveToTrashMessage: String { RokuricsCopy.text("这会将 iPhone 上的本地录音移入废纸篓，不会删除 Mac 上已接收的副本。", "Moves the local iPhone recording to Trash. Mac copies stay untouched.") }
+    static var iPhonePermanentDeleteMessage: String { RokuricsCopy.text("将永久删除 iPhone 上的音频和元数据，不会删除 Mac 上已接收的副本。", "Permanently deletes iPhone audio and metadata. Mac copies stay untouched.") }
+    static var renameFailure: String { RokuricsCopy.text("名称保存失败", "Could not save name") }
+    static var deleteFailure: String { RokuricsCopy.text("删除失败", "Delete failed") }
+    static var restoreFailure: String { RokuricsCopy.text("恢复失败", "Restore failed") }
 }

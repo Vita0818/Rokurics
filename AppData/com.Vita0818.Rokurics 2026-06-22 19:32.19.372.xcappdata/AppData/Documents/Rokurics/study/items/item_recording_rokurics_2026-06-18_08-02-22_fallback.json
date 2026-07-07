@@ -1,0 +1,37 @@
+{
+  "audioRelativePath" : "Recordings\/rokurics_2026-06-18_08-02-22_fallback.m4a",
+  "createdAt" : "2026-06-18T00:02:22Z",
+  "customProperties" : {
+    "localNetworkTransferObjectID" : "rokurics_2026-06-18_08-02-22_fallback",
+    "localNetworkTransferObjectKind" : "receiveJSON",
+    "localNetworkTransferProgressFraction" : "0.0",
+    "localNetworkTransferReceivedBytes" : "0",
+    "localNetworkTransferSourceDeviceID" : "mac-d6c0ef1617bf4af1",
+    "localNetworkTransferState" : "pending",
+    "localNetworkTransferStatusText" : "等待传输",
+    "localNetworkTransferTotalBytes" : "1263"
+  },
+  "duration" : 3492.0973469387754,
+  "filing" : {
+    "chapter" : "Unit8",
+    "subject" : "大英IV",
+    "type" : "通识"
+  },
+  "folderIDs" : [
+    "folder_chapter_通识_大英IV_Unit8"
+  ],
+  "isTrashed" : false,
+  "itemID" : "item_recording_rokurics_2026-06-18_08-02-22_fallback",
+  "kind" : "recordingBundle",
+  "noteStatus" : "notStarted",
+  "recordingID" : "rokurics_2026-06-18_08-02-22_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-06-18_08-02-22_fallback",
+  "sourceDescription" : "iPhone",
+  "syncConflictStatus" : "conflict_preserved_local",
+  "tags" : [
+
+  ],
+  "title" : "大英IV · Unit8",
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-06-18T01:00:50Z"
+}

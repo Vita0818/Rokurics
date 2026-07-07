@@ -10,6 +10,12 @@ import Foundation
 
 @MainActor
 final class DeviceConnectionStatusStore: ObservableObject {
+    struct PendingSyncRequestRecord {
+        let status: DeviceConnectionStatus
+        let signal: LocalNetworkSyncStartSignal
+        let isDuplicate: Bool
+    }
+
     @Published private(set) var statusesByDeviceID: [String: DeviceConnectionStatus] = [:]
     @Published private(set) var lastError: String?
 
@@ -47,6 +53,10 @@ final class DeviceConnectionStatusStore: ObservableObject {
         statusesByDeviceID.values.sorted { left, right in
             (left.lastSeenAt ?? left.lastHeartbeatAt ?? .distantPast) > (right.lastSeenAt ?? right.lastHeartbeatAt ?? .distantPast)
         }.first
+    }
+
+    var pendingSyncRequestCountForDiagnostics: Int {
+        pendingSyncStartSignalsByDeviceID.count
     }
 
     func status(for deviceID: String, now: Date = Date()) -> DeviceConnectionStatus? {
@@ -227,8 +237,30 @@ final class DeviceConnectionStatusStore: ObservableObject {
         statusText: String = "已请求 iPhone 同步",
         syncRunID: String = UUID().uuidString,
         initiatorDeviceID: String = "mac-local",
+        reason: String = "manual",
         at date: Date = Date()
     ) -> DeviceConnectionStatus {
+        recordPendingSyncRequestDetails(
+            deviceID: deviceID,
+            displayName: displayName,
+            statusText: statusText,
+            syncRunID: syncRunID,
+            initiatorDeviceID: initiatorDeviceID,
+            reason: reason,
+            at: date
+        ).status
+    }
+
+    @discardableResult
+    func recordPendingSyncRequestDetails(
+        deviceID: String,
+        displayName: String,
+        statusText: String = "已请求 iPhone 同步",
+        syncRunID: String = UUID().uuidString,
+        initiatorDeviceID: String = "mac-local",
+        reason: String = "manual",
+        at date: Date = Date()
+    ) -> PendingSyncRequestRecord {
         var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
             deviceID: deviceID,
             displayName: displayName,
@@ -251,16 +283,21 @@ final class DeviceConnectionStatusStore: ObservableObject {
             status.connectionStatusRevision = nextRevision(after: status)
             statusesByDeviceID[deviceID] = status
             save()
-            return evaluatedStatus(status, now: date)
+            return PendingSyncRequestRecord(
+                status: evaluatedStatus(status, now: date),
+                signal: existing,
+                isDuplicate: true
+            )
         }
-        pendingSyncRequestDeviceIDs.insert(deviceID)
-        pendingSyncStartSignalsByDeviceID[deviceID] = LocalNetworkSyncStartSignal(
+        let signal = LocalNetworkSyncStartSignal(
             syncRunID: syncRunID,
             initiatorDeviceID: initiatorDeviceID,
             initiatorPlatform: .Mac,
             requestedAt: date,
-            reason: "manual"
+            reason: reason
         )
+        pendingSyncRequestDeviceIDs.insert(deviceID)
+        pendingSyncStartSignalsByDeviceID[deviceID] = signal
         status.displayName = displayName
         status.state = .connected
         status.presenceState = status.presenceState == .disconnected ? .connecting : (status.presenceState ?? .connecting)
@@ -271,7 +308,29 @@ final class DeviceConnectionStatusStore: ObservableObject {
         status.connectionStatusRevision = nextRevision(after: status)
         statusesByDeviceID[deviceID] = status
         save()
-        return evaluatedStatus(status, now: date)
+        return PendingSyncRequestRecord(
+            status: evaluatedStatus(status, now: date),
+            signal: signal,
+            isDuplicate: false
+        )
+    }
+
+    @discardableResult
+    func recordStatusExchangeRunSyncSoonRequest(
+        deviceID: String,
+        displayName: String,
+        syncRunID: String = UUID().uuidString,
+        at date: Date = Date()
+    ) -> DeviceConnectionStatus {
+        recordPendingSyncRequest(
+            deviceID: deviceID,
+            displayName: displayName,
+            statusText: "已请求 iPhone 尽快同步",
+            syncRunID: syncRunID,
+            initiatorDeviceID: "mac-local",
+            reason: "statusExchangeRunSyncSoon",
+            at: date
+        )
     }
 
     func consumePendingSyncRequest(deviceID: String) -> Bool {
@@ -290,6 +349,43 @@ final class DeviceConnectionStatusStore: ObservableObject {
             save()
         }
         return signal
+    }
+
+    @discardableResult
+    func recordPendingSyncInventoryObserved(
+        deviceID: String,
+        displayName: String,
+        syncRunID: String?,
+        at date: Date = Date()
+    ) -> DeviceConnectionStatus {
+        var status = statusesByDeviceID[deviceID] ?? DeviceConnectionStatus(
+            deviceID: deviceID,
+            displayName: displayName,
+            state: .connected,
+            lastSeenAt: nil,
+            lastHeartbeatAt: nil,
+            lastSyncAt: nil,
+            lastSyncStatus: nil,
+            lastError: nil
+        )
+        pendingSyncRequestDeviceIDs.remove(deviceID)
+        if let syncRunID,
+           pendingSyncStartSignalsByDeviceID[deviceID]?.syncRunID == syncRunID {
+            pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
+        }
+        status.displayName = displayName
+        status.state = .connected
+        status.presenceState = .online
+        status.monitoringMode = .foregroundActive
+        status.lastSeenAt = date
+        status.lastHeartbeatAt = date
+        status.lastSyncStatus = "iPhone 已开始同步"
+        status.lastError = nil
+        status.lastErrorCode = nil
+        status.connectionStatusRevision = nextRevision(after: status)
+        statusesByDeviceID[deviceID] = status
+        save()
+        return evaluatedStatus(status, now: date)
     }
 
     @discardableResult
@@ -627,6 +723,115 @@ final class DeviceConnectionStatusStore: ObservableObject {
     }
 }
 
+extension LocalNetworkSyncControlPlaneState {
+    var isSyncProgressActive: Bool {
+        switch self {
+        case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated,
+             .transferring, .pausedDisconnected, .resuming:
+            return true
+        case .idle, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
+    var shouldExpireWhenStale: Bool {
+        switch self {
+        case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated:
+            return true
+        case .transferring, .pausedDisconnected, .resuming,
+             .idle, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
+    var controlPlaneProgressRank: Int? {
+        switch self {
+        case .syncStartSignalSent:
+            return 10
+        case .syncStartSignalReceived:
+            return 20
+        case .syncStartAcked:
+            return 30
+        case .inventoryExchanging:
+            return 40
+        case .planningTransfers:
+            return 50
+        case .transferJobsCreated:
+            return 60
+        case .transferring:
+            return 70
+        case .resuming:
+            return 75
+        case .pausedDisconnected:
+            return nil
+        case .idle, .completed, .failed, .cancelled:
+            return nil
+        }
+    }
+
+    var syncButtonProgressFraction: Double? {
+        switch self {
+        case .idle:
+            return nil
+        case .syncStartSignalSent:
+            return 0.12
+        case .syncStartSignalReceived:
+            return 0.18
+        case .syncStartAcked:
+            return 0.28
+        case .inventoryExchanging:
+            return 0.46
+        case .planningTransfers:
+            return 0.62
+        case .transferJobsCreated:
+            return 0.74
+        case .transferring:
+            return 0.86
+        case .pausedDisconnected:
+            return nil
+        case .resuming:
+            return 0.50
+        case .completed:
+            return 1
+        case .failed, .cancelled:
+            return nil
+        }
+    }
+
+    var syncButtonStatusText: String {
+        switch self {
+        case .idle:
+            return "立即同步"
+        case .syncStartSignalSent:
+            return "等待 iPhone"
+        case .syncStartSignalReceived:
+            return "收到请求"
+        case .syncStartAcked:
+            return "准备清单"
+        case .inventoryExchanging:
+            return "同步清单"
+        case .planningTransfers:
+            return "计算差异"
+        case .transferJobsCreated:
+            return "准备写入"
+        case .transferring:
+            return "同步结构"
+        case .pausedDisconnected:
+            return "等待连接"
+        case .resuming:
+            return "恢复同步"
+        case .completed:
+            return "同步完成"
+        case .failed:
+            return "同步失败"
+        case .cancelled:
+            return "已取消"
+        }
+    }
+}
+
 @MainActor
 final class StudyLibrarySyncStateStore: ObservableObject {
     @Published private(set) var state: StudyLibrarySyncState = StudyLibrarySyncState()
@@ -634,12 +839,25 @@ final class StudyLibrarySyncStateStore: ObservableObject {
 
     private let fileManager: FileManager
     private let storeURL: URL
+    private let controlPlaneInactivityTimeout: TimeInterval
+    private var controlPlaneTimeoutTask: Task<Void, Never>?
 
-    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        rootURL: URL? = nil,
+        controlPlaneInactivityTimeout: TimeInterval = 30
+    ) {
         self.fileManager = fileManager
+        self.controlPlaneInactivityTimeout = controlPlaneInactivityTimeout
         storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
             .appendingPathComponent("study-library-sync-state.json", isDirectory: false)
         load()
+        _ = expireStaleControlPlaneIfNeeded()
+        scheduleControlPlaneWatchdogIfNeeded()
+    }
+
+    deinit {
+        controlPlaneTimeoutTask?.cancel()
     }
 
     func recordPull(deviceID: String, remoteManifestHash: String?, remoteCommitID: String? = nil, at date: Date = Date()) {
@@ -661,6 +879,9 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state.pendingUploads = pendingUploads
         state.failedChanges = 0
         state.lastError = nil
+        state.syncControlPlaneState = .completed
+        state.syncControlPlaneUpdatedAt = date
+        cancelControlPlaneWatchdog()
         save()
     }
 
@@ -680,6 +901,9 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         }
         state.failedChanges = max(state.failedChanges, failedChanges)
         state.lastError = error
+        state.syncControlPlaneState = .failed
+        state.syncControlPlaneUpdatedAt = Date()
+        cancelControlPlaneWatchdog()
         save()
     }
 
@@ -689,6 +913,13 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state controlPlaneState: LocalNetworkSyncControlPlaneState,
         at date: Date = Date()
     ) {
+        guard shouldAcceptControlPlaneUpdate(
+            syncRunID: syncRunID,
+            nextState: controlPlaneState,
+            at: date
+        ) else {
+            return
+        }
         state.deviceID = deviceID
         state.activeSyncRunID = syncRunID
         state.syncControlPlaneState = controlPlaneState
@@ -699,12 +930,87 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         if controlPlaneState != .failed {
             state.lastError = nil
         }
+        scheduleControlPlaneWatchdogIfNeeded()
         save()
     }
 
     func replace(_ nextState: StudyLibrarySyncState) {
         state = nextState
+        scheduleControlPlaneWatchdogIfNeeded()
         save()
+    }
+
+    @discardableResult
+    func expireStaleControlPlaneIfNeeded(now: Date = Date()) -> Bool {
+        guard let controlPlaneState = state.syncControlPlaneState,
+              controlPlaneState.shouldExpireWhenStale,
+              let updatedAt = state.syncControlPlaneUpdatedAt,
+              now.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout else {
+            return false
+        }
+        state.syncControlPlaneState = .failed
+        state.syncControlPlaneUpdatedAt = now
+        state.lastError = "sync_control_plane_timeout"
+        cancelControlPlaneWatchdog()
+        save()
+        return true
+    }
+
+    private func shouldAcceptControlPlaneUpdate(
+        syncRunID: String,
+        nextState: LocalNetworkSyncControlPlaneState,
+        at date: Date
+    ) -> Bool {
+        guard let currentRunID = state.activeSyncRunID,
+              !currentRunID.isEmpty else {
+            return true
+        }
+        let currentState = state.syncControlPlaneState
+        if currentRunID == syncRunID {
+            guard let currentRank = currentState?.controlPlaneProgressRank,
+                  let nextRank = nextState.controlPlaneProgressRank,
+                  nextRank < currentRank,
+                  currentState?.isSyncProgressActive == true else {
+                return true
+            }
+            return false
+        }
+        guard currentState?.isSyncProgressActive == true else {
+            return true
+        }
+        if let updatedAt = state.syncControlPlaneUpdatedAt,
+           date.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout {
+            return true
+        }
+        return false
+    }
+
+    private func scheduleControlPlaneWatchdogIfNeeded() {
+        controlPlaneTimeoutTask?.cancel()
+        guard state.syncControlPlaneState?.shouldExpireWhenStale == true,
+              let syncRunID = state.activeSyncRunID,
+              let updatedAt = state.syncControlPlaneUpdatedAt else {
+            controlPlaneTimeoutTask = nil
+            return
+        }
+        let timeout = controlPlaneInactivityTimeout
+        controlPlaneTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+            self?.expireControlPlaneIfStillStale(syncRunID: syncRunID, updatedAt: updatedAt)
+        }
+    }
+
+    private func cancelControlPlaneWatchdog() {
+        controlPlaneTimeoutTask?.cancel()
+        controlPlaneTimeoutTask = nil
+    }
+
+    private func expireControlPlaneIfStillStale(syncRunID: String, updatedAt: Date) {
+        guard state.activeSyncRunID == syncRunID,
+              state.syncControlPlaneUpdatedAt == updatedAt else {
+            return
+        }
+        _ = expireStaleControlPlaneIfNeeded(now: Date())
     }
 
     private func load() {

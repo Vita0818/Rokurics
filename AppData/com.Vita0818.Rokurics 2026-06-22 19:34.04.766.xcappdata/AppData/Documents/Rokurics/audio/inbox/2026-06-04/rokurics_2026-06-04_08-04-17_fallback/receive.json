@@ -1,0 +1,33 @@
+{
+  "createdAt" : "2026-06-04T00:04:17Z",
+  "duration" : 5401.626303854875,
+  "fileSize" : 86058423,
+  "isDeleted" : false,
+  "lastUploadAttemptAt" : "2026-06-22T11:17:11Z",
+  "localNetworkTransferProgressFraction" : 0.5361165402717175,
+  "localNetworkTransferReceivedBytes" : 46137344,
+  "localNetworkTransferState" : "transferring",
+  "localNetworkTransferStatusText" : "传输中 54%",
+  "localNetworkTransferTotalBytes" : 86058423,
+  "metadataFileName" : "metadata.json",
+  "metadataRelativePath" : "audio\/inbox\/2026-06-04\/rokurics_2026-06-04_08-04-17_fallback\/metadata.json",
+  "normalizedTitle" : "大英IV",
+  "noteStatus" : "notGenerated",
+  "originalTitle" : "大英IV",
+  "processingStatus" : "awaitingAudio",
+  "receivedAt" : "2026-06-22T11:17:11Z",
+  "recordingID" : "rokurics_2026-06-04_08-04-17_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-06-04_08-04-17_fallback",
+  "sourceDeviceID" : "iphone-eaa22979-36d3-4356-95d8-d56231ed8320",
+  "sourceDeviceName" : "iPhone",
+  "status" : "metadataReceived",
+  "studyFiling" : {
+    "subject" : "大英IV",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-06-22T11:27:25Z"
+}

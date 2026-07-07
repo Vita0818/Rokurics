@@ -13,12 +13,17 @@ struct MacAIProcessingCard: View {
 
     var body: some View {
         MacDashboardCard(systemImage: "sparkles", tint: MacTheme.amber) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("AI")
-                    .font(MacTypography.englishHeadline(size: 17))
+            if RokuricsCopy.usesChinese {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("AI")
+                        .font(MacTypography.englishHeadline(size: 17))
 
-                Text("整理")
-                    .font(MacTypography.chineseHeadline(size: 17))
+                    Text("整理")
+                        .font(MacTypography.chineseHeadline(size: 17))
+                }
+            } else {
+                Text("AI Notes")
+                    .font(MacTypography.englishHeadline(size: 17))
             }
         } content: {
             VStack(alignment: .leading, spacing: 0) {
@@ -39,8 +44,8 @@ struct MacAIProcessingCard: View {
                     Text(providerSubtitle)
                         .font(MacTypography.englishBody(size: 14, weight: .medium))
 
-                    Text("可切换")
-                        .font(MacTypography.chineseBody(size: 14, weight: .medium))
+                    Text(RokuricsCopy.text("可切换", "Switchable"))
+                        .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
                 }
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
                 .lineLimit(1)

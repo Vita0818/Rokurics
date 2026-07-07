@@ -10,6 +10,73 @@ import Foundation
 
 extension Notification.Name {
     static let localNetworkStudyLibraryDidChange = Notification.Name("Rokurics.localNetworkStudyLibraryDidChange")
+    static let localNetworkSyncEventTriggered = Notification.Name("Rokurics.localNetworkSyncEventTriggered")
+    static let localNetworkStatusConvergenceRefreshRequested = Notification.Name("Rokurics.localNetworkStatusConvergenceRefreshRequested")
+}
+
+nonisolated enum SyncTriggerReason: String, Codable, CaseIterable, Sendable {
+    case manualPeerSyncRequested
+    case recordingCreated
+    case recordingMetadataChanged
+    case studyLibraryMetadataChanged
+    case generatedArtifactAvailabilityChanged
+    case tombstoneConflictChanged
+    case audioUploadFinalized
+    case macAudioReceiveFinalized
+    case transcriptionStatusChanged
+    case noteStatusChanged
+    case syncStatusRefreshRequested
+    case retryStateChanged
+    case appForegroundedWithPendingChanges
+}
+
+nonisolated enum LocalNetworkSyncEventTrigger {
+    static let reasonUserInfoKey = "reason"
+    static let sourceUserInfoKey = "source"
+    static let recordingIDUserInfoKey = "recordingID"
+
+    static func reason(from notification: Notification) -> SyncTriggerReason? {
+        if let reason = notification.userInfo?[reasonUserInfoKey] as? SyncTriggerReason {
+            return reason
+        }
+        if let rawReason = notification.userInfo?[reasonUserInfoKey] as? String {
+            return SyncTriggerReason(rawValue: rawReason)
+        }
+        return nil
+    }
+
+    static func post(
+        _ reason: SyncTriggerReason,
+        source: String,
+        recordingID: String? = nil,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        var userInfo: [String: Any] = [
+            reasonUserInfoKey: reason.rawValue,
+            sourceUserInfoKey: source
+        ]
+        if let recordingID {
+            userInfo[recordingIDUserInfoKey] = String(recordingID.prefix(12))
+        }
+        notificationCenter.post(name: .localNetworkSyncEventTriggered, object: nil, userInfo: userInfo)
+    }
+
+    static func postStatusConvergenceRefresh(
+        _ reason: SyncTriggerReason,
+        source: String,
+        recordingID: String? = nil,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        post(reason, source: source, recordingID: recordingID, notificationCenter: notificationCenter)
+        var userInfo: [String: Any] = [
+            reasonUserInfoKey: reason.rawValue,
+            sourceUserInfoKey: source
+        ]
+        if let recordingID {
+            userInfo[recordingIDUserInfoKey] = String(recordingID.prefix(12))
+        }
+        notificationCenter.post(name: .localNetworkStatusConvergenceRefreshRequested, object: nil, userInfo: userInfo)
+    }
 }
 
 struct StudyLibrarySyncRuntimeConfiguration: Equatable, Sendable {
@@ -486,7 +553,11 @@ enum RecordingAudioSyncTriggerSource: String, Codable, Equatable {
 
     init(syncTrigger: String) {
         let normalized = syncTrigger.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalized.contains("retry-drainer") || normalized.contains("retrydrainer") {
+        if normalized.hasPrefix("event-driven:") && Self.isStatusOnlyEventTrigger(normalized) {
+            self = .studyLibraryRefresh
+        } else if normalized.hasPrefix("event-driven:") && normalized.contains("appforegroundedwithpendingchanges") {
+            self = .appActivationRefresh
+        } else if normalized.contains("retry-drainer") || normalized.contains("retrydrainer") {
             self = .retryDrainer
         } else if normalized.contains("manual-sync-requested") || normalized.contains("mac") {
             self = .manualSyncMacHint
@@ -503,6 +574,28 @@ enum RecordingAudioSyncTriggerSource: String, Codable, Equatable {
         } else {
             self = .periodicSync
         }
+    }
+
+    private static func isStatusOnlyEventTrigger(_ normalized: String) -> Bool {
+        let statusReasons = [
+            "audiouploadfinalized",
+            "macaudioreceivefinalized",
+            "transcriptionstatuschanged",
+            "notestatuschanged",
+            "syncstatusrefreshrequested",
+            "retrystatechanged"
+        ]
+        let dataChangeReasons = [
+            "recordingcreated",
+            "recordingmetadatachanged",
+            "studylibrarymetadatachanged",
+            "generatedartifactavailabilitychanged",
+            "tombstoneconflictchanged",
+            "appforegroundedwithpendingchanges",
+            "manualpeersyncrequested"
+        ]
+        return statusReasons.contains { normalized.contains($0) }
+            && !dataChangeReasons.contains { normalized.contains($0) }
     }
 
     var canCreateUploadJob: Bool {
@@ -575,101 +668,6 @@ struct LocalNetworkChecksumCacheResult: Equatable {
     var modifiedAt: Date
     var computedAt: Date
     var event: LocalNetworkChecksumCacheEvent
-}
-
-final class LocalNetworkChecksumCache {
-    private struct Entry {
-        var pathToken: String
-        var size: Int64
-        var modifiedAt: Date
-        var sha256: String
-        var computedAt: Date
-        var sourceSide: String
-    }
-
-    private var entriesByKey: [String: Entry] = [:]
-
-    func checksum(
-        fileURL: URL,
-        pathToken: String?,
-        sourceSide: String,
-        now: Date = Date(),
-        compute: (URL) throws -> String
-    ) throws -> LocalNetworkChecksumCacheResult? {
-        let standardizedURL = fileURL.standardizedFileURL
-        let key = Self.cacheKey(pathToken: pathToken, fileURL: standardizedURL)
-        guard let metadata = Self.fileMetadata(for: standardizedURL) else {
-            if entriesByKey.removeValue(forKey: key) != nil {
-                return nil
-            }
-            return nil
-        }
-
-        if let existing = entriesByKey[key] {
-            if existing.size == metadata.size, existing.modifiedAt == metadata.modifiedAt {
-                return LocalNetworkChecksumCacheResult(
-                    sha256: existing.sha256,
-                    size: existing.size,
-                    modifiedAt: existing.modifiedAt,
-                    computedAt: existing.computedAt,
-                    event: .hit
-                )
-            }
-            entriesByKey.removeValue(forKey: key)
-            let sha256 = try compute(standardizedURL)
-            let entry = Entry(
-                pathToken: pathToken ?? standardizedURL.lastPathComponent,
-                size: metadata.size,
-                modifiedAt: metadata.modifiedAt,
-                sha256: sha256,
-                computedAt: now,
-                sourceSide: sourceSide
-            )
-            entriesByKey[key] = entry
-            return LocalNetworkChecksumCacheResult(
-                sha256: sha256,
-                size: metadata.size,
-                modifiedAt: metadata.modifiedAt,
-                computedAt: now,
-                event: .invalidated
-            )
-        }
-
-        let sha256 = try compute(standardizedURL)
-        let entry = Entry(
-            pathToken: pathToken ?? standardizedURL.lastPathComponent,
-            size: metadata.size,
-            modifiedAt: metadata.modifiedAt,
-            sha256: sha256,
-            computedAt: now,
-            sourceSide: sourceSide
-        )
-        entriesByKey[key] = entry
-        return LocalNetworkChecksumCacheResult(
-            sha256: sha256,
-            size: metadata.size,
-            modifiedAt: metadata.modifiedAt,
-            computedAt: now,
-            event: .miss
-        )
-    }
-
-    private static func cacheKey(pathToken: String?, fileURL: URL) -> String {
-        let token = pathToken?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let token, !token.isEmpty {
-            return token
-        }
-        return fileURL.path
-    }
-
-    private static func fileMetadata(for url: URL) -> (size: Int64, modifiedAt: Date)? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let sizeNumber = attributes[.size] as? NSNumber else {
-            return nil
-        }
-        let modifiedAt = attributes[.modificationDate] as? Date ?? .distantPast
-        return (sizeNumber.int64Value, modifiedAt)
-    }
 }
 
 struct RecordingAudioUploadDecision: Equatable {
@@ -1094,7 +1092,7 @@ struct StudyLibrarySyncChange: Codable, Equatable, Identifiable {
     var folderPayload: StudyFolderMetadata?
 }
 
-struct StudyLibrarySyncManifest: Codable, Equatable {
+nonisolated struct StudyLibrarySyncManifest: Codable, Equatable {
     var deviceID: String
     var generatedAt: Date
     var libraryVersion: Int
@@ -1102,12 +1100,13 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
     var folders: [StudyFolderMetadata]
     var tombstones: [StudyLibrarySyncTombstone]
     var pendingUploads: [PendingRecordingUpload]
+    var recordings: [LocalNetworkSyncRecordingEntry]
     var baseCommitID: String?
     var commitID: String?
     var localManifestHash: String?
     var checksum: String
 
-    static func make(
+    nonisolated static func make(
         deviceID: String,
         generatedAt: Date = Date(),
         libraryVersion: Int = 1,
@@ -1115,6 +1114,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
         folders: [StudyFolderMetadata],
         tombstones: [StudyLibrarySyncTombstone] = [],
         pendingUploads: [PendingRecordingUpload] = [],
+        recordings: [LocalNetworkSyncRecordingEntry] = [],
         baseCommitID: String? = nil,
         commitID: String? = nil,
         localManifestHash: String? = nil
@@ -1127,6 +1127,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
             folders: folders.sorted { $0.folderID.localizedStandardCompare($1.folderID) == .orderedAscending },
             tombstones: tombstones.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending },
             pendingUploads: pendingUploads.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending },
+            recordings: recordings.sorted { $0.recordingID.localizedStandardCompare($1.recordingID) == .orderedAscending },
             baseCommitID: baseCommitID,
             commitID: commitID,
             localManifestHash: localManifestHash,
@@ -1144,7 +1145,8 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
             items: items,
             folders: folders,
             tombstones: tombstones,
-            pendingUploads: pendingUploads
+            pendingUploads: pendingUploads,
+            recordings: recordings
         )
         let data = (try? Self.checksumEncoder.encode(payload)) ?? Data()
         return Data(SHA256.hash(data: data)).hexString
@@ -1156,7 +1158,8 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
 
     var summaryText: String {
         let uploadText = pendingUploads.isEmpty ? nil : "\(pendingUploads.count) 个待上传"
-        return (["\(items.count) 项", "\(folders.count) 个文件夹"] + [uploadText].compactMap { $0 })
+        let recordingText = recordings.isEmpty ? nil : "\(recordings.count) 个录音存在性"
+        return (["\(items.count) 项", "\(folders.count) 个文件夹"] + [uploadText, recordingText].compactMap { $0 })
             .joined(separator: " · ")
     }
 
@@ -1168,6 +1171,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
         case folders
         case tombstones
         case pendingUploads
+        case recordings
         case baseCommitID
         case commitID
         case localManifestHash
@@ -1182,6 +1186,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
         folders: [StudyFolderMetadata],
         tombstones: [StudyLibrarySyncTombstone],
         pendingUploads: [PendingRecordingUpload],
+        recordings: [LocalNetworkSyncRecordingEntry] = [],
         baseCommitID: String? = nil,
         commitID: String? = nil,
         localManifestHash: String? = nil,
@@ -1194,6 +1199,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
         self.folders = folders
         self.tombstones = tombstones
         self.pendingUploads = pendingUploads
+        self.recordings = recordings
         self.baseCommitID = baseCommitID
         self.commitID = commitID
         self.localManifestHash = localManifestHash
@@ -1209,6 +1215,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
         folders = try container.decodeIfPresent([StudyFolderMetadata].self, forKey: .folders) ?? []
         tombstones = try container.decodeIfPresent([StudyLibrarySyncTombstone].self, forKey: .tombstones) ?? []
         pendingUploads = try container.decodeIfPresent([PendingRecordingUpload].self, forKey: .pendingUploads) ?? []
+        recordings = try container.decodeIfPresent([LocalNetworkSyncRecordingEntry].self, forKey: .recordings) ?? []
         baseCommitID = try container.decodeIfPresent(String.self, forKey: .baseCommitID)
         commitID = try container.decodeIfPresent(String.self, forKey: .commitID)
         localManifestHash = try container.decodeIfPresent(String.self, forKey: .localManifestHash)
@@ -1236,7 +1243,7 @@ struct StudyLibrarySyncManifest: Codable, Equatable {
     }
 }
 
-private struct StudyLibrarySyncChecksumPayload: Encodable {
+private nonisolated struct StudyLibrarySyncChecksumPayload: Encodable {
     var deviceID: String
     var generatedAt: Date
     var libraryVersion: Int
@@ -1244,9 +1251,10 @@ private struct StudyLibrarySyncChecksumPayload: Encodable {
     var folders: [StudyFolderMetadata]
     var tombstones: [StudyLibrarySyncTombstone]
     var pendingUploads: [PendingRecordingUpload]
+    var recordings: [LocalNetworkSyncRecordingEntry]
 }
 
-private struct StudyLibrarySyncLegacyChecksumPayload: Encodable {
+private nonisolated struct StudyLibrarySyncLegacyChecksumPayload: Encodable {
     var deviceID: String
     var generatedAt: Date
     var libraryVersion: Int
@@ -1322,13 +1330,56 @@ struct DeviceStatusRequest: Codable, Equatable {
     var clientState: String
     var generatedAt: Date
     var syncSummary: StudyLibrarySyncStatusSummary?
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
 }
 
 struct DeviceStatusResponse: Codable, Equatable {
     var ok: Bool
     var status: DeviceConnectionStatus?
     var syncState: StudyLibrarySyncState?
+    var syncRequested: Bool
+    var syncStartSignal: LocalNetworkSyncStartSignal?
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope?
     var error: String?
+
+    init(
+        ok: Bool,
+        status: DeviceConnectionStatus?,
+        syncState: StudyLibrarySyncState?,
+        syncRequested: Bool = false,
+        syncStartSignal: LocalNetworkSyncStartSignal? = nil,
+        statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil,
+        error: String?
+    ) {
+        self.ok = ok
+        self.status = status
+        self.syncState = syncState
+        self.syncRequested = syncRequested
+        self.syncStartSignal = syncStartSignal
+        self.statusExchangeEnvelope = statusExchangeEnvelope
+        self.error = error
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case status
+        case syncState
+        case syncRequested
+        case syncStartSignal
+        case statusExchangeEnvelope
+        case error
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try container.decode(Bool.self, forKey: .ok)
+        status = try container.decodeIfPresent(DeviceConnectionStatus.self, forKey: .status)
+        syncState = try container.decodeIfPresent(StudyLibrarySyncState.self, forKey: .syncState)
+        syncRequested = (try? container.decode(Bool.self, forKey: .syncRequested)) ?? false
+        syncStartSignal = try container.decodeIfPresent(LocalNetworkSyncStartSignal.self, forKey: .syncStartSignal)
+        statusExchangeEnvelope = try container.decodeIfPresent(CanonicalStatusExchangeEnvelope.self, forKey: .statusExchangeEnvelope)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
 }
 
 struct ConnectionHeartbeatRequest: Codable, Equatable {
@@ -1339,6 +1390,7 @@ struct ConnectionHeartbeatRequest: Codable, Equatable {
     var sequenceNumber: UInt64
     var sentAt: Date
     var lastKnownPeerStatusRevision: Int?
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
 }
 
 struct ConnectionHeartbeatResponse: Codable, Equatable {
@@ -1351,6 +1403,7 @@ struct ConnectionHeartbeatResponse: Codable, Equatable {
     var minimumSuggestedInterval: TimeInterval?
     var syncRequested: Bool?
     var syncStartSignal: LocalNetworkSyncStartSignal? = nil
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
     var status: DeviceConnectionStatus?
     var error: String?
 }
@@ -1456,7 +1509,7 @@ extension StudyLibrarySyncManifest {
 }
 
 extension StudyItemMetadata {
-    func syncSanitized(modifiedByDeviceID fallbackDeviceID: String? = nil) -> StudyItemMetadata {
+    nonisolated func syncSanitized(modifiedByDeviceID fallbackDeviceID: String? = nil) -> StudyItemMetadata {
         var copy = self
         copy.modifiedByDeviceID = copy.modifiedByDeviceID ?? fallbackDeviceID
         copy.customProperties = StudyLibrarySyncSanitizer.filteredCustomProperties(customProperties)
@@ -1465,7 +1518,7 @@ extension StudyItemMetadata {
 }
 
 extension StudyFolderMetadata {
-    func syncSanitized(modifiedByDeviceID fallbackDeviceID: String? = nil) -> StudyFolderMetadata {
+    nonisolated func syncSanitized(modifiedByDeviceID fallbackDeviceID: String? = nil) -> StudyFolderMetadata {
         var copy = self
         copy.modifiedByDeviceID = copy.modifiedByDeviceID ?? fallbackDeviceID
         copy.customProperties = StudyLibrarySyncSanitizer.filteredCustomProperties(customProperties)
@@ -1475,7 +1528,7 @@ extension StudyFolderMetadata {
     }
 }
 
-enum StudyLibrarySyncSanitizer {
+nonisolated enum StudyLibrarySyncSanitizer {
     static func filteredCustomProperties(_ properties: [String: String]) -> [String: String] {
         properties.filter { key, _ in
             let normalized = key.lowercased()
@@ -1506,7 +1559,7 @@ enum LocalNetworkSyncPlatform: String, Codable, Equatable, Sendable {
     case Mac
 }
 
-enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
+nonisolated enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
     case metadataJSON
     case receiveJSON
     case transcriptMarkdown
@@ -1517,7 +1570,7 @@ enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
     case summaryJSON
     case audio
 
-    var isAutoDownloadAllowed: Bool {
+    nonisolated var isAutoDownloadAllowed: Bool {
         switch self {
         case .metadataJSON, .receiveJSON, .transcriptMarkdown, .transcriptJSON, .noteMarkdown, .noteJSON, .summaryMarkdown, .summaryJSON:
             return true
@@ -1527,7 +1580,7 @@ enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
     }
 }
 
-enum LocalNetworkSyncArtifactAvailability: String, Codable, Equatable, Sendable {
+nonisolated enum LocalNetworkSyncArtifactAvailability: String, Codable, Equatable, Sendable {
     case local
     case availableOnPeer
     case missing
@@ -1588,6 +1641,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
     var artifacts: [LocalNetworkSyncArtifactEntry]
     var objects: [LocalNetworkSyncObjectEntry]
     var studyManifest: StudyLibrarySyncManifest?
+    var canonicalManifest: CanonicalManifest?
 
     var inventoryHash: String {
         let payload = LocalNetworkSyncInventoryChecksumPayload(
@@ -1602,7 +1656,8 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             folders: folders,
             studyItems: studyItems,
             artifacts: artifacts,
-            objects: objects
+            objects: objects,
+            canonicalManifest: canonicalManifest
         )
         let data = (try? Self.encoder.encode(payload)) ?? Data()
         return Data(SHA256.hash(data: data)).hexString
@@ -1615,7 +1670,8 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         studyItems: [LocalNetworkSyncStudyItemEntry] = [],
         artifacts: [LocalNetworkSyncArtifactEntry] = [],
         objects: [LocalNetworkSyncObjectEntry] = [],
-        studyManifest: StudyLibrarySyncManifest? = nil
+        studyManifest: StudyLibrarySyncManifest? = nil,
+        canonicalManifest: CanonicalManifest? = nil
     ) -> LocalNetworkSyncInventory {
         let inventoryRevision = LocalNetworkSyncMetadataHash.hash(device)
         let sortedRecordings = recordings.sorted { $0.recordingID.localizedStandardCompare($1.recordingID) == .orderedAscending }
@@ -1639,7 +1695,8 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             studyItems: sortedStudyItems,
             artifacts: sortedArtifacts,
             objects: sortedObjects,
-            studyManifest: studyManifest
+            studyManifest: studyManifest,
+            canonicalManifest: canonicalManifest
         )
     }
 
@@ -1656,7 +1713,8 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         studyItems: [LocalNetworkSyncStudyItemEntry],
         artifacts: [LocalNetworkSyncArtifactEntry],
         objects: [LocalNetworkSyncObjectEntry],
-        studyManifest: StudyLibrarySyncManifest?
+        studyManifest: StudyLibrarySyncManifest?,
+        canonicalManifest: CanonicalManifest?
     ) {
         self.schemaVersion = schemaVersion
         self.sourceDeviceID = sourceDeviceID
@@ -1671,6 +1729,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         self.artifacts = artifacts
         self.objects = objects
         self.studyManifest = studyManifest
+        self.canonicalManifest = canonicalManifest
     }
 
     init(from decoder: Decoder) throws {
@@ -1689,6 +1748,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         objects = try container.decodeIfPresent([LocalNetworkSyncObjectEntry].self, forKey: .objects)
             ?? Self.makeObjectEntries(recordings: recordings, folders: folders, studyItems: studyItems, artifacts: artifacts)
         studyManifest = try container.decodeIfPresent(StudyLibrarySyncManifest.self, forKey: .studyManifest)
+        canonicalManifest = try container.decodeIfPresent(CanonicalManifest.self, forKey: .canonicalManifest)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1705,6 +1765,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         case artifacts
         case objects
         case studyManifest
+        case canonicalManifest
     }
 
     private static func makeObjectEntries(
@@ -1810,7 +1871,7 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 objectKind: objectKind(for: artifact.kind),
                 ownerID: artifact.ownerID,
                 displayTitle: artifact.ownerID,
-                fileName: fileName(artifact.logicalPathToken),
+                fileName: fileName(for: artifact),
                 logicalName: artifact.logicalPathToken,
                 sha256: artifact.checksum,
                 size: artifact.size,
@@ -1852,8 +1913,13 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
         }
     }
 
-    private static func fileName(_ logicalPathToken: String) -> String? {
-        logicalPathToken.split(separator: "/").last.map(String.init)
+    private static func fileName(for artifact: LocalNetworkSyncArtifactEntry) -> String? {
+        switch artifact.kind {
+        case .metadataJSON:
+            return "metadata.json"
+        default:
+            return artifact.logicalPathToken.split(separator: "/").last.map(String.init)
+        }
     }
 
     private static let encoder: JSONEncoder = {
@@ -1877,6 +1943,7 @@ private struct LocalNetworkSyncInventoryChecksumPayload: Encodable {
     var studyItems: [LocalNetworkSyncStudyItemEntry]
     var artifacts: [LocalNetworkSyncArtifactEntry]
     var objects: [LocalNetworkSyncObjectEntry]
+    var canonicalManifest: CanonicalManifest?
 }
 
 extension LocalNetworkSyncInventory {
@@ -1956,7 +2023,7 @@ struct LocalNetworkSyncDeviceSection: Codable, Equatable {
     var appInstanceID: String? = nil
 }
 
-struct LocalNetworkSyncRecordingEntry: Codable, Equatable, Identifiable {
+nonisolated struct LocalNetworkSyncRecordingEntry: Codable, Equatable, Identifiable {
     var id: String { recordingID }
 
     var recordingID: String
@@ -1979,9 +2046,100 @@ struct LocalNetworkSyncRecordingEntry: Codable, Equatable, Identifiable {
     var sourceDeviceID: String? = nil
     var artifactRefs: [String]? = nil
     var audioLogicalPathToken: String? = nil
+
+    init(
+        recordingID: String,
+        metadataHash: String?,
+        audioAvailable: Bool = false,
+        audioChecksum: String?,
+        audioSize: Int64?,
+        uploadLedgerState: String?,
+        receiveStatus: String?,
+        processingStatus: String?,
+        updatedAt: Date,
+        deleted: Bool,
+        title: String? = nil,
+        createdAt: Date? = nil,
+        tombstone: Bool? = nil,
+        audioAvailability: LocalNetworkSyncArtifactAvailability? = nil,
+        uploadStatus: String? = nil,
+        transcriptionStatus: String? = nil,
+        noteStatus: String? = nil,
+        sourceDeviceID: String? = nil,
+        artifactRefs: [String]? = nil,
+        audioLogicalPathToken: String? = nil
+    ) {
+        self.recordingID = recordingID
+        self.metadataHash = metadataHash
+        self.audioAvailable = audioAvailable
+        self.audioChecksum = audioChecksum
+        self.audioSize = audioSize
+        self.uploadLedgerState = uploadLedgerState
+        self.receiveStatus = receiveStatus
+        self.processingStatus = processingStatus
+        self.updatedAt = updatedAt
+        self.deleted = deleted
+        self.title = title
+        self.createdAt = createdAt
+        self.tombstone = tombstone
+        self.audioAvailability = audioAvailability
+        self.uploadStatus = uploadStatus
+        self.transcriptionStatus = transcriptionStatus
+        self.noteStatus = noteStatus
+        self.sourceDeviceID = sourceDeviceID
+        self.artifactRefs = artifactRefs
+        self.audioLogicalPathToken = audioLogicalPathToken
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case recordingID
+        case metadataHash
+        case audioAvailable
+        case audioChecksum
+        case audioSize
+        case uploadLedgerState
+        case receiveStatus
+        case processingStatus
+        case updatedAt
+        case deleted
+        case title
+        case createdAt
+        case tombstone
+        case audioAvailability
+        case uploadStatus
+        case transcriptionStatus
+        case noteStatus
+        case sourceDeviceID
+        case artifactRefs
+        case audioLogicalPathToken
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recordingID = try container.decode(String.self, forKey: .recordingID)
+        metadataHash = try container.decodeIfPresent(String.self, forKey: .metadataHash)
+        audioAvailable = try container.decodeIfPresent(Bool.self, forKey: .audioAvailable) ?? false
+        audioChecksum = try container.decodeIfPresent(String.self, forKey: .audioChecksum)
+        audioSize = try container.decodeIfPresent(Int64.self, forKey: .audioSize)
+        uploadLedgerState = try container.decodeIfPresent(String.self, forKey: .uploadLedgerState)
+        receiveStatus = try container.decodeIfPresent(String.self, forKey: .receiveStatus)
+        processingStatus = try container.decodeIfPresent(String.self, forKey: .processingStatus)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date(timeIntervalSince1970: 0)
+        deleted = try container.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
+        tombstone = try container.decodeIfPresent(Bool.self, forKey: .tombstone)
+        audioAvailability = try container.decodeIfPresent(LocalNetworkSyncArtifactAvailability.self, forKey: .audioAvailability)
+        uploadStatus = try container.decodeIfPresent(String.self, forKey: .uploadStatus)
+        transcriptionStatus = try container.decodeIfPresent(String.self, forKey: .transcriptionStatus)
+        noteStatus = try container.decodeIfPresent(String.self, forKey: .noteStatus)
+        sourceDeviceID = try container.decodeIfPresent(String.self, forKey: .sourceDeviceID)
+        artifactRefs = try container.decodeIfPresent([String].self, forKey: .artifactRefs)
+        audioLogicalPathToken = try container.decodeIfPresent(String.self, forKey: .audioLogicalPathToken)
+    }
 }
 
-struct LocalNetworkSyncFolderEntry: Codable, Equatable, Identifiable {
+nonisolated struct LocalNetworkSyncFolderEntry: Codable, Equatable, Identifiable {
     var id: String { folderID }
 
     var folderID: String
@@ -1994,7 +2152,7 @@ struct LocalNetworkSyncFolderEntry: Codable, Equatable, Identifiable {
     var deleted: Bool
 }
 
-struct LocalNetworkSyncStudyItemEntry: Codable, Equatable, Identifiable {
+nonisolated struct LocalNetworkSyncStudyItemEntry: Codable, Equatable, Identifiable {
     var id: String { itemID }
 
     var itemID: String
@@ -2009,7 +2167,7 @@ struct LocalNetworkSyncStudyItemEntry: Codable, Equatable, Identifiable {
     var conflictStatus: String? = nil
 }
 
-struct LocalNetworkSyncArtifactEntry: Codable, Equatable, Identifiable {
+nonisolated struct LocalNetworkSyncArtifactEntry: Codable, Equatable, Identifiable {
     var id: String { artifactID }
 
     var artifactID: String
@@ -2030,11 +2188,13 @@ struct LocalNetworkSyncInventoryRequest: Codable, Equatable {
     var generatedAt: Date
     var localInventoryHash: String?
     var syncRunID: String? = nil
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
 }
 
 struct LocalNetworkSyncInventoryResponse: Codable, Equatable {
     var ok: Bool
     var inventory: LocalNetworkSyncInventory?
+    var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
     var error: String?
 }
 
@@ -2704,13 +2864,13 @@ enum LocalNetworkSyncArtifactValidationError: LocalizedError, Equatable {
     }
 }
 
-enum LocalNetworkSyncArtifactID {
-    static func make(kind: LocalNetworkSyncArtifactKind, ownerID: String, logicalPathToken: String) -> String {
+nonisolated enum LocalNetworkSyncArtifactID {
+    nonisolated static func make(kind: LocalNetworkSyncArtifactKind, ownerID: String, logicalPathToken: String) -> String {
         let payload = "\(kind.rawValue)|\(ownerID)|\(logicalPathToken)"
         return "artifact_\(Data(SHA256.hash(data: Data(payload.utf8))).hexString)"
     }
 
-    static func validate(_ artifactID: String) throws {
+    nonisolated static func validate(_ artifactID: String) throws {
         guard artifactID.count == 73,
               artifactID.hasPrefix("artifact_"),
               artifactID.dropFirst("artifact_".count).allSatisfy(\.isHexDigit) else {
@@ -2718,7 +2878,7 @@ enum LocalNetworkSyncArtifactID {
         }
     }
 
-    static func validateLogicalPathToken(_ token: String) throws {
+    nonisolated static func validateLogicalPathToken(_ token: String) throws {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw LocalNetworkSyncArtifactValidationError.artifactNotFound
@@ -2732,7 +2892,7 @@ enum LocalNetworkSyncArtifactID {
         }
     }
 
-    static func validateLogicalPathToken(_ token: String, for kind: LocalNetworkSyncArtifactKind) throws {
+    nonisolated static func validateLogicalPathToken(_ token: String, for kind: LocalNetworkSyncArtifactKind) throws {
         try validateLogicalPathToken(token)
         let lowercasedToken = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let isValidForKind: Bool
@@ -2760,8 +2920,8 @@ enum LocalNetworkSyncArtifactID {
     }
 }
 
-enum LocalNetworkSyncArtifactFileService {
-    static func safeFileURL(rootURL: URL, logicalPathToken: String, fileManager: FileManager = .default) throws -> URL {
+nonisolated enum LocalNetworkSyncArtifactFileService {
+    nonisolated static func safeFileURL(rootURL: URL, logicalPathToken: String, fileManager: FileManager = .default) throws -> URL {
         try LocalNetworkSyncArtifactID.validateLogicalPathToken(logicalPathToken)
         let root = rootURL.standardizedFileURL.resolvingSymlinksInPath()
         let standardizedCandidate = root
@@ -2780,12 +2940,12 @@ enum LocalNetworkSyncArtifactFileService {
         return candidate
     }
 
-    static func safeFileURL(rootURL: URL, logicalPathToken: String, kind: LocalNetworkSyncArtifactKind, fileManager: FileManager = .default) throws -> URL {
+    nonisolated static func safeFileURL(rootURL: URL, logicalPathToken: String, kind: LocalNetworkSyncArtifactKind, fileManager: FileManager = .default) throws -> URL {
         try LocalNetworkSyncArtifactID.validateLogicalPathToken(logicalPathToken, for: kind)
         return try safeFileURL(rootURL: rootURL, logicalPathToken: logicalPathToken, fileManager: fileManager)
     }
 
-    static func metadata(for url: URL, fileManager: FileManager = .default) -> (size: Int64, updatedAt: Date)? {
+    nonisolated static func metadata(for url: URL, fileManager: FileManager = .default) -> (size: Int64, updatedAt: Date)? {
         guard let attributes = try? fileManager.attributesOfItem(atPath: url.path) else {
             return nil
         }
@@ -2794,31 +2954,15 @@ enum LocalNetworkSyncArtifactFileService {
         return (size, updatedAt)
     }
 
-    static func sha256Hex(fileURL: URL, chunkByteCount: Int = 1024 * 1024) throws -> String {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer {
-            try? handle.close()
-        }
-
-        var hasher = SHA256()
-        while true {
-            let chunk = try handle.read(upToCount: chunkByteCount) ?? Data()
-            if chunk.isEmpty {
-                break
-            }
-            hasher.update(data: chunk)
-        }
-        return Data(hasher.finalize()).hexString
-    }
 }
 
-enum LocalNetworkSyncMetadataHash {
-    static func hash<Value: Encodable>(_ value: Value) -> String {
+nonisolated enum LocalNetworkSyncMetadataHash {
+    nonisolated static func hash<Value: Encodable>(_ value: Value) -> String {
         let data = (try? encoder.encode(value)) ?? Data()
         return Data(SHA256.hash(data: data)).hexString
     }
 
-    private static let encoder: JSONEncoder = {
+    private nonisolated static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]

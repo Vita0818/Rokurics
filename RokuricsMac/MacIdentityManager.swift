@@ -116,7 +116,7 @@ final class MacIdentityManager {
             try loadOrCreateTLSIdentity()
 
             print("[RokuricsSecurity] HTTPS identity loaded: signing=\(signingPrivateKey != nil), tls=\(tlsIdentity != nil)")
-            print("[RokuricsIdentity] certificate fingerprint: \(certificateFingerprint)")
+            print("[RokuricsIdentity] certificate fingerprint: \(Self.redactedFingerprintForLog(certificateFingerprint))")
         } catch {
             lastError = "Mac identity failed: \(error.localizedDescription)"
             print("[RokuricsIdentity] errors: \(lastError ?? "unknown identity error")")
@@ -160,7 +160,7 @@ final class MacIdentityManager {
 
         signingPrivateKey = privateKey
         publicKeyFingerprint = Self.fingerprint(for: privateKey.publicKey)
-        print("[RokuricsSecurity] created local Mac signing identity at: \(identityURL.path)")
+        print("[RokuricsSecurity] created local Mac signing identity in app security storage")
     }
 
     private func loadOrCreateTLSIdentity() throws {
@@ -255,7 +255,7 @@ final class MacIdentityManager {
             if let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) {
                 certificateFingerprint = MacSecurityUtilities.sha256Hex(certificateData)
                 print("[RokuricsIdentity] certificate exists")
-                print("[RokuricsIdentity] certificate fingerprint: \(certificateFingerprint)")
+                print("[RokuricsIdentity] certificate fingerprint: \(Self.redactedFingerprintForLog(certificateFingerprint))")
                 return certificate
             }
         }
@@ -277,7 +277,7 @@ final class MacIdentityManager {
 
         certificateFingerprint = MacSecurityUtilities.sha256Hex(certificateData)
         print("[RokuricsIdentity] certificate generated")
-        print("[RokuricsIdentity] certificate fingerprint: \(certificateFingerprint)")
+        print("[RokuricsIdentity] certificate fingerprint: \(Self.redactedFingerprintForLog(certificateFingerprint))")
         return certificate
     }
 
@@ -316,6 +316,14 @@ final class MacIdentityManager {
 
     private static func fingerprint(for publicKey: P256.Signing.PublicKey) -> String {
         MacSecurityUtilities.sha256Hex(publicKey.x963Representation)
+    }
+
+    static func redactedFingerprintForLog(_ fingerprint: String) -> String {
+        let trimmed = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 12 else {
+            return trimmed.isEmpty ? "unavailable" : "\(trimmed.prefix(4))..."
+        }
+        return "\(trimmed.prefix(12))..."
     }
 
     private static func securityDirectoryURL(fileManager: FileManager) -> URL {

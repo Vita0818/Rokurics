@@ -16,6 +16,7 @@ struct MacIPhoneConnectionView: View {
     @State private var didCopyPairingInfo = false
     @State private var activeSheet: MacIPhoneConnectionSheet?
     @State private var didRecordConnectionPageLoaded = false
+    @State private var manualSyncStatusRevision: Int?
 
     var body: some View {
         ZStack {
@@ -83,7 +84,7 @@ struct MacIPhoneConnectionView: View {
     private func connectionTitle(isPaired: Bool) -> some View {
         HStack(alignment: .center, spacing: 14) {
             MacMixedFontText(
-                text: "iPhone 连接",
+                text: RokuricsCopy.text("iPhone 连接", "iPhone Link"),
                 chineseFont: MacTypography.font(for: .pageTitle),
                 englishFont: MacTypography.englishTitle(size: 32, weight: .semibold),
                 numberFont: MacTypography.numberTitle(size: 32, weight: .bold)
@@ -93,7 +94,7 @@ struct MacIPhoneConnectionView: View {
             Spacer(minLength: 12)
 
             if !isPaired {
-                MacConnectionStateCapsule(text: "未配对")
+                MacConnectionStateCapsule(text: RokuricsCopy.text("未配对", "Not Paired"))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -108,13 +109,13 @@ struct MacIPhoneConnectionView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
                 MacPairingInfoFieldRow(
-                    title: "Mac 地址",
+                    title: RokuricsCopy.text("Mac 地址", "Mac Address"),
                     value: secureReceiverService.localIPAddress,
                     valueFont: MacTypography.technical(size: 16, weight: .semibold)
                 )
 
                 MacPairingInfoFieldRow(
-                    title: "端口",
+                    title: RokuricsCopy.text("端口", "Port"),
                     value: "\(secureReceiverService.port)",
                     valueFont: MacTypography.technical(size: 16, weight: .semibold),
                     minWidth: 132
@@ -131,7 +132,7 @@ struct MacIPhoneConnectionView: View {
             Button {
                 copyPairingInfo()
             } label: {
-                Label(didCopyPairingInfo ? "已复制" : "复制配对信息", systemImage: didCopyPairingInfo ? "checkmark" : "doc.on.doc")
+                Label(didCopyPairingInfo ? RokuricsCopy.text("已复制", "Copied") : RokuricsCopy.text("复制配对信息", "Copy Pairing"), systemImage: didCopyPairingInfo ? "checkmark" : "doc.on.doc")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(MacConnectionPrimaryButtonStyle())
@@ -149,8 +150,8 @@ struct MacIPhoneConnectionView: View {
             if let payload = activePairingPayload {
                 HStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("配对码")
-                            .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
+                        Text(RokuricsCopy.text("配对码", "Pairing Code"))
+                            .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.englishCaption(size: 12, weight: .semibold))
                             .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
 
                         Text(payload.pairingCode)
@@ -187,16 +188,20 @@ struct MacIPhoneConnectionView: View {
 
     private func connectedContent(for device: PairedDevice) -> some View {
         let status = secureReceiverService.connectionStatus(for: device)
+        let syncState = secureReceiverService.syncStateStore.state
+        _ = manualSyncStatusRevision
         return MacConnectedDeviceLayout(
             device: device,
             status: status,
+            syncState: syncState,
             connectionAddress: connectionAddress,
             deviceID: device.idPrefix,
             onShowDetail: {
                 activeSheet = .connectionDetail
             },
             onSyncNow: {
-                _ = secureReceiverService.prepareManualStudyLibrarySync(for: device)
+                let status = secureReceiverService.prepareManualStudyLibrarySync(for: device)
+                manualSyncStatusRevision = status.connectionStatusRevision
             },
             onDisconnect: {
                 secureReceiverService.disconnectPairedDevices()
@@ -217,7 +222,7 @@ struct MacIPhoneConnectionView: View {
     }
 
     private var startConnectionButtonTitle: String {
-        "开始配对"
+        RokuricsCopy.text("开始配对", "Start Pairing")
     }
 
     private var isFingerprintReady: Bool {
@@ -261,7 +266,7 @@ struct MacIPhoneConnectionView: View {
     }
 
     private var connectionAddress: String {
-        secureReceiverService.localIPAddress == "未知" ? "IP 未知" : secureReceiverService.localIPAddress
+        secureReceiverService.localIPAddress == "未知" ? RokuricsCopy.text("IP 未知", "IP Unknown") : secureReceiverService.localIPAddress
     }
 
     private func recordConnectionPageLoadedIfNeeded() {
@@ -351,8 +356,8 @@ private struct MacPairingFingerprintFieldRow: View {
 
     var body: some View {
         HStack(alignment: isVisible ? .top : .firstTextBaseline, spacing: 14) {
-            Text("Mac 指纹")
-                .font(MacTypography.chineseCaption(size: 12, weight: .semibold))
+            Text(RokuricsCopy.text("Mac 指纹", "Mac Fingerprint"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 12, weight: .semibold) : MacTypography.englishCaption(size: 12, weight: .semibold))
                 .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
                 .frame(width: 58, alignment: .leading)
                 .padding(.top, isVisible ? 3 : 0)
@@ -365,7 +370,7 @@ private struct MacPairingFingerprintFieldRow: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button(isVisible ? "隐藏" : "显示") {
+            Button(isVisible ? RokuricsCopy.text("隐藏", "Hide") : RokuricsCopy.text("显示", "Show")) {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     isVisible.toggle()
                 }
@@ -396,7 +401,7 @@ private struct MacPairingFingerprintFieldRow: View {
     }
 
     private var hiddenFingerprint: String {
-        isFingerprintReady ? "•••• •••• •••• ••••" : "HTTPS 身份未就绪"
+        isFingerprintReady ? "•••• •••• •••• ••••" : RokuricsCopy.text("HTTPS 身份未就绪", "HTTPS identity not ready")
     }
 
     private var visibleFingerprint: String {
@@ -492,6 +497,7 @@ private struct MacConnectedDeviceBubbleView: View {
 private struct MacConnectedDeviceLayout: View {
     let device: PairedDevice
     let status: DeviceConnectionStatus
+    let syncState: StudyLibrarySyncState
     let connectionAddress: String
     let deviceID: String
     let onShowDetail: () -> Void
@@ -514,6 +520,7 @@ private struct MacConnectedDeviceLayout: View {
                         MacConnectedDeviceCardView(
                             device: device,
                             status: status,
+                            syncState: syncState,
                             connectionAddress: connectionAddress,
                             deviceID: deviceID,
                             isCompact: isCompact,
@@ -531,6 +538,7 @@ private struct MacConnectedDeviceLayout: View {
                         MacConnectedDeviceCardView(
                             device: device,
                             status: status,
+                            syncState: syncState,
                             connectionAddress: connectionAddress,
                             deviceID: deviceID,
                             isCompact: isCompact,
@@ -553,6 +561,7 @@ struct MacConnectedDeviceCardView: View {
     let deviceName: String
     let connectionInfo: String
     let status: DeviceConnectionStatus
+    let syncState: StudyLibrarySyncState
     var isCompact: Bool
     var showsDisconnectAction = true
     var usesCardChrome = true
@@ -565,6 +574,7 @@ struct MacConnectedDeviceCardView: View {
     init(
         device: PairedDevice,
         status: DeviceConnectionStatus,
+        syncState: StudyLibrarySyncState,
         connectionAddress: String,
         deviceID: String,
         isCompact: Bool,
@@ -577,6 +587,7 @@ struct MacConnectedDeviceCardView: View {
         self.deviceName = device.deviceName.isEmpty ? "iPhone" : device.deviceName
         self.connectionInfo = "\(connectionAddress) · \(deviceID)"
         self.status = status
+        self.syncState = syncState
         self.isCompact = isCompact
         self.showsDisconnectAction = showsDisconnectAction
         self.usesCardChrome = usesCardChrome
@@ -589,6 +600,7 @@ struct MacConnectedDeviceCardView: View {
         deviceName: String,
         connectionInfo: String,
         status: DeviceConnectionStatus = .unpaired(displayName: "iPhone"),
+        syncState: StudyLibrarySyncState = StudyLibrarySyncState(),
         isCompact: Bool,
         showsDisconnectAction: Bool = true,
         usesCardChrome: Bool = true,
@@ -599,6 +611,7 @@ struct MacConnectedDeviceCardView: View {
         self.deviceName = deviceName.isEmpty ? "iPhone" : deviceName
         self.connectionInfo = connectionInfo
         self.status = status
+        self.syncState = syncState
         self.isCompact = isCompact
         self.showsDisconnectAction = showsDisconnectAction
         self.usesCardChrome = usesCardChrome
@@ -630,9 +643,10 @@ struct MacConnectedDeviceCardView: View {
             connectionInfoView
 
             VStack(spacing: 8) {
-                MacConnectedStatusRow(title: "状态", value: stateText, tint: stateTint)
-                MacConnectedStatusRow(title: "最近在线", value: presence.recentOnlineText, tint: MacTheme.softText(for: colorScheme))
-                MacConnectedStatusRow(title: "最近同步", value: lastSyncText, tint: MacTheme.softText(for: colorScheme))
+                MacConnectedStatusRow(title: RokuricsCopy.text("状态", "Status"), value: stateText, tint: stateTint)
+                MacConnectedStatusRow(title: RokuricsCopy.text("同步内核", "Sync Kernel"), value: kernelSwitchSourceText, tint: MacTheme.softText(for: colorScheme))
+                MacConnectedStatusRow(title: RokuricsCopy.text("最近在线", "Last Online"), value: presence.recentOnlineText, tint: MacTheme.softText(for: colorScheme))
+                MacConnectedStatusRow(title: RokuricsCopy.text("最近同步", "Last Sync"), value: lastSyncText, tint: MacTheme.softText(for: colorScheme))
             }
             .padding(12)
             .macLiquidGlassCard(cornerRadius: 16, material: .ultraThinMaterial, fillOpacity: 0.24, strokeOpacity: 0.22, shadowOpacity: 0.02, shadowRadius: 5, shadowY: 2)
@@ -640,21 +654,21 @@ struct MacConnectedDeviceCardView: View {
             VStack(spacing: 10) {
                 if let onSyncNow {
                     Button(action: onSyncNow) {
-                        Text("立即同步")
-                            .frame(maxWidth: .infinity)
+                        MacLocalNetworkSyncButtonLabel(presentation: syncButtonPresentation)
                     }
                     .buttonStyle(MacConnectionPrimaryButtonStyle(verticalPadding: isCompact ? 8 : 10))
+                    .disabled(syncButtonPresentation.isActive)
                 }
 
                 Button(action: onShowDetail) {
-                    Text("查看连接信息")
+                    Text(RokuricsCopy.text("查看连接信息", "Connection Info"))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(MacConnectionPrimaryButtonStyle(verticalPadding: isCompact ? 8 : 10))
 
                 if showsDisconnectAction, let onDisconnect {
                     Button(action: onDisconnect) {
-                        Text("断开连接")
+                        Text(RokuricsCopy.text("断开连接", "Disconnect"))
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(MacConnectionDestructiveButtonStyle(verticalPadding: isCompact ? 8 : 10))
@@ -668,6 +682,37 @@ struct MacConnectedDeviceCardView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+    }
+
+    private var syncButtonPresentation: MacLocalNetworkSyncButtonPresentation {
+        guard syncState.deviceID.isEmpty || syncState.deviceID == status.deviceID else {
+            return .idle
+        }
+
+        if let state = syncState.syncControlPlaneState,
+           state.isSyncProgressActive || shouldShowRecentTerminalSyncState(state) {
+            return MacLocalNetworkSyncButtonPresentation(state: state)
+        }
+
+        return .idle
+    }
+
+    private func shouldShowRecentTerminalSyncState(_ state: LocalNetworkSyncControlPlaneState) -> Bool {
+        switch state {
+        case .completed, .failed, .cancelled:
+            return isRecentTerminalSyncState
+        case .idle, .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated,
+             .transferring, .pausedDisconnected, .resuming:
+            return false
+        }
+    }
+
+    private var isRecentTerminalSyncState: Bool {
+        guard let updatedAt = syncState.syncControlPlaneUpdatedAt else {
+            return false
+        }
+        return presenceNow.timeIntervalSince(updatedAt) <= 12
     }
 
     private var connectionInfoView: some View {
@@ -694,6 +739,12 @@ struct MacConnectedDeviceCardView: View {
         }
     }
 
+    private var kernelSwitchSourceText: String {
+        CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults()
+            .resolve()
+            .effectiveStatusSourceText
+    }
+
     private var presence: ConnectionPresenceSnapshot {
         status.presenceSnapshot(now: presenceNow)
     }
@@ -706,15 +757,67 @@ struct MacConnectedDeviceCardView: View {
             }
             return relative
         }
-        return status.lastSyncStatus ?? "暂无"
+        return status.lastSyncStatus ?? RokuricsCopy.text("暂无", "None")
     }
 
     private static let relativeDateFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.unitsStyle = .short
         return formatter
     }()
+}
+
+private struct MacLocalNetworkSyncButtonPresentation: Equatable {
+    var title: String
+    var progressFraction: Double?
+    var isActive: Bool
+
+    static let idle = MacLocalNetworkSyncButtonPresentation(
+        title: RokuricsCopy.text("立即同步", "Sync Now"),
+        progressFraction: nil,
+        isActive: false
+    )
+
+    init(state: LocalNetworkSyncControlPlaneState) {
+        let fraction = state.syncButtonProgressFraction
+        if let fraction, state.isSyncProgressActive {
+            let percent = min(max(Int((fraction * 100).rounded()), 0), 100)
+            title = "\(state.syncButtonStatusText) \(percent)%"
+        } else {
+            title = state.syncButtonStatusText
+        }
+        progressFraction = fraction
+        isActive = state.isSyncProgressActive
+    }
+
+    private init(title: String, progressFraction: Double?, isActive: Bool) {
+        self.title = title
+        self.progressFraction = progressFraction
+        self.isActive = isActive
+    }
+}
+
+private struct MacLocalNetworkSyncButtonLabel: View {
+    let presentation: MacLocalNetworkSyncButtonPresentation
+
+    var body: some View {
+        if presentation.isActive {
+            VStack(spacing: 5) {
+                Text(presentation.title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.76)
+
+                ProgressView(value: presentation.progressFraction)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 118)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            Text(presentation.title)
+                .frame(maxWidth: .infinity)
+        }
+    }
 }
 
 private struct MacConnectedStatusRow: View {
@@ -753,26 +856,26 @@ private struct MacIPhoneConnectionDetailSheet: View {
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 22) {
-                MacSheetHeader(title: "连接状态", systemImage: "lock.shield", onClose: { dismiss() })
+                MacSheetHeader(title: RokuricsCopy.text("连接状态", "Connection Status"), systemImage: "lock.shield", onClose: { dismiss() })
 
                 VStack(spacing: 0) {
-                    detailRow("iPhone 名称", device?.deviceName ?? "iPhone", style: .name)
+                    detailRow(RokuricsCopy.text("iPhone 名称", "iPhone Name"), device?.deviceName ?? "iPhone", style: .name)
                     MacConnectionDivider()
-                    detailRow("deviceID", device?.idPrefix ?? "未知", style: .technical)
+                    detailRow("deviceID", device?.idPrefix ?? RokuricsCopy.text("未知", "Unknown"), style: .technical)
                     MacConnectionDivider()
                     detailRow("IP", secureReceiverService.localIPAddress, style: .technical)
                     MacConnectionDivider()
-                    detailRow("连接状态", connectionStateText, style: .name)
+                    detailRow(RokuricsCopy.text("连接状态", "Connection Status"), connectionStateText, style: .name)
                     MacConnectionDivider()
-                    detailRow("配对时间", device.map { formattedDate($0.pairedAt) } ?? "未知", style: .number)
+                    detailRow(RokuricsCopy.text("配对时间", "Paired At"), device.map { formattedDate($0.pairedAt) } ?? RokuricsCopy.text("未知", "Unknown"), style: .number)
                     MacConnectionDivider()
-                    detailRow("最近连接", status.presenceSnapshot().recentOnlineText, style: .number)
+                    detailRow(RokuricsCopy.text("最近连接", "Last Online"), status.presenceSnapshot().recentOnlineText, style: .number)
                     MacConnectionDivider()
-                    detailRow("最近同步", lastSyncText, style: .name)
+                    detailRow(RokuricsCopy.text("最近同步", "Last Sync"), lastSyncText, style: .name)
                     MacConnectionDivider()
-                    detailRow("安全上传测试", "\(secureReceiverService.acceptedUploadCount)", style: .number)
+                    detailRow(RokuricsCopy.text("安全上传测试", "Secure Upload Tests"), "\(secureReceiverService.acceptedUploadCount)", style: .number)
                     MacConnectionDivider()
-                    detailRow("最近测试文件", secureReceiverService.lastAcceptedFileName == "暂无" ? "暂无" : secureReceiverService.lastAcceptedFileName, style: .name)
+                    detailRow(RokuricsCopy.text("最近测试文件", "Last Test File"), secureReceiverService.lastAcceptedFileName == "暂无" ? RokuricsCopy.text("暂无", "None") : secureReceiverService.lastAcceptedFileName, style: .name)
                 }
                 .padding(6)
                 .macLiquidGlassCard(cornerRadius: 24, material: .thinMaterial, fillOpacity: 0.44, strokeOpacity: 0.38, shadowOpacity: 0.07, shadowRadius: 14, shadowY: 7)
@@ -801,7 +904,7 @@ private struct MacIPhoneConnectionDetailSheet: View {
 
     private var fingerprintText: String {
         secureReceiverService.fingerprint == "未生成"
-            ? "HTTPS 身份未就绪"
+            ? RokuricsCopy.text("HTTPS 身份未就绪", "HTTPS identity not ready")
             : secureReceiverService.fingerprint.uppercased().macGroupedFingerprint(groupsPerLine: 8)
     }
 
@@ -817,7 +920,7 @@ private struct MacIPhoneConnectionDetailSheet: View {
         if let lastSyncAt = status.lastSyncAt {
             return formattedDate(lastSyncAt)
         }
-        return status.lastSyncStatus ?? "暂无"
+        return status.lastSyncStatus ?? RokuricsCopy.text("暂无", "None")
     }
 
     private func detailRow(_ label: String, _ value: String, style: MacConnectionDetailValueStyle) -> some View {
@@ -852,15 +955,15 @@ private struct MacPairedDevicesSheet: View {
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 22) {
-                MacSheetHeader(title: "已配对设备", systemImage: "iphone.gen3", onClose: { dismiss() })
+                MacSheetHeader(title: RokuricsCopy.text("已配对设备", "Paired Devices"), systemImage: "iphone.gen3", onClose: { dismiss() })
 
                 Text("\(secureReceiverService.pairedDeviceCount)")
                     .font(MacTypography.numberLarge(size: 42, weight: .bold))
                     .foregroundStyle(MacTheme.aqua)
 
                 if secureReceiverService.pairedDeviceStore.devices.isEmpty {
-                    Text("暂无已配对设备")
-                        .font(MacTypography.chineseBody(size: 14, weight: .medium))
+                    Text(RokuricsCopy.text("暂无已配对设备", "No paired devices"))
+                        .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                         .padding(20)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -926,7 +1029,7 @@ private struct MacPairedDeviceListRow: View {
     }
 
     private var lastSeenText: String {
-        device.lastSeenAt.map(formattedDate) ?? "暂无"
+        device.lastSeenAt.map(formattedDate) ?? RokuricsCopy.text("暂无", "None")
     }
 }
 
@@ -941,16 +1044,16 @@ private struct MacSecureUploadTestSheet: View {
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 22) {
-                MacSheetHeader(title: "上传测试", systemImage: "lock.doc", onClose: { dismiss() })
+                MacSheetHeader(title: RokuricsCopy.text("上传测试", "Upload Test"), systemImage: "lock.doc", onClose: { dismiss() })
 
                 VStack(spacing: 0) {
-                    uploadRow("安全测试上传数量", "\(secureReceiverService.acceptedUploadCount)", style: .number)
+                    uploadRow(RokuricsCopy.text("安全测试上传数量", "Secure Upload Count"), "\(secureReceiverService.acceptedUploadCount)", style: .number)
                     MacConnectionDivider()
-                    uploadRow("最近测试 JSON", secureReceiverService.lastAcceptedFileName == "暂无" ? "暂无" : secureReceiverService.lastAcceptedFileName, style: .name)
+                    uploadRow(RokuricsCopy.text("最近测试 JSON", "Last Test JSON"), secureReceiverService.lastAcceptedFileName == "暂无" ? RokuricsCopy.text("暂无", "None") : secureReceiverService.lastAcceptedFileName, style: .name)
                     MacConnectionDivider()
-                    uploadRow("保存位置", ReceivedFileStore.displayPath, style: .name)
+                    uploadRow(RokuricsCopy.text("保存位置", "Save Location"), ReceivedFileStore.displayPath, style: .name)
                     MacConnectionDivider()
-                    uploadRow("上传测试状态", secureReceiverService.acceptedUploadCount > 0 ? "已接收" : "暂无", style: .name)
+                    uploadRow(RokuricsCopy.text("上传测试状态", "Upload Test Status"), secureReceiverService.acceptedUploadCount > 0 ? RokuricsCopy.text("已接收", "Received") : RokuricsCopy.text("暂无", "None"), style: .name)
                 }
                 .padding(6)
                 .macLiquidGlassCard(cornerRadius: 24, material: .thinMaterial, fillOpacity: 0.44, strokeOpacity: 0.38, shadowOpacity: 0.07, shadowRadius: 14, shadowY: 7)
@@ -1003,7 +1106,7 @@ private struct MacSheetHeader: View {
 
             RokuricsCircleIconButton(
                 systemImage: "xmark",
-                accessibilityTitle: "关闭",
+                accessibilityTitle: RokuricsCopy.text("关闭", "Close"),
                 tint: MacTheme.softText(for: colorScheme),
                 action: onClose
             )
@@ -1106,7 +1209,7 @@ private struct MacConnectionDestructiveButtonStyle: ButtonStyle {
 
 private func formattedDate(_ date: Date) -> String {
     let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "zh_Hans_CN")
+    formatter.locale = RokuricsCopy.displayLocale
     formatter.dateFormat = "MM-dd HH:mm"
     return formatter.string(from: date)
 }

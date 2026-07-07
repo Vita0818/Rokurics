@@ -18,6 +18,7 @@ struct RecordingStudyDetailPage: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var studyLibraryStore: StudyLibraryStore
+    @ObservedObject private var connectionStatusStore = DeviceConnectionStatusStore.shared
     @State private var typeDraft = ""
     @State private var subjectDraft = ""
     @State private var chapterDraft = ""
@@ -55,8 +56,8 @@ struct RecordingStudyDetailPage: View {
                     subject: $subjectDraft,
                     chapter: $chapterDraft,
                     topic: $topicDraft,
-                    items: studyLibraryStore.allStudyItems,
-                    folders: studyLibraryStore.allStudyFolders,
+                    items: studyLibraryStore.effectiveStudyItems,
+                    folders: studyLibraryStore.effectiveStudyFolders,
                     statusMessage: statusMessage,
                     fileStatusRows: StudyRecordingFileStatusRows.rows(for: item),
                     detailActions: detailActionModels(for: item),
@@ -162,8 +163,8 @@ struct RecordingStudyDetailPage: View {
     private func headerActions(_ item: StudyItemMetadata) -> some View {
         StudyDetailHeaderActionGroup(actions: IPhoneStudyDetailActions.headerActions(
             for: item,
-            status: uploadStatus,
-            isMacPaired: macConnectionStore.isPaired,
+            displaySyncState: canonicalDisplaySyncState,
+            isMacPaired: canStartManualUpload,
             renameTint: RokuricsSharedStyle.softText(for: colorScheme),
             uploadAction: uploadCurrentRecording,
             renameAction: beginInlineRename,
@@ -177,8 +178,8 @@ struct RecordingStudyDetailPage: View {
     private func detailActionModels(for item: StudyItemMetadata) -> [StudyDetailActionModel] {
         IPhoneStudyDetailActions.detailActions(
             for: item,
-            status: uploadStatus,
-            isMacPaired: macConnectionStore.isPaired,
+            displaySyncState: canonicalDisplaySyncState,
+            isMacPaired: canStartManualUpload,
             uploadAction: uploadCurrentRecording,
             transcriptAction: { readingRoute = .transcript },
             noteAction: { readingRoute = .note },
@@ -186,15 +187,18 @@ struct RecordingStudyDetailPage: View {
         )
     }
 
-    private var uploadStatus: RecordingUploadStatus {
-        recordingMetadata.map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly
+    private var canonicalDisplaySyncState: CanonicalDisplaySyncState? {
+        guard let recordingID = item?.recordingID else {
+            return nil
+        }
+        return uploadCoordinator.canonicalDisplaySyncState(for: CanonicalObjectID("recordingAudio:\(recordingID)"))
     }
 
     private var uploadActionAreaPresentation: StudyRecordingActionAreaPresentation? {
         RecordingUploadActionAreaPresentation.resolve(
             metadata: recordingMetadata,
-            status: uploadStatus,
-            isMacPaired: macConnectionStore.isPaired
+            displaySyncState: canonicalDisplaySyncState,
+            isMacPaired: canStartManualUpload
         )
     }
 
@@ -267,16 +271,26 @@ struct RecordingStudyDetailPage: View {
             reasonCode: "recordingDetail"
         )
 
-        guard macConnectionStore.isPaired else {
+        if let blockedReason = manualUploadHardBlockedReason() {
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "manualUploadSkippedWithReason",
                 traceID: traceID,
                 recordingID: item?.recordingID,
                 eventResult: "skip",
-                reasonCode: "mac_not_paired"
+                reasonCode: blockedReason == "not_paired" ? "mac_not_paired" : blockedReason
             )
             return
+        }
+        if let softReason = manualUploadSoftBlockedReason() {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadPresenceSoftBypassed",
+                traceID: traceID,
+                recordingID: item?.recordingID,
+                eventResult: "continue",
+                reasonCode: softReason
+            )
         }
 
         recordingManager.reloadRecordings()
@@ -334,6 +348,49 @@ struct RecordingStudyDetailPage: View {
             eventResult: "success",
             uploadStatus: recordingMetadata.uploadStatus
         )
+    }
+
+    private var canStartManualUpload: Bool {
+        manualUploadHardBlockedReason() == nil
+    }
+
+    private func manualUploadHardBlockedReason(now: Date = Date()) -> String? {
+        let snapshot = macConnectionStore.snapshot
+        guard snapshot.isPaired else {
+            return "not_paired"
+        }
+        guard macConnectionStore.userConnectionIntent == .wantsConnected else {
+            return "user_does_not_want_connection"
+        }
+        guard let status = connectionStatusStore.status(for: snapshot.deviceID, now: now) else {
+            return nil
+        }
+        if status.presenceSnapshot(now: now).state == .securityError {
+            return "security_error"
+        }
+        return nil
+    }
+
+    private func manualUploadSoftBlockedReason(now: Date = Date()) -> String? {
+        guard manualUploadHardBlockedReason(now: now) == nil else {
+            return nil
+        }
+        let snapshot = macConnectionStore.snapshot
+        guard let status = connectionStatusStore.status(for: snapshot.deviceID, now: now) else {
+            return "presence_unavailable"
+        }
+        let blockedReason = MacUploadTestPresenceGate.blockedReason(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            userConnectionIntent: macConnectionStore.userConnectionIntent
+        )
+        switch blockedReason {
+        case "heartbeat_interrupted", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
+            return blockedReason
+        default:
+            return nil
+        }
     }
 
     private func beginInlineRename() {
@@ -404,7 +461,7 @@ private enum RecordingStudyReadingRoute: String, Identifiable {
 private enum IPhoneStudyDetailActions {
     static func headerActions(
         for item: StudyItemMetadata,
-        status: RecordingUploadStatus,
+        displaySyncState: CanonicalDisplaySyncState?,
         isMacPaired: Bool,
         renameTint: Color,
         uploadAction: @escaping () -> Void,
@@ -412,7 +469,7 @@ private enum IPhoneStudyDetailActions {
         trashAction: @escaping () -> Void
     ) -> [StudyDetailHeaderActionModel] {
         let uploadPresentation = RecordingUploadCapsulePresentation.resolve(
-            status: status,
+            displaySyncState: displaySyncState,
             isMacPaired: isMacPaired
         )
 
@@ -437,7 +494,7 @@ private enum IPhoneStudyDetailActions {
 
     static func detailActions(
         for item: StudyItemMetadata,
-        status: RecordingUploadStatus,
+        displaySyncState: CanonicalDisplaySyncState?,
         isMacPaired: Bool,
         uploadAction: @escaping () -> Void,
         transcriptAction: @escaping () -> Void,
@@ -445,7 +502,7 @@ private enum IPhoneStudyDetailActions {
         renameAction: @escaping () -> Void
     ) -> [StudyDetailActionModel] {
         let uploadPresentation = RecordingUploadCapsulePresentation.resolve(
-            status: status,
+            displaySyncState: displaySyncState,
             isMacPaired: isMacPaired
         )
 
@@ -466,5 +523,46 @@ private enum IPhoneStudyDetailActions {
             ),
             StudyDetailActionPolicy.renameDetailAction(action: renameAction)
         ]
+    }
+}
+
+private extension RecordingUploadCapsulePresentation {
+    static func resolve(
+        displaySyncState: CanonicalDisplaySyncState?,
+        isMacPaired: Bool
+    ) -> RecordingUploadCapsulePresentation {
+        guard let displaySyncState else {
+            return resolve(status: .localOnly, isMacPaired: isMacPaired)
+        }
+
+        let isUploadActionEnabled = isMacPaired && displaySyncState.kind != .uploading && displaySyncState.kind != .finalizing
+        switch displaySyncState.kind {
+        case .completed, .peerVerified:
+            return RecordingUploadCapsulePresentation(
+                label: "已上传",
+                systemImage: "checkmark.circle.fill",
+                tint: .success,
+                isEnabled: false,
+                fillOpacity: 0.24
+            )
+        case .uploading, .finalizing:
+            return RecordingUploadCapsulePresentation(
+                label: "上传中",
+                systemImage: "arrow.triangle.2.circlepath",
+                tint: .active,
+                isEnabled: false,
+                fillOpacity: 0.24
+            )
+        case .blocked, .conflict, .failed:
+            return RecordingUploadCapsulePresentation(
+                label: "重试",
+                systemImage: "arrow.clockwise",
+                tint: .failure,
+                isEnabled: isUploadActionEnabled,
+                fillOpacity: isUploadActionEnabled ? 0.38 : 0.24
+            )
+        case .hidden, .deferred, .uploadNeeded, .stale:
+            return resolve(status: .localOnly, isMacPaired: isMacPaired)
+        }
     }
 }

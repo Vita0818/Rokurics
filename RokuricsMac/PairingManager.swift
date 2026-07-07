@@ -27,13 +27,13 @@ enum PairingState: Equatable {
     var displayText: String {
         switch self {
         case .idle:
-            return "未配对"
+            return RokuricsCopy.text("未配对", "Unpaired")
         case .pairing:
-            return "配对中"
+            return RokuricsCopy.text("配对中", "Pairing")
         case .paired:
-            return "已配对"
+            return RokuricsCopy.text("已配对", "Paired")
         case .failed:
-            return "配对失败"
+            return RokuricsCopy.text("配对失败", "Pairing failed")
         }
     }
 }

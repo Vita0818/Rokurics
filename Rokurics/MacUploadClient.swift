@@ -22,13 +22,13 @@ enum MacUploadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .insecureHTTPDisabled:
-            return "裸 HTTP 上传已禁用，请使用安全 HTTPS 配对链路。"
+            return RokuricsCopy.text("裸 HTTP 上传已禁用，请使用安全 HTTPS 配对链路。", "Plain HTTP upload is disabled. Use secure HTTPS pairing.")
         case .missingHost:
-            return "请输入 Mac 的局域网 IP。"
+            return RokuricsCopy.text("请输入 Mac 的局域网 IP。", "Enter the Mac LAN IP.")
         case .invalidURL:
-            return "Mac 地址或端口无效。"
+            return RokuricsCopy.text("Mac 地址或端口无效。", "Mac address or port is invalid.")
         case .invalidResponse:
-            return "Mac 返回了无法识别的响应。"
+            return RokuricsCopy.text("Mac 返回了无法识别的响应。", "Mac returned an unknown response.")
         case .serverRejected(let message):
             return message
         }

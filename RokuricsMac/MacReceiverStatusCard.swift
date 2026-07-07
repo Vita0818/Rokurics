@@ -27,10 +27,11 @@ struct MacReceiverStatusCard: View {
     }
 
     private func pairedSummary(_ device: PairedDevice) -> some View {
-        MacConnectedDeviceCardView(
+        let status = effectiveDisplayConnectionStatus(for: device)
+        return MacConnectedDeviceCardView(
             deviceName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             connectionInfo: "\(ipSummary) · \(device.idPrefix)",
-            status: secureReceiverService.connectionStatus(for: device),
+            status: status,
             isCompact: true,
             showsDisconnectAction: true,
             usesCardChrome: false,
@@ -41,10 +42,44 @@ struct MacReceiverStatusCard: View {
         )
     }
 
+    private func effectiveDisplayConnectionStatus(for device: PairedDevice) -> DeviceConnectionStatus {
+        var status = secureReceiverService.connectionStatus(for: device)
+        let statusStore = secureReceiverService.studyLibraryStore
+        let displayStates = statusStore.effectiveSyncStatusByObjectID.keys.compactMap {
+            statusStore.canonicalDisplaySyncState(for: $0)
+        }
+        if let effectiveLastSyncStatus = Self.effectiveLastSyncStatus(from: displayStates) {
+            status.lastSyncStatus = effectiveLastSyncStatus
+        }
+        return status
+    }
+
+    static func effectiveLastSyncStatus(from displayStates: [CanonicalDisplaySyncState]) -> String? {
+        guard !displayStates.isEmpty else {
+            return nil
+        }
+
+        if displayStates.contains(where: { $0.kind == .conflict || $0.kind == .blocked || $0.kind == .failed }) {
+            return RokuricsCopy.text("暂无", "None")
+        }
+
+        let completeStates = displayStates.filter { $0.canDisplayAsComplete }
+        if !completeStates.isEmpty,
+           completeStates.count == displayStates.count {
+            return RokuricsCopy.text("已同步", "Synced")
+        }
+
+        if displayStates.contains(where: { $0.kind == .uploadNeeded || $0.kind == .uploading || $0.kind == .finalizing || $0.kind == .stale }) {
+            return RokuricsCopy.text("正在同步", "Syncing")
+        }
+
+        return RokuricsCopy.text("暂无", "None")
+    }
+
     private var unpairedActions: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("未配对")
-                .font(MacTypography.chineseTitle(size: 30))
+            Text(RokuricsCopy.text("未配对", "Not Paired"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseTitle(size: 30) : MacTypography.englishTitle(size: 30))
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
                 .lineLimit(1)
 
@@ -54,7 +89,7 @@ struct MacReceiverStatusCard: View {
                 Button {
                     copyPairingInfo()
                 } label: {
-                    Label(didCopyPairingInfo ? "已复制" : "复制配对信息", systemImage: didCopyPairingInfo ? "checkmark" : "doc.on.doc")
+                    Label(didCopyPairingInfo ? RokuricsCopy.text("已复制", "Copied") : RokuricsCopy.text("复制配对信息", "Copy Pairing"), systemImage: didCopyPairingInfo ? "checkmark" : "doc.on.doc")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(MacDashboardConnectionButtonStyle(isPrimary: true))
@@ -64,7 +99,7 @@ struct MacReceiverStatusCard: View {
                 Button {
                     startPairingFlow()
                 } label: {
-                    Label("开始配对", systemImage: "key.fill")
+                    Label(RokuricsCopy.text("开始配对", "Start Pairing"), systemImage: "key.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(MacDashboardConnectionButtonStyle(isPrimary: true))
@@ -75,7 +110,7 @@ struct MacReceiverStatusCard: View {
             Button {
                 onOpenDetails()
             } label: {
-                Label("查看详情", systemImage: "arrow.right")
+                Label(RokuricsCopy.text("查看详情", "Details"), systemImage: "arrow.right")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(MacDashboardConnectionButtonStyle(isPrimary: false))
@@ -131,7 +166,7 @@ struct MacReceiverStatusCard: View {
     }
 
     private var ipSummary: String {
-        secureReceiverService.localIPAddress == "未知" ? "IP 未知" : secureReceiverService.localIPAddress
+        secureReceiverService.localIPAddress == "未知" ? RokuricsCopy.text("IP 未知", "IP Unknown") : secureReceiverService.localIPAddress
     }
 }
 

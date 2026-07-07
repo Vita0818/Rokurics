@@ -1,3 +1,12 @@
+# Secrets and credentials
+.env
+*.env
+*.pem
+*.key
+*.p12
+*.mobileprovision
+secrets/
+
 # Xcode
 #
 # gitignore contributors: remember to update Global/Xcode.gitignore, Objective-C.gitignore & Swift.gitignore

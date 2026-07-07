@@ -9,7 +9,7 @@ import SwiftUI
 
 struct DeviceConnectionCard: View {
     var body: some View {
-        RokuricsDashboardCard(title: "Mac 连接", systemImage: "desktopcomputer") {
+        RokuricsDashboardCard(title: RokuricsCopy.text("Mac 连接", "Mac Link"), systemImage: "desktopcomputer") {
             HStack(alignment: .center, spacing: 15) {
                 ZStack {
                     Circle()
@@ -27,11 +27,11 @@ struct DeviceConnectionCard: View {
                 .rokuricsSoftShadow(opacity: 0.08, radius: 12, y: 7)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Mac 未连接")
+                    Text(RokuricsCopy.text("Mac 未连接", "Mac Not Connected"))
                         .font(RokuricsTypography.headline(size: 18))
                         .foregroundStyle(RokuricsColors.deepText)
 
-                    Text("本地传输待配置")
+                    Text(RokuricsCopy.text("本地传输待配置", "Local transfer not set"))
                         .font(RokuricsTypography.body(size: 14, weight: .medium))
                         .foregroundStyle(RokuricsColors.softText)
                 }
@@ -43,14 +43,14 @@ struct DeviceConnectionCard: View {
                         .font(RokuricsTypography.technicalLarge(size: 24, weight: .bold))
                         .foregroundStyle(RokuricsColors.softTeal)
 
-                    Text("端口")
+                    Text(RokuricsCopy.text("端口", "Port"))
                         .font(RokuricsTypography.caption(size: 11, weight: .semibold))
                         .foregroundStyle(RokuricsColors.tertiaryText)
                 }
             }
 
             HStack {
-                RokuricsStatusPill(text: "局域网 HTTP", systemImage: "wifi", tint: RokuricsColors.softTeal)
+                RokuricsStatusPill(text: RokuricsCopy.text("局域网 HTTP", "Local HTTP"), systemImage: "wifi", tint: RokuricsColors.softTeal)
                 Spacer()
                 RokuricsStatusPill(text: "Mock", systemImage: "sparkle.magnifyingglass", tint: RokuricsColors.tertiaryText)
             }

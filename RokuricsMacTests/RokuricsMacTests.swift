@@ -20,6 +20,217 @@ struct RokuricsMacTests {
         #expect(MacIPhoneConnectionCardLayout.disablesWidthAnimation)
     }
 
+    @MainActor
+    @Test func manualStudyLibrarySyncPendingLifecyclePublishesVisibleStatuses() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-manual-sync-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = DeviceConnectionStatusStore(
+            rootURL: rootURL,
+            pendingSyncRequestTimeout: 1
+        )
+        let deviceID = "iphone-manual-sync"
+        let requestedAt = Date(timeIntervalSince1970: 1_000)
+
+        let requested = store.recordPendingSyncRequest(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: "sync-1",
+            initiatorDeviceID: "mac-local",
+            at: requestedAt
+        )
+        #expect(requested.lastSyncStatus == "等待 iPhone 执行同步")
+        #expect(store.statusesByDeviceID[deviceID]?.lastSyncStatus == "等待 iPhone 执行同步")
+        #expect(store.pendingSyncRequestCountForDiagnostics == 1)
+
+        let duplicate = store.recordPendingSyncRequest(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: "sync-duplicate",
+            initiatorDeviceID: "mac-local",
+            at: requestedAt.addingTimeInterval(0.5)
+        )
+        #expect(duplicate.lastSyncStatus == "已请求，等待 iPhone 前台响应")
+        #expect(store.pendingSyncRequestCountForDiagnostics == 1)
+        let duplicateDetails = store.recordPendingSyncRequestDetails(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: "sync-duplicate-2",
+            initiatorDeviceID: "mac-local",
+            at: requestedAt.addingTimeInterval(0.6)
+        )
+        #expect(duplicateDetails.isDuplicate)
+        #expect(duplicateDetails.signal.syncRunID == "sync-1")
+
+        let signal = try #require(store.consumePendingSyncStartSignal(deviceID: deviceID))
+        #expect(signal.syncRunID == "sync-1")
+        #expect(store.statusesByDeviceID[deviceID]?.lastSyncStatus == "iPhone 已收到同步请求")
+        #expect(store.pendingSyncRequestCountForDiagnostics == 0)
+
+        _ = store.recordPendingSyncRequest(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: "sync-2",
+            initiatorDeviceID: "mac-local",
+            at: requestedAt.addingTimeInterval(2)
+        )
+        let observed = store.recordPendingSyncInventoryObserved(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            syncRunID: "sync-2",
+            at: requestedAt.addingTimeInterval(2.2)
+        )
+        #expect(observed.lastSyncStatus == "iPhone 已开始同步")
+        #expect(store.pendingSyncRequestCountForDiagnostics == 0)
+
+        _ = store.recordPendingSyncRequest(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: "sync-timeout",
+            initiatorDeviceID: "mac-local",
+            at: requestedAt.addingTimeInterval(10)
+        )
+        let timedOut = try #require(store.status(for: deviceID, now: requestedAt.addingTimeInterval(12)))
+        #expect(timedOut.lastSyncStatus == "等待 iPhone 前台响应超时")
+        #expect(timedOut.lastErrorCode == "manual_sync_pending_timed_out")
+        #expect(store.pendingSyncRequestCountForDiagnostics == 0)
+    }
+
+    @MainActor
+    @Test func macSyncControlPlaneIgnoresStaleRegressionsAndExpiresEarlyStages() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-control-plane-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 10
+        )
+        let startedAt = Date(timeIntervalSince1970: 2_000)
+
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt
+        )
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-1",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(1)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(2)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(11)))
+        #expect(store.state.syncControlPlaneState == .failed)
+        #expect(store.state.lastError == "sync_control_plane_timeout")
+
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-1",
+            state: .inventoryExchanging,
+            at: startedAt.addingTimeInterval(12)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(13)
+        )
+        #expect(store.state.activeSyncRunID == "sync-1")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(23)))
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-2",
+            state: .syncStartSignalSent,
+            at: startedAt.addingTimeInterval(24)
+        )
+        #expect(store.state.activeSyncRunID == "sync-2")
+        #expect(store.state.syncControlPlaneState == .syncStartSignalSent)
+    }
+
+    @MainActor
+    @Test func macSyncControlPlaneWatchdogExpiresStartAckWithoutNextRequest() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-control-plane-watchdog-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 0.02
+        )
+
+        store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "sync-start-ack",
+            state: .syncStartAcked
+        )
+
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline,
+              store.state.syncControlPlaneState != .failed {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        #expect(store.state.activeSyncRunID == "sync-start-ack")
+        #expect(store.state.syncControlPlaneState == .failed)
+        #expect(store.state.lastError == "sync_control_plane_timeout")
+    }
+
+    @Test func macManualSyncViewConsumesReturnedStatusWithoutReverseClient() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let viewSource = try String(
+            contentsOf: root.appendingPathComponent("RokuricsMac/MacIPhoneConnectionView.swift"),
+            encoding: .utf8
+        )
+        let serviceSource = try String(
+            contentsOf: root.appendingPathComponent("RokuricsMac/SecureReceiverService.swift"),
+            encoding: .utf8
+        )
+        let prepareRange = try #require(serviceSource.range(of: "func prepareManualStudyLibrarySync"))
+        let prepareSource = String(serviceSource[prepareRange.lowerBound...])
+            .components(separatedBy: "func refreshSecurityState")
+            .first ?? ""
+
+        #expect(viewSource.contains("manualSyncStatusRevision = status.connectionStatusRevision"))
+        #expect(serviceSource.contains("publishManualSyncStatus(status)"))
+        #expect(prepareSource.contains("recordPendingSyncRequestDetails("))
+        #expect(!prepareSource.contains("URLSession"))
+        #expect(!prepareSource.contains("NWConnection"))
+        #expect(!prepareSource.contains(".connect("))
+    }
+
+    @Test func macSyncButtonKeepsRecentTerminalControlPlaneStatusVisible() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("RokuricsMac/MacIPhoneConnectionView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("state.isSyncProgressActive || shouldShowRecentTerminalSyncState(state)"))
+        #expect(source.contains("syncControlPlaneUpdatedAt"))
+        #expect(source.contains("case .completed, .failed, .cancelled:"))
+    }
+
     @Test func failedInboxItemShowsShortTranscriptionErrorSummary() {
         let item = makeInboxItem(
             transcriptionStatus: "failed",
@@ -133,35 +344,47 @@ struct RokuricsMacTests {
     }
 
     @Test func audioInboxActionLabelsMatchTranscriptionState() {
+        let notStartedItem = makeInboxItem(transcriptionStatus: "notStarted", transcriptionError: nil)
         #expect(MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "notStarted", transcriptionError: nil),
+            for: notStartedItem,
+            displaySyncState: notStartedItem.canonicalDisplaySyncState,
             isTranscribing: false
         ).label == "转写")
 
+        let failedItem = makeInboxItem(transcriptionStatus: "failed", transcriptionError: "boom")
         #expect(MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "failed", transcriptionError: "boom"),
+            for: failedItem,
+            displaySyncState: failedItem.canonicalDisplaySyncState,
             isTranscribing: false
         ).label == "转写")
 
+        let queuedItem = makeInboxItem(transcriptionStatus: "queued", transcriptionError: nil)
         #expect(MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "queued", transcriptionError: nil),
+            for: queuedItem,
+            displaySyncState: queuedItem.canonicalDisplaySyncState,
             isTranscribing: false
         ).label == "转写中")
 
+        let transcribingItem = makeInboxItem(transcriptionStatus: "transcribing", transcriptionError: nil)
         #expect(MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "transcribing", transcriptionError: nil),
+            for: transcribingItem,
+            displaySyncState: transcribingItem.canonicalDisplaySyncState,
             isTranscribing: false
         ).label == "转写中")
 
+        let transcribedItem = makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil)
         #expect(MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil),
+            for: transcribedItem,
+            displaySyncState: transcribedItem.canonicalDisplaySyncState,
             isTranscribing: false
         ).label == "查看转写")
     }
 
     @Test func transcribedInboxActionRequestsTranscriptDetail() {
+        let item = makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil)
         let action = MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "transcribed", transcriptionError: nil),
+            for: item,
+            displaySyncState: item.canonicalDisplaySyncState,
             isTranscribing: false
         )
 
@@ -170,8 +393,10 @@ struct RokuricsMacTests {
     }
 
     @Test func failedInboxActionUsesSingleRetryCapsuleIntent() {
+        let item = makeInboxItem(transcriptionStatus: "failed", transcriptionError: "launch failed")
         let action = MacAudioInboxRowAction.resolve(
-            for: makeInboxItem(transcriptionStatus: "failed", transcriptionError: "launch failed"),
+            for: item,
+            displaySyncState: item.canonicalDisplaySyncState,
             isTranscribing: false
         )
 
@@ -342,10 +567,10 @@ struct RokuricsMacTests {
         #expect(decoded.noteError == nil)
     }
 
-    @Test func noteGenerationStatusWritePreservesTranscriptFields() throws {
+    @Test func noteGenerationStatusWritePreservesTranscriptFields() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-note-01", title: "笔记", store: store)
+        try await saveMacInboxRecording(id: "mac-note-01", title: "笔记", store: store)
         try store.updateTranscriptionStatus(
             recordingID: "mac-note-01",
             status: "transcribed",
@@ -379,10 +604,10 @@ struct RokuricsMacTests {
         #expect(record.transcriptMarkdownRelativePath == "transcripts/1970-01-01/mac-note-01/transcript.md")
     }
 
-    @Test func failedNoteGenerationPreservesExistingNotePath() throws {
+    @Test func failedNoteGenerationPreservesExistingNotePath() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-note-failed", title: "失败保留", store: store)
+        try await saveMacInboxRecording(id: "mac-note-failed", title: "失败保留", store: store)
         let generatedAt = Date(timeIntervalSince1970: 2_000)
         try store.updateNoteGenerationStatus(
             recordingID: "mac-note-failed",
@@ -413,10 +638,10 @@ struct RokuricsMacTests {
         #expect(record.noteError == "请求超时")
     }
 
-    @Test func anthropicNoteGenerationStatusWritesProviderAndModel() throws {
+    @Test func anthropicNoteGenerationStatusWritesProviderAndModel() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-note-claude", title: "Claude 笔记", store: store)
+        try await saveMacInboxRecording(id: "mac-note-claude", title: "Claude 笔记", store: store)
 
         try store.updateNoteGenerationStatus(
             recordingID: "mac-note-claude",
@@ -2041,10 +2266,10 @@ struct RokuricsMacTests {
         #expect(!MacDashboardCardKind.visibleCards.map(\.title).contains("转写队列"))
     }
 
-    @Test func macRenameInboxItemUpdatesNormalizedTitle() throws {
+    @Test func macRenameInboxItemUpdatesNormalizedTitle() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-rename-01", title: "原始标题", store: store)
+        try await saveMacInboxRecording(id: "mac-rename-01", title: "原始标题", store: store)
 
         let item = try store.updateDisplayTitle(recordingID: "mac-rename-01", rawTitle: " 新标题 ")
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: "mac-rename-01")
@@ -2053,10 +2278,10 @@ struct RokuricsMacTests {
         #expect(record.normalizedTitle == "新标题")
     }
 
-    @Test func macRenameDoesNotOverwriteOriginalTitle() throws {
+    @Test func macRenameDoesNotOverwriteOriginalTitle() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-rename-02", title: "上传标题", store: store)
+        try await saveMacInboxRecording(id: "mac-rename-02", title: "上传标题", store: store)
 
         _ = try store.updateDisplayTitle(recordingID: "mac-rename-02", rawTitle: "Mac 标题")
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: "mac-rename-02")
@@ -2148,7 +2373,7 @@ struct RokuricsMacTests {
         }
     }
 
-    @Test func audioUploadAfterMetadataOnlyRecordCompletesReceiveState() throws {
+    @Test func audioUploadAfterMetadataOnlyRecordCompletesReceiveState() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -2156,7 +2381,7 @@ struct RokuricsMacTests {
         let audio = Data("audio".utf8)
 
         _ = try store.saveMetadata(metadata, sourceDevice: device)
-        let result = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        let result = try await store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
 
         #expect(result.disposition == .acceptedNew)
@@ -2168,7 +2393,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func macSyncInventoryReportsReceivedAudioAvailableWithChecksumAndSize() throws {
+    @Test func macSyncInventoryReportsReceivedAudioAvailableWithChecksumAndSize() async throws {
         let fileManager = FileManager.default
         let rootURL = try makeScratchDirectory()
         defer { try? fileManager.removeItem(at: rootURL) }
@@ -2200,7 +2425,7 @@ struct RokuricsMacTests {
             onFailed: { _ in },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
-            onRecordingAccepted: { _ in }
+            onRecordingAccepted: { _, _ in }
         )
         defer { server.stop() }
         let device = makeUploadDevice()
@@ -2208,9 +2433,9 @@ struct RokuricsMacTests {
         let metadata = makeIncomingUploadMetadata(id: "inventory-audio-available", fileSize: Int64(audio.count))
 
         _ = try recordingFileStore.saveMetadata(metadata, sourceDevice: device)
-        _ = try recordingFileStore.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        _ = try await recordingFileStore.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
 
-        let inventory = try #require(server.localNetworkSyncInventoryResponseForVerifiedDevice(device, syncRunID: "inventory-test").inventory)
+        let inventory = try #require(await server.localNetworkSyncInventoryResponseForVerifiedDevice(device, syncRunID: "inventory-test").inventory)
         let recording = try #require(inventory.recordings.first { $0.recordingID == metadata.id })
         let audioObject = try #require(inventory.objects.first { $0.objectID == "recordingAudio:\(metadata.id)" })
 
@@ -2227,14 +2452,73 @@ struct RokuricsMacTests {
         #expect(audioObject.logicalPathToken?.hasSuffix("/audio.m4a") == true)
     }
 
-    @Test func macAudioAvailableInboxItemClearsWaitingActionState() throws {
+    @MainActor
+    @Test func macInventoryRequestMarksManualSyncPendingAsStarted() async throws {
+        let fileManager = FileManager.default
+        let rootURL = try makeScratchDirectory()
+        defer { try? fileManager.removeItem(at: rootURL) }
+        let recordingFileStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
+        let studyLibraryStore = StudyLibraryStore(
+            rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
+            recordingFileStore: recordingFileStore,
+            listenForInboxChanges: false
+        )
+        let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityURL)
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: securityURL,
+            tlsKeyTagNamespace: "inventory-observed-\(UUID().uuidString)"
+        )
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        var diagnosticPhases: [String] = []
+        let server = SecureLocalHTTPSServer(
+            port: 0,
+            identityManager: identityManager,
+            pairingManager: pairingManager,
+            requestVerifier: RequestVerifier(pairedDeviceStore: pairedDeviceStore),
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: nil,
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            onReady: {},
+            onFailed: { _ in },
+            onPairingChanged: {},
+            onUploadAccepted: { _ in },
+            onRecordingAccepted: { _, _ in },
+            onConnectionDiagnostic: { event in
+                diagnosticPhases.append(event.phase)
+            }
+        )
+        defer { server.stop() }
+        let device = makeHeartbeatDevice()
+        let syncRunID = "inventory-observed-sync"
+        _ = statusStore.recordPendingSyncRequest(
+            deviceID: device.id,
+            displayName: device.deviceName,
+            syncRunID: syncRunID,
+            initiatorDeviceID: "mac-test"
+        )
+
+        _ = await server.localNetworkSyncInventoryResponseForVerifiedDevice(device, syncRunID: syncRunID)
+
+        #expect(statusStore.status(for: device.id)?.lastSyncStatus == "iPhone 已开始同步")
+        #expect(syncStateStore.state.syncControlPlaneState == .inventoryExchanging)
+        #expect(diagnosticPhases.contains("manualSyncRequestedInventoryObserved"))
+        #expect(diagnosticPhases.contains("manualSyncRequestedConsumedByPeer"))
+    }
+
+    @Test func macAudioAvailableInboxItemClearsWaitingActionState() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
         let metadata = makeIncomingUploadMetadata(id: "ui-audio-available")
 
         _ = try store.saveMetadata(metadata, sourceDevice: device)
-        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
 
         let item = try #require(store.loadInboxItems().first { $0.id == metadata.id })
         #expect(item.hasAudio)
@@ -2243,7 +2527,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func macReceiveUpdateRefreshesAudioInboxStoreWithoutRestart() throws {
+    @Test func macReceiveUpdateRefreshesAudioInboxStoreWithoutRestart() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -2254,7 +2538,7 @@ struct RokuricsMacTests {
         let waitingItem = try #require(inboxStore.recordingItems.first { $0.id == metadata.id })
         #expect(waitingItem.localNetworkReceiveTransferProgress?.statusText == "正在接收")
 
-        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
         let deadline = Date().addingTimeInterval(0.2)
         while Date() < deadline,
               inboxStore.recordingItems.first(where: { $0.id == metadata.id })?.hasAudio != true {
@@ -2266,7 +2550,7 @@ struct RokuricsMacTests {
         #expect(refreshedItem.localNetworkReceiveTransferProgress == nil)
     }
 
-    @Test func repeatedIdenticalAudioIsIdempotentSuccess() throws {
+    @Test func repeatedIdenticalAudioIsIdempotentSuccess() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -2274,10 +2558,10 @@ struct RokuricsMacTests {
         let audio = Data("audio".utf8)
 
         _ = try store.saveMetadata(metadata, sourceDevice: device)
-        _ = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        _ = try await store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
         let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
         Thread.sleep(forTimeInterval: 0.01)
-        let result = try store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: "retry-name.m4a", sourceDevice: device)
+        let result = try await store.saveAudio(body: audio, recordingID: metadata.id, requestedFileName: "retry-name.m4a", sourceDevice: device)
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
         let audioURL = rootURL.appendingPathComponent(record.audioRelativePath ?? "", isDirectory: false)
 
@@ -2291,19 +2575,19 @@ struct RokuricsMacTests {
         #expect(try Data(contentsOf: audioURL) == audio)
     }
 
-    @Test func repeatedConflictingAudioIsRejected() throws {
+    @Test func repeatedConflictingAudioIsRejected() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
         let metadata = makeIncomingUploadMetadata(id: "idempotent-06")
 
         _ = try store.saveMetadata(metadata, sourceDevice: device)
-        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+        _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
         let firstRecord = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
         Thread.sleep(forTimeInterval: 0.01)
 
         do {
-            _ = try store.saveAudio(body: Data("different-audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
+            _ = try await store.saveAudio(body: Data("different-audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
             Issue.record("Expected conflicting audio to be rejected")
         } catch MacRecordingFileStoreError.audioConflict {
             let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
@@ -2314,7 +2598,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func metadataConflictRouteReturns409JSONWithoutSecret() throws {
+    @Test func metadataConflictRouteReturns409JSONWithoutSecret() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = makeIncomingUploadMetadata(id: "route-metadata-conflict", fileSize: 5)
@@ -2322,13 +2606,13 @@ struct RokuricsMacTests {
         let metadataBody = try encodedMetadata(metadata)
         let conflictingBody = try encodedMetadata(conflicting)
 
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-metadata-first"),
             body: metadataBody
         )
-        let response = handler.metadataUploadResponse(
+        let response = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: conflictingBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: conflicting.id, fileName: conflicting.originalFileName, nonce: "nonce-route-metadata-conflict"),
@@ -2348,7 +2632,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func audioConflictRouteReturns409JSONWithoutSecret() throws {
+    @Test func audioConflictRouteReturns409JSONWithoutSecret() async throws {
         let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = makeIncomingUploadMetadata(id: "route-audio-conflict")
@@ -2356,19 +2640,19 @@ struct RokuricsMacTests {
         let audio = Data("audio".utf8)
         let conflictingAudio = Data("different-audio".utf8)
 
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-metadata"),
             body: metadataBody
         )
-        _ = handler.audioUploadResponse(
+        _ = await handler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-first"),
             body: audio
         )
-        let response = handler.audioUploadResponse(
+        let response = await handler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: conflictingAudio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-conflict"),
@@ -2387,19 +2671,19 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func repeatedIdenticalMetadataRouteReturnsAcceptedExisting() throws {
+    @Test func repeatedIdenticalMetadataRouteReturnsAcceptedExisting() async throws {
         let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = makeIncomingUploadMetadata(id: "route-metadata-existing")
         let body = try encodedMetadata(metadata)
 
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-existing-first"),
             body: body
         )
-        let response = handler.metadataUploadResponse(
+        let response = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-existing-second"),
@@ -2415,26 +2699,26 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func repeatedIdenticalAudioRouteReturnsAcceptedExisting() throws {
+    @Test func repeatedIdenticalAudioRouteReturnsAcceptedExisting() async throws {
         let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = makeIncomingUploadMetadata(id: "route-audio-existing")
         let metadataBody = try encodedMetadata(metadata)
         let audio = Data("audio".utf8)
 
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-metadata"),
             body: metadataBody
         )
-        _ = handler.audioUploadResponse(
+        _ = await handler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-first"),
             body: audio
         )
-        let response = handler.audioUploadResponse(
+        let response = await handler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-audio-existing-second"),
@@ -2450,7 +2734,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func tracedMetadataAndAudioRouteCompletesInboxAvailability() throws {
+    @Test func tracedMetadataAndAudioRouteCompletesInboxAvailability() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer {
             UploadFlightRecorder.configureLogURL(nil)
@@ -2485,13 +2769,13 @@ struct RokuricsMacTests {
         )
         audioHeaders[UploadFlightRecorder.traceHeaderName] = traceID
 
-        let metadataResponse = handler.metadataUploadResponse(
+        let metadataResponse = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: metadataHeaders,
             body: metadataBody
         )
-        let audioResponse = handler.audioUploadResponse(
+        let audioResponse = await handler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: audioHeaders,
@@ -2500,6 +2784,7 @@ struct RokuricsMacTests {
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
         let inboxStore = AudioInboxStore(recordingFileStore: store)
         let inboxItem = try #require(inboxStore.recordingItems.first(where: { $0.id == metadata.id }))
+        UploadFlightRecorder.flushForTests()
         let events = try UploadFlightRecorder.loadEvents(from: traceURL)
         let stages = Set(events.map(\.stage))
         let rawTrace = try String(contentsOf: traceURL, encoding: .utf8)
@@ -2528,7 +2813,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func tracedBadHMACUploadRouteRecordsVerifierRejectionWithoutStoreWrite() throws {
+    @Test func tracedBadHMACUploadRouteRecordsVerifierRejectionWithoutStoreWrite() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer {
             UploadFlightRecorder.configureLogURL(nil)
@@ -2552,12 +2837,13 @@ struct RokuricsMacTests {
         headers["X-Rokurics-Signature"] = "bad-signature"
         headers[UploadFlightRecorder.traceHeaderName] = traceID
 
-        let response = handler.metadataUploadResponse(
+        let response = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: headers,
             body: body
         )
+        UploadFlightRecorder.flushForTests()
         let stages = Set(try UploadFlightRecorder.loadEvents(from: traceURL).map(\.stage))
         let rawTrace = try String(contentsOf: traceURL, encoding: .utf8)
 
@@ -2572,7 +2858,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func badSignatureAndUnpairedUploadRoutesAreRejectedBeforeStoreWrite() throws {
+    @Test func badSignatureAndUnpairedUploadRoutesAreRejectedBeforeStoreWrite() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let metadata = makeIncomingUploadMetadata(id: "route-security-rejected")
@@ -2589,7 +2875,7 @@ struct RokuricsMacTests {
         )
         badSignatureHeaders["X-Rokurics-Signature"] = "bad-signature"
 
-        let badSignatureResponse = handler.metadataUploadResponse(
+        let badSignatureResponse = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: badSignatureHeaders,
@@ -2602,7 +2888,7 @@ struct RokuricsMacTests {
             pairedAt: Date(timeIntervalSince1970: 1_000),
             lastSeenAt: nil
         )
-        let unpairedResponse = handler.metadataUploadResponse(
+        let unpairedResponse = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-metadata", body: body, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-unpaired"),
@@ -2736,7 +3022,7 @@ struct RokuricsMacTests {
             },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
-            onRecordingAccepted: { _ in },
+            onRecordingAccepted: { _, _ in },
             onConnectionDiagnostic: { diagnosticRecorder.record($0) }
         )
         defer {
@@ -2996,7 +3282,7 @@ struct RokuricsMacTests {
             noteStatus: "notStarted",
             modifiedByDeviceID: "mac-seed"
         )
-        _ = try studyLibraryStore.applySyncManifest(
+        _ = try await studyLibraryStore.applySyncManifest(
             StudyLibrarySyncManifest.make(
                 deviceID: "mac-seed",
                 generatedAt: Date(timeIntervalSince1970: 2_020),
@@ -3025,7 +3311,7 @@ struct RokuricsMacTests {
             },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
-            onRecordingAccepted: { _ in }
+            onRecordingAccepted: { _, _ in }
         )
         defer {
             server.stop()
@@ -3637,7 +3923,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func devicelessFreshPairingHeartbeatAndSmallRecordingUploadSmoke() throws {
+    @Test func devicelessFreshPairingHeartbeatAndSmallRecordingUploadSmoke() async throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let securityRootURL = rootURL.appendingPathComponent("Security", isDirectory: true)
@@ -3721,16 +4007,20 @@ struct RokuricsMacTests {
 
         let recordingStore = MacRecordingFileStore(rootURL: libraryRootURL)
         var acceptedRecordingIDs: [String] = []
+        var acceptedReasons: [SyncTriggerReason] = []
         let uploadHandler = RecordingUploadRouteHandler(
             requestVerifier: requestVerifier,
             recordingFileStore: recordingStore,
-            onRecordingAccepted: { acceptedRecordingIDs.append($0) }
+            onRecordingAccepted: { recordingID, reason in
+                acceptedRecordingIDs.append(recordingID)
+                acceptedReasons.append(reason)
+            }
         )
         let audio = Data("fake ten second m4a audio".utf8)
         let metadata = makeIncomingUploadMetadata(id: "deviceless-smoke-01", fileSize: Int64(audio.count))
         let metadataBody = try encodedMetadata(metadata)
 
-        let metadataResponse = uploadHandler.metadataUploadResponse(
+        let metadataResponse = await uploadHandler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-new"),
@@ -3742,7 +4032,7 @@ struct RokuricsMacTests {
         #expect(metadataJSON["ok"] as? Bool == true)
         #expect(metadataJSON["disposition"] as? String == RecordingUploadDisposition.acceptedNew.rawValue)
 
-        let audioResponse = uploadHandler.audioUploadResponse(
+        let audioResponse = await uploadHandler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-new"),
@@ -3770,14 +4060,16 @@ struct RokuricsMacTests {
         #expect(receiveRecord.processingStatus == "notStarted")
         #expect(receiveRecord.checksum == MacSecurityUtilities.sha256Hex(audio))
         #expect(acceptedRecordingIDs.contains(metadata.id))
+        #expect(acceptedReasons.contains(.studyLibraryMetadataChanged))
+        #expect(acceptedReasons.contains(.macAudioReceiveFinalized))
 
-        let repeatedMetadataResponse = uploadHandler.metadataUploadResponse(
+        let repeatedMetadataResponse = await uploadHandler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-repeat"),
             body: metadataBody
         )
-        let repeatedAudioResponse = uploadHandler.audioUploadResponse(
+        let repeatedAudioResponse = await uploadHandler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-repeat"),
@@ -3789,14 +4081,14 @@ struct RokuricsMacTests {
 
         let conflictingMetadata = makeIncomingUploadMetadata(id: metadata.id, fileSize: Int64(audio.count + 1))
         let conflictingMetadataBody = try encodedMetadata(conflictingMetadata)
-        let metadataConflictResponse = uploadHandler.metadataUploadResponse(
+        let metadataConflictResponse = await uploadHandler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-metadata", body: conflictingMetadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-metadata-conflict"),
             body: conflictingMetadataBody
         )
         let conflictingAudio = Data("different fake m4a audio".utf8)
-        let audioConflictResponse = uploadHandler.audioUploadResponse(
+        let audioConflictResponse = await uploadHandler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: pairedDevice, path: "/upload-recording-audio", body: conflictingAudio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "smoke-audio-conflict"),
@@ -3950,6 +4242,15 @@ struct RokuricsMacTests {
     }
 
     @MainActor
+    @Test func deviceStatusResponseMissingSyncRequestedDecodesFalse() throws {
+        let response = try Self.connectionJSONDecoder.decode(DeviceStatusResponse.self, from: Data(#"{"ok":true}"#.utf8))
+
+        #expect(response.ok)
+        #expect(response.syncRequested == false)
+        #expect(response.syncStartSignal == nil)
+    }
+
+    @MainActor
     @Test func pendingManualSyncRequestDeduplicatesAndTimesOut() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -3962,6 +4263,7 @@ struct RokuricsMacTests {
             displayName: device.deviceName,
             syncRunID: "sync-first",
             initiatorDeviceID: "mac-test",
+            reason: SyncTriggerReason.macAudioReceiveFinalized.rawValue,
             at: startedAt
         )
         _ = statusStore.recordPendingSyncRequest(
@@ -3974,6 +4276,7 @@ struct RokuricsMacTests {
 
         let consumed = try #require(statusStore.consumePendingSyncStartSignal(deviceID: device.id))
         #expect(consumed.syncRunID == "sync-first")
+        #expect(consumed.reason == SyncTriggerReason.macAudioReceiveFinalized.rawValue)
 
         _ = statusStore.recordPendingSyncRequest(
             deviceID: device.id,
@@ -3997,38 +4300,49 @@ struct RokuricsMacTests {
         #expect(afterTimeout.syncRunID == "sync-after-timeout")
     }
 
-    @Test func macChecksumCacheHitsAndInvalidatesByFileAttributes() throws {
+    @Test func macChecksumCacheHitsAndInvalidatesByFileAttributes() async throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let fileURL = rootURL.appendingPathComponent("audio.m4a", isDirectory: false)
         try Data("mac-audio".utf8).write(to: fileURL)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: fileURL.path)
 
-        let cache = LocalNetworkChecksumCache()
-        var computeCount = 0
-        let first = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
-            computeCount += 1
-            return try MacSecurityUtilities.sha256Hex(fileURL: url)
-        })
-        let second = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
-            computeCount += 1
-            return try MacSecurityUtilities.sha256Hex(fileURL: url)
-        })
+        let runtime = CanonicalChecksumRuntime()
+        let cacheDirectoryURL = rootURL.appendingPathComponent("ChecksumCache", isDirectory: true)
+        let logicalToken = "audio/inbox/audio.m4a"
+        let first = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: logicalToken,
+            nodeRole: .mac,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
+        let second = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: logicalToken,
+            nodeRole: .mac,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
 
-        #expect(first.event == .miss)
-        #expect(second.event == .hit)
-        #expect(computeCount == 1)
+        #expect(first.sha256 == MacSecurityUtilities.sha256Hex(Data("mac-audio".utf8)))
+        #expect(first.event == CanonicalChecksumCacheEvent.miss)
+        #expect(first.hashComputed)
+        #expect(second.event == CanonicalChecksumCacheEvent.hit)
+        #expect(!second.hashComputed)
+        #expect(second.sha256 == first.sha256)
 
         try Data("mac-audio-changed".utf8).write(to: fileURL)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 101)], ofItemAtPath: fileURL.path)
-        let third = try #require(cache.checksum(fileURL: fileURL, pathToken: "audio/inbox/audio.m4a", sourceSide: "Mac") { url in
-            computeCount += 1
-            return try MacSecurityUtilities.sha256Hex(fileURL: url)
-        })
+        let third = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: logicalToken,
+            nodeRole: .mac,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
 
-        #expect(third.event == .invalidated)
+        #expect(third.event == CanonicalChecksumCacheEvent.stale)
+        #expect(third.hashComputed)
+        #expect(third.sha256 == MacSecurityUtilities.sha256Hex(Data("mac-audio-changed".utf8)))
         #expect(third.sha256 != first.sha256)
-        #expect(computeCount == 2)
     }
 
     @MainActor
@@ -4077,7 +4391,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func devicelessUnpairedSecureRoutesRejectBeforeMutationSmoke() throws {
+    @Test func devicelessUnpairedSecureRoutesRejectBeforeMutationSmoke() async throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
@@ -4093,7 +4407,7 @@ struct RokuricsMacTests {
         let uploadHandler = RecordingUploadRouteHandler(
             requestVerifier: requestVerifier,
             recordingFileStore: recordingStore,
-            onRecordingAccepted: { _ in Issue.record("unpaired upload must not be accepted") }
+            onRecordingAccepted: { _, _ in Issue.record("unpaired upload must not be accepted") }
         )
         let unpairedDevice = PairedDevice(
             id: "unpaired-smoke-device",
@@ -4126,13 +4440,13 @@ struct RokuricsMacTests {
             headers: try signedJSONHeaders(device: unpairedDevice, path: "/sync/inventory", body: Data("{}".utf8), nonce: "unpaired-smoke-sync"),
             body: Data("{}".utf8)
         )
-        let metadataResponse = uploadHandler.metadataUploadResponse(
+        let metadataResponse = await uploadHandler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "unpaired-smoke-metadata"),
             body: metadataBody
         )
-        let audioResponse = uploadHandler.audioUploadResponse(
+        let audioResponse = await uploadHandler.audioUploadResponse(
             method: "POST",
             path: "/upload-recording-audio",
             headers: try signedUploadHeaders(device: unpairedDevice, path: "/upload-recording-audio", body: audio, contentType: "audio/m4a", uploadType: "recording-audio", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "unpaired-smoke-audio"),
@@ -4527,6 +4841,36 @@ struct RokuricsMacTests {
     }
 
     @MainActor
+    @Test func macManualSyncDuplicateReusesPendingRunIDForControlPlane() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL, pendingSyncRequestTimeout: 30)
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let service = SecureReceiverService(
+            pairedDeviceStore: pairedDeviceStore,
+            deviceConnectionStatusStore: statusStore,
+            syncStateStore: syncStateStore,
+            connectionDiagnosticsStore: diagnosticsStore,
+            loadIdentityOnInit: false,
+            preferredIPAddressProvider: { "127.0.0.1" }
+        )
+
+        _ = service.prepareManualStudyLibrarySync(for: device)
+        let firstRunID = try #require(syncStateStore.state.activeSyncRunID)
+        _ = service.prepareManualStudyLibrarySync(for: device)
+        let phases = diagnosticsStore.loadEntries().map(\.phase)
+
+        #expect(syncStateStore.state.activeSyncRunID == firstRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .syncStartSignalSent)
+        #expect(statusStore.pendingSyncRequestCountForDiagnostics == 1)
+        #expect(phases.contains("pendingSyncRequestDuplicate"))
+    }
+
+    @MainActor
     @Test func macManualDisconnectDeletesCredentialsAndReturnsToUnpaired() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -4661,7 +5005,7 @@ struct RokuricsMacTests {
         #expect(!combined.contains("note"))
     }
 
-    @Test func resumableStartCreatesSessionAndRepeatedStartIsIdempotent() throws {
+    @Test func resumableStartCreatesSessionAndRepeatedStartIsIdempotent() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4670,8 +5014,8 @@ struct RokuricsMacTests {
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
 
-        let first = try store.startResumableAudioUpload(request, sourceDevice: device)
-        let second = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let first = try await store.startResumableAudioUpload(request, sourceDevice: device)
+        let second = try await store.startResumableAudioUpload(request, sourceDevice: device)
         let sessionID = try #require(first.sessionID)
         let sessionURL = rootURL
             .appendingPathComponent("audio", isDirectory: true)
@@ -4688,7 +5032,7 @@ struct RokuricsMacTests {
         #expect((try String(contentsOf: sessionURL)).contains(device.sharedSecretBase64URL) == false)
     }
 
-    @Test func resumableConflictingStartIsRejected() throws {
+    @Test func resumableConflictingStartIsRejected() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4696,7 +5040,7 @@ struct RokuricsMacTests {
         let metadata = makeIncomingUploadMetadata(id: "resumable-start-conflict", fileSize: Int64(audio.count))
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
-        _ = try store.startResumableAudioUpload(request, sourceDevice: device)
+        _ = try await store.startResumableAudioUpload(request, sourceDevice: device)
         let conflicting = ResumableAudioUploadStartRequest(
             recordingID: request.recordingID,
             fileName: request.fileName,
@@ -4708,7 +5052,7 @@ struct RokuricsMacTests {
         )
 
         do {
-            _ = try store.startResumableAudioUpload(conflicting, sourceDevice: device)
+            _ = try await store.startResumableAudioUpload(conflicting, sourceDevice: device)
             Issue.record("Expected conflicting resumable start to be rejected")
         } catch MacRecordingFileStoreError.sessionConflict {
             let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
@@ -4717,7 +5061,7 @@ struct RokuricsMacTests {
         }
     }
 
-    @Test func resumableChunkStatusFinalizeAndRepeatedFinalizeAreIdempotent() throws {
+    @Test func resumableChunkStatusFinalizeAndRepeatedFinalizeAreIdempotent() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4727,10 +5071,10 @@ struct RokuricsMacTests {
         let metadata = makeIncomingUploadMetadata(id: "resumable-finalize-01", fileSize: Int64(audio.count))
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
-        let start = try store.startResumableAudioUpload(request, sourceDevice: device)
+        let start = try await store.startResumableAudioUpload(request, sourceDevice: device)
         let sessionID = try #require(start.sessionID)
 
-        let chunk1 = try store.appendResumableAudioChunk(
+        let chunk1 = try await store.appendResumableAudioChunk(
             recordingID: metadata.id,
             sessionID: sessionID,
             offset: 0,
@@ -4740,7 +5084,7 @@ struct RokuricsMacTests {
             body: firstChunk,
             sourceDevice: device
         )
-        let duplicateChunk1 = try store.appendResumableAudioChunk(
+        let duplicateChunk1 = try await store.appendResumableAudioChunk(
             recordingID: metadata.id,
             sessionID: sessionID,
             offset: 0,
@@ -4750,7 +5094,7 @@ struct RokuricsMacTests {
             body: firstChunk,
             sourceDevice: device
         )
-        let status = try store.resumableAudioUploadStatus(
+        let status = try await store.resumableAudioUploadStatus(
             ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: sessionID, totalSHA256: request.totalSHA256),
             sourceDevice: device
         )
@@ -4762,7 +5106,7 @@ struct RokuricsMacTests {
         #expect(status.nextOffset == 3)
 
         do {
-            _ = try store.appendResumableAudioChunk(
+            _ = try await store.appendResumableAudioChunk(
                 recordingID: metadata.id,
                 sessionID: sessionID,
                 offset: 5,
@@ -4777,7 +5121,7 @@ struct RokuricsMacTests {
             #expect(true)
         }
 
-        _ = try store.appendResumableAudioChunk(
+        _ = try await store.appendResumableAudioChunk(
             recordingID: metadata.id,
             sessionID: sessionID,
             offset: 3,
@@ -4787,11 +5131,11 @@ struct RokuricsMacTests {
             body: secondChunk,
             sourceDevice: device
         )
-        let finalized = try store.finalizeResumableAudioUpload(
+        let finalized = try await store.finalizeResumableAudioUpload(
             ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
             sourceDevice: device
         )
-        let repeatedFinalize = try store.finalizeResumableAudioUpload(
+        let repeatedFinalize = try await store.finalizeResumableAudioUpload(
             ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
             sourceDevice: device
         )
@@ -4806,7 +5150,7 @@ struct RokuricsMacTests {
         #expect(try Data(contentsOf: finalAudioURL) == audio)
     }
 
-    @Test func resumableDuplicateConflictingChunkMarksSessionFatal() throws {
+    @Test func resumableDuplicateConflictingChunkMarksSessionFatal() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4815,9 +5159,9 @@ struct RokuricsMacTests {
         let metadata = makeIncomingUploadMetadata(id: "resumable-conflict-chunk", fileSize: Int64(audio.count))
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
-        let sessionID = try #require(try store.startResumableAudioUpload(request, sourceDevice: device).sessionID)
+        let sessionID = try #require(try await store.startResumableAudioUpload(request, sourceDevice: device).sessionID)
 
-        _ = try store.appendResumableAudioChunk(
+        _ = try await store.appendResumableAudioChunk(
             recordingID: metadata.id,
             sessionID: sessionID,
             offset: 0,
@@ -4830,7 +5174,7 @@ struct RokuricsMacTests {
 
         do {
             let conflictingChunk = Data("zzz".utf8)
-            _ = try store.appendResumableAudioChunk(
+            _ = try await store.appendResumableAudioChunk(
                 recordingID: metadata.id,
                 sessionID: sessionID,
                 offset: 0,
@@ -4847,7 +5191,7 @@ struct RokuricsMacTests {
 
         do {
             let secondChunk = Data("def".utf8)
-            _ = try store.appendResumableAudioChunk(
+            _ = try await store.appendResumableAudioChunk(
                 recordingID: metadata.id,
                 sessionID: sessionID,
                 offset: 3,
@@ -4863,7 +5207,7 @@ struct RokuricsMacTests {
         }
 
         do {
-            _ = try store.finalizeResumableAudioUpload(
+            _ = try await store.finalizeResumableAudioUpload(
                 ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: request.totalSHA256),
                 sourceDevice: device
             )
@@ -4873,7 +5217,7 @@ struct RokuricsMacTests {
         }
     }
 
-    @Test func resumableInvalidSessionIDIsRejected() throws {
+    @Test func resumableInvalidSessionIDIsRejected() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4881,7 +5225,7 @@ struct RokuricsMacTests {
         _ = try store.saveMetadata(metadata, sourceDevice: device)
 
         do {
-            _ = try store.resumableAudioUploadStatus(
+            _ = try await store.resumableAudioUploadStatus(
                 ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: "../escape", totalSHA256: String(repeating: "a", count: 64)),
                 sourceDevice: device
             )
@@ -4891,7 +5235,7 @@ struct RokuricsMacTests {
         }
     }
 
-    @Test func resumableSessionSymlinkEscapeIsRejected() throws {
+    @Test func resumableSessionSymlinkEscapeIsRejected() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -4907,7 +5251,7 @@ struct RokuricsMacTests {
         try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: outsideURL)
 
         do {
-            _ = try store.resumableAudioUploadStatus(
+            _ = try await store.resumableAudioUploadStatus(
                 ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: "session-escape", totalSHA256: String(repeating: "a", count: 64)),
                 sourceDevice: device
             )
@@ -4918,7 +5262,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func resumableRouteHappyPathAndResumeStatusUseSignedRequests() throws {
+    @Test func resumableRouteHappyPathAndResumeStatusUseSignedRequests() async throws {
         let (handler, _, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let audio = Data("abcdef".utf8)
@@ -4926,7 +5270,7 @@ struct RokuricsMacTests {
         let secondChunk = Data("def".utf8)
         let metadata = makeIncomingUploadMetadata(id: "route-resumable-happy", fileSize: Int64(audio.count))
         let metadataBody = try encodedMetadata(metadata)
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-metadata"),
@@ -4934,7 +5278,7 @@ struct RokuricsMacTests {
         )
         let startRequest = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
         let startBody = try encodedResumableRequest(startRequest)
-        let startResponse = handler.resumableAudioStartResponse(
+        let startResponse = await handler.resumableAudioStartResponse(
             method: "POST",
             path: "/upload-recording-audio-session/start",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: startBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-start"),
@@ -4943,7 +5287,7 @@ struct RokuricsMacTests {
         let startJSON = try decodeResumableResponse(startResponse)
         let sessionID = try #require(startJSON.sessionID)
 
-        let chunk1Response = handler.resumableAudioChunkResponse(
+        let chunk1Response = await handler.resumableAudioChunkResponse(
             method: "POST",
             path: "/upload-recording-audio-session/chunk",
             headers: try signedChunkHeaders(device: device, recordingID: metadata.id, sessionID: sessionID, offset: 0, chunk: firstChunk, totalSHA256: startRequest.totalSHA256, nonce: "nonce-route-resumable-chunk-1"),
@@ -4951,13 +5295,13 @@ struct RokuricsMacTests {
         )
         let statusRequest = ResumableAudioUploadStatusRequest(recordingID: metadata.id, sessionID: sessionID, totalSHA256: startRequest.totalSHA256)
         let statusBody = try encodedResumableRequest(statusRequest)
-        let statusResponse = handler.resumableAudioStatusResponse(
+        let statusResponse = await handler.resumableAudioStatusResponse(
             method: "POST",
             path: "/upload-recording-audio-session/status",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/status", body: statusBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-status"),
             body: statusBody
         )
-        _ = handler.resumableAudioChunkResponse(
+        _ = await handler.resumableAudioChunkResponse(
             method: "POST",
             path: "/upload-recording-audio-session/chunk",
             headers: try signedChunkHeaders(device: device, recordingID: metadata.id, sessionID: sessionID, offset: 3, chunk: secondChunk, totalSHA256: startRequest.totalSHA256, nonce: "nonce-route-resumable-chunk-2"),
@@ -4965,7 +5309,7 @@ struct RokuricsMacTests {
         )
         let finalizeRequest = ResumableAudioUploadFinalizeRequest(recordingID: metadata.id, sessionID: sessionID, totalBytes: Int64(audio.count), totalSHA256: startRequest.totalSHA256)
         let finalizeBody = try encodedResumableRequest(finalizeRequest)
-        let finalizeResponse = handler.resumableAudioFinalizeResponse(
+        let finalizeResponse = await handler.resumableAudioFinalizeResponse(
             method: "POST",
             path: "/upload-recording-audio-session/finalize",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/finalize", body: finalizeBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-finalize"),
@@ -4983,13 +5327,13 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func resumableRouteConflictAndBadSignatureDoNotLeakSecretOrMutate() throws {
+    @Test func resumableRouteConflictAndBadSignatureDoNotLeakSecretOrMutate() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let audio = Data("abcdef".utf8)
         let metadata = makeIncomingUploadMetadata(id: "route-resumable-conflict", fileSize: Int64(audio.count))
         let metadataBody = try encodedMetadata(metadata)
-        _ = handler.metadataUploadResponse(
+        _ = await handler.metadataUploadResponse(
             method: "POST",
             path: "/upload-recording-metadata",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-metadata", body: metadataBody, contentType: "application/json", uploadType: "recording-metadata", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-metadata"),
@@ -4997,7 +5341,7 @@ struct RokuricsMacTests {
         )
         let startRequest = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
         let startBody = try encodedResumableRequest(startRequest)
-        _ = handler.resumableAudioStartResponse(
+        _ = await handler.resumableAudioStartResponse(
             method: "POST",
             path: "/upload-recording-audio-session/start",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: startBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-start"),
@@ -5013,7 +5357,7 @@ struct RokuricsMacTests {
             uploadJobID: nil
         )
         let conflictingBody = try encodedResumableRequest(conflictingStart)
-        let conflictResponse = handler.resumableAudioStartResponse(
+        let conflictResponse = await handler.resumableAudioStartResponse(
             method: "POST",
             path: "/upload-recording-audio-session/start",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: conflictingBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-start-2"),
@@ -5030,7 +5374,7 @@ struct RokuricsMacTests {
             nonce: "nonce-route-resumable-bad-signature"
         )
         badChunkHeaders["X-Rokurics-Signature"] = "bad-signature"
-        let badSignatureResponse = handler.resumableAudioChunkResponse(
+        let badSignatureResponse = await handler.resumableAudioChunkResponse(
             method: "POST",
             path: "/upload-recording-audio-session/chunk",
             headers: badChunkHeaders,
@@ -5092,10 +5436,10 @@ struct RokuricsMacTests {
         #expect(decoded.deletedAt == nil)
     }
 
-    @Test func macSoftDeleteInboxItemMarksDeletedWithoutRemovingDirectory() throws {
+    @Test func macSoftDeleteInboxItemMarksDeletedWithoutRemovingDirectory() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        let directoryURL = try saveMacInboxRecording(id: "mac-delete-01", title: "删除", store: store)
+        let directoryURL = try await saveMacInboxRecording(id: "mac-delete-01", title: "删除", store: store)
 
         try store.deleteRecording(recordingID: "mac-delete-01")
         let record = try readReceiveRecord(rootURL: rootURL, recordingID: "mac-delete-01")
@@ -5107,10 +5451,10 @@ struct RokuricsMacTests {
         #expect(store.loadTrashedInboxItems().map(\.id) == ["mac-delete-01"])
     }
 
-    @Test func macRestoreClearsDeletedStateAndReturnsToInbox() throws {
+    @Test func macRestoreClearsDeletedStateAndReturnsToInbox() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-restore-01", title: "恢复", store: store)
+        try await saveMacInboxRecording(id: "mac-restore-01", title: "恢复", store: store)
 
         try store.deleteRecording(recordingID: "mac-restore-01")
         try store.restoreRecording(recordingID: "mac-restore-01")
@@ -5122,10 +5466,10 @@ struct RokuricsMacTests {
         #expect(store.loadTrashedInboxItems().isEmpty)
     }
 
-    @Test func macPermanentDeleteTranscribedItemRemovesTranscriptDirectory() throws {
+    @Test func macPermanentDeleteTranscribedItemRemovesTranscriptDirectory() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        _ = try saveMacInboxRecording(id: "mac-delete-02", title: "已转写", store: store)
+        _ = try await saveMacInboxRecording(id: "mac-delete-02", title: "已转写", store: store)
         let transcriptDirectoryURL = rootURL
             .appendingPathComponent("transcripts", isDirectory: true)
             .appendingPathComponent("2026-05-17", isDirectory: true)
@@ -5150,10 +5494,10 @@ struct RokuricsMacTests {
         #expect(!FileManager.default.fileExists(atPath: transcriptDirectoryURL.path))
     }
 
-    @Test func macPermanentDeleteRemovesRecordingDirectory() throws {
+    @Test func macPermanentDeleteRemovesRecordingDirectory() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        let directoryURL = try saveMacInboxRecording(id: "mac-permanent-01", title: "永久删除", store: store)
+        let directoryURL = try await saveMacInboxRecording(id: "mac-permanent-01", title: "永久删除", store: store)
 
         try store.permanentlyDeleteRecording(recordingID: "mac-permanent-01")
 
@@ -5180,10 +5524,10 @@ struct RokuricsMacTests {
         }
     }
 
-    @Test func macDeleteDoesNotRemoveSecurityDirectory() throws {
+    @Test func macDeleteDoesNotRemoveSecurityDirectory() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-delete-03", title: "安全目录", store: store)
+        try await saveMacInboxRecording(id: "mac-delete-03", title: "安全目录", store: store)
         let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
         try FileManager.default.createDirectory(at: securityURL, withIntermediateDirectories: true)
         try Data("paired".utf8).write(to: securityURL.appendingPathComponent("paired-devices.json"))
@@ -5193,11 +5537,11 @@ struct RokuricsMacTests {
         #expect(FileManager.default.fileExists(atPath: securityURL.appendingPathComponent("paired-devices.json").path))
     }
 
-    @Test func macDeleteWorksForFailedAndNotStartedItems() throws {
+    @Test func macDeleteWorksForFailedAndNotStartedItems() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-delete-failed", title: "失败", store: store, transcriptionStatus: "failed")
-        try saveMacInboxRecording(id: "mac-delete-not-started", title: "未转写", store: store, transcriptionStatus: "notStarted")
+        try await saveMacInboxRecording(id: "mac-delete-failed", title: "失败", store: store, transcriptionStatus: "failed")
+        try await saveMacInboxRecording(id: "mac-delete-not-started", title: "未转写", store: store, transcriptionStatus: "notStarted")
 
         try store.deleteRecording(recordingID: "mac-delete-failed")
         try store.deleteRecording(recordingID: "mac-delete-not-started")
@@ -5206,11 +5550,11 @@ struct RokuricsMacTests {
         #expect(store.loadTrashedInboxItems().count == 2)
     }
 
-    @Test func macTrashListOnlyIncludesDeletedItems() throws {
+    @Test func macTrashListOnlyIncludesDeletedItems() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-active-01", title: "未删除", store: store)
-        try saveMacInboxRecording(id: "mac-trash-01", title: "已删除", store: store)
+        try await saveMacInboxRecording(id: "mac-active-01", title: "未删除", store: store)
+        try await saveMacInboxRecording(id: "mac-trash-01", title: "已删除", store: store)
 
         try store.deleteRecording(recordingID: "mac-trash-01")
 
@@ -5218,11 +5562,11 @@ struct RokuricsMacTests {
         #expect(store.loadTrashedInboxItems().map(\.id) == ["mac-trash-01"])
     }
 
-    @Test func audioInboxStoreDeleteRefreshesCounts() throws {
+    @Test func audioInboxStoreDeleteRefreshesCounts() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-count-01", title: "一", store: fileStore)
-        try saveMacInboxRecording(id: "mac-count-02", title: "二", store: fileStore, transcriptionStatus: "transcribed")
+        try await saveMacInboxRecording(id: "mac-count-01", title: "一", store: fileStore)
+        try await saveMacInboxRecording(id: "mac-count-02", title: "二", store: fileStore, transcriptionStatus: "transcribed")
         let store = AudioInboxStore(recordingFileStore: fileStore)
 
         try store.deleteRecording(recordingID: "mac-count-02")
@@ -5232,10 +5576,10 @@ struct RokuricsMacTests {
         #expect(store.recordingItems.map(\.id) == ["mac-count-01"])
     }
 
-    @Test func audioInboxStoreExposesPlayableAudioURL() throws {
+    @Test func audioInboxStoreExposesPlayableAudioURL() async throws {
         let (fileStore, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "mac-play-01", title: "播放", store: fileStore)
+        try await saveMacInboxRecording(id: "mac-play-01", title: "播放", store: fileStore)
         let store = AudioInboxStore(recordingFileStore: fileStore)
 
         let audioURL = try store.audioFileURL(recordingID: "mac-play-01")
@@ -5363,7 +5707,7 @@ struct RokuricsMacTests {
         let handler = RecordingUploadRouteHandler(
             requestVerifier: verifier,
             recordingFileStore: store,
-            onRecordingAccepted: { _ in }
+            onRecordingAccepted: { _, _ in }
         )
         return (handler, store, rootURL, device)
     }
@@ -5593,7 +5937,7 @@ struct RokuricsMacTests {
         title: String,
         store: MacRecordingFileStore,
         transcriptionStatus: String = "notStarted"
-    ) throws -> URL {
+    ) async throws -> URL {
         let sourceDevice = PairedDevice(
             id: "device-01",
             deviceName: "Vita iPhone",
@@ -5625,7 +5969,7 @@ struct RokuricsMacTests {
         )
 
         let receiveResult = try store.saveMetadata(metadata, sourceDevice: sourceDevice)
-        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
+        _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
         return receiveResult.directoryURL
     }
 
@@ -6182,5 +6526,242 @@ private final class AnthropicMessagesTransportStub: AnthropicMessagesHTTPTranspo
             headerFields: nil
         )!
         return (data, response)
+    }
+}
+
+struct CanonicalExistenceApplyBridgeTests {
+    @Test func applyBridgeConsumesManifestRecordingsAndWritesMetadataOnlyPlaceholder() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        let results = harness.bridge.apply(
+            recordings: [Self.manifestRecording()],
+            sourceDeviceID: "iphone-01",
+            syncRunID: "existence-bridge-test"
+        )
+        let record = try harness.port.readRecord(objectID: "recording-existence")
+
+        #expect(results.count == 1)
+        #expect(results.first?.action == .written)
+        #expect(record?.objectID == "recording-existence")
+        #expect(record?.audioAvailable == false)
+        #expect(results.first?.diagnostics.contains { $0.kind == .canonicalRecordingExistenceMetadataOnlyWritten } == true)
+        #expect(results.first?.diagnostics.contains { $0.kind == .canonicalExistenceDidNotMarkUploadCompleted } == true)
+    }
+
+    @Test func placeholderDoesNotCreateAudioFileOrMarkAudioAvailable() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        let result = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01").first
+        let audioInboxURL = harness.rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+
+        #expect(result?.didWriteAudio == false)
+        #expect(result?.didMarkAudioAvailable == false)
+        #expect(FileManager.default.fileExists(atPath: audioInboxURL.path) == false)
+    }
+
+    @Test func existingSamePlaceholderNoOps() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        _ = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01")
+        let second = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01").first
+
+        #expect(second?.action == .noOp)
+        #expect(second?.state == .metadataOnly)
+    }
+
+    @Test func existingDifferentAudioConflicts() {
+        let port = InMemoryExistencePort(existing: {
+            var record = CanonicalRecordingMetadataOnlyReceiveRecord(
+                objectID: "recording-existence",
+                sourceDeviceID: "mac-01",
+                title: "Existing",
+                createdAt: Date(timeIntervalSince1970: 1),
+                updatedAt: Date(timeIntervalSince1970: 2),
+                metadataHash: "metadata-hash"
+            )
+            record.audioAvailable = true
+            record.audioHash = String(repeating: "b", count: 64)
+            record.audioByteSize = 20
+            return record
+        }())
+        let bridge = CanonicalRecordingManifestApplyBridge(configuration: Self.configuration(), port: port)
+
+        let result = bridge.apply(recordings: [Self.manifestRecording(audioChecksum: String(repeating: "a", count: 64), audioSize: 10)], sourceDeviceID: "iphone-01").first
+
+        #expect(result?.action == .conflict)
+        #expect(result?.state == .audioConflict)
+    }
+
+    @Test func rollbackRestoresPreviousAbsence() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        let result = try #require(harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01").first)
+        let checkpoint = try #require(result.checkpoint)
+        try harness.port.rollback(checkpoint)
+        let restored = try harness.port.readRecord(objectID: "recording-existence")
+
+        #expect(restored == nil)
+    }
+
+    @Test func rollbackRestoresPreviousRecord() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        _ = harness.bridge.apply(recordings: [Self.manifestRecording(metadataHash: "old-metadata-hash")], sourceDeviceID: "iphone-01")
+        let result = try #require(harness.bridge.apply(recordings: [Self.manifestRecording(metadataHash: "new-metadata-hash")], sourceDeviceID: "iphone-01").first)
+        let checkpoint = try #require(result.checkpoint)
+        try harness.port.rollback(checkpoint)
+        let restored = try harness.port.readRecord(objectID: "recording-existence")
+
+        #expect(restored?.metadataHash == "old-metadata-hash")
+    }
+
+    @Test func inventoryIncludesMetadataOnlyRecordingWithoutAudioFacts() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        _ = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01")
+        let records = try harness.port.loadRecords()
+        let merge = MacCanonicalRecordingExistenceInventoryMerger.merge(records: records, into: [])
+        let recording = merge.recordings.first
+
+        #expect(recording?.recordingID == "recording-existence")
+        #expect(recording?.audioAvailable == false)
+        #expect(recording?.audioChecksum == nil)
+        #expect(recording?.audioSize == nil)
+        #expect(recording?.audioLogicalPathToken == nil)
+    }
+
+    @Test func receiveJSONBehaviorUsesCanonicalLedgerNotInboxReadPath() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+
+        _ = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01")
+        let record = try harness.port.readRecord(objectID: "recording-existence")
+        let inboxReceiveURL = harness.rootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("recording-existence", isDirectory: true)
+            .appendingPathComponent("receive.json", isDirectory: false)
+
+        #expect(record?.receiveStatus == "canonicalMetadataOnly")
+        #expect(FileManager.default.fileExists(atPath: inboxReceiveURL.path) == false)
+    }
+
+    @Test func diagnosticsAreRedacted() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+        let fullHash = String(repeating: "a", count: 64)
+
+        let result = try #require(harness.bridge.apply(recordings: [Self.manifestRecording(metadataHash: fullHash)], sourceDeviceID: "iphone-01").first)
+        let summary = result.diagnostics.map { $0.summary() }.joined(separator: "\n")
+        let diagnosticsRedacted = result.diagnostics.allSatisfy(\.isRedacted)
+
+        #expect(diagnosticsRedacted)
+        #expect(!summary.contains(fullHash))
+        #expect(!summary.contains(harness.rootURL.path))
+    }
+
+    @Test func disabledModeKeepsLegacyFallbackAndDoesNotWrite() throws {
+        let rootURL = try Self.temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: rootURL)
+        let bridge = CanonicalRecordingManifestApplyBridge(configuration: .disabled, port: port)
+
+        let result = bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01").first
+        let records = try port.loadRecords()
+
+        #expect(result?.action == .blocked)
+        #expect(records.isEmpty)
+    }
+
+    private struct Harness {
+        let rootURL: URL
+        let port: MacCanonicalRecordingExistenceLedgerPort
+        let bridge: CanonicalRecordingManifestApplyBridge
+    }
+
+    private static func makeHarness() throws -> Harness {
+        let rootURL = try temporaryRoot()
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: rootURL)
+        let bridge = CanonicalRecordingManifestApplyBridge(configuration: configuration(), port: port)
+        return Harness(rootURL: rootURL, port: port, bridge: bridge)
+    }
+
+    private static func temporaryRoot() throws -> URL {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CanonicalExistenceApplyBridgeTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        return rootURL
+    }
+
+    private static func configuration() -> CanonicalExistenceApplyRuntimeConfiguration {
+        CanonicalExistenceApplyRuntimeConfiguration(mode: .testRootApply)
+    }
+
+    private static func manifestRecording(
+        metadataHash: String = "metadata-hash",
+        audioChecksum: String? = nil,
+        audioSize: Int64? = 10
+    ) -> LocalNetworkSyncRecordingEntry {
+        LocalNetworkSyncRecordingEntry(
+            recordingID: "recording-existence",
+            metadataHash: metadataHash,
+            audioAvailable: true,
+            audioChecksum: audioChecksum,
+            audioSize: audioSize,
+            uploadLedgerState: nil,
+            receiveStatus: nil,
+            processingStatus: nil,
+            updatedAt: Date(timeIntervalSince1970: 2),
+            deleted: false,
+            title: "Existence Test",
+            createdAt: Date(timeIntervalSince1970: 1),
+            tombstone: false,
+            audioAvailability: .local,
+            uploadStatus: nil,
+            transcriptionStatus: nil,
+            noteStatus: nil,
+            sourceDeviceID: "iphone-01",
+            artifactRefs: nil,
+            audioLogicalPathToken: "recordings/existence.m4a"
+        )
+    }
+
+    private final class InMemoryExistencePort: MacCanonicalRecordingExistenceApplyPort {
+        let rootURL = URL(fileURLWithPath: "/tmp/canonical-existence-memory")
+        private var records: [String: CanonicalRecordingMetadataOnlyReceiveRecord]
+
+        init(existing: CanonicalRecordingMetadataOnlyReceiveRecord) {
+            records = [existing.objectID: existing]
+        }
+
+        func checkpoint(for objectID: String) throws -> CanonicalRecordingExistenceRollbackCheckpoint {
+            CanonicalRecordingExistenceRollbackCheckpoint(
+                objectID: objectID,
+                hadExistingRecord: records[objectID] != nil,
+                previousRecordData: nil
+            )
+        }
+
+        func readRecord(objectID: String) throws -> CanonicalRecordingMetadataOnlyReceiveRecord? {
+            records[objectID]
+        }
+
+        func writeRecord(_ record: CanonicalRecordingMetadataOnlyReceiveRecord) throws {
+            records[record.objectID] = record
+        }
+
+        func rollback(_ checkpoint: CanonicalRecordingExistenceRollbackCheckpoint) throws {}
+
+        func loadRecords() throws -> [CanonicalRecordingMetadataOnlyReceiveRecord] {
+            Array(records.values)
+        }
     }
 }

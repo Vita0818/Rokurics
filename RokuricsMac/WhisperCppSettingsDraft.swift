@@ -21,11 +21,11 @@ enum WhisperCppFileAuthorizationState: Equatable {
     var displayText: String {
         switch self {
         case .authorized(.file):
-            return "已授权"
+            return RokuricsCopy.text("已授权", "Allowed")
         case .authorized(.parentDirectory):
-            return "已授权（文件夹）"
+            return RokuricsCopy.text("已授权（文件夹）", "Folder access")
         case .unauthorized:
-            return "未授权"
+            return RokuricsCopy.text("未授权", "No access")
         }
     }
 }

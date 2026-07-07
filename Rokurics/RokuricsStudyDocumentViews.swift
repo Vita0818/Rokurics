@@ -49,7 +49,7 @@ enum RokuricsDocumentFormatting {
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
@@ -147,14 +147,14 @@ struct RokuricsDocumentInfoSheet: View {
 
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 14) {
-                        infoGroup(title: "基础信息", rows: primaryRows.filter(\.isVisible))
+                        infoGroup(title: RokuricsCopy.text("基础信息", "Info"), rows: primaryRows.filter(\.isVisible))
 
                         if !advancedRows.filter(\.isVisible).isEmpty {
                             DisclosureGroup(isExpanded: $isAdvancedExpanded) {
                                 documentRows(advancedRows.filter(\.isVisible))
                                     .padding(.top, 10)
                             } label: {
-                                RokuricsText("高级信息", token: .sectionTitle)
+                                RokuricsText(RokuricsCopy.text("高级信息", "Details"), token: .sectionTitle)
                                     .foregroundStyle(RokuricsColors.deepText)
                             }
                             .tint(RokuricsColors.softText)
@@ -165,7 +165,7 @@ struct RokuricsDocumentInfoSheet: View {
                     .padding(20)
                 }
             }
-            .navigationTitle("信息")
+            .navigationTitle(RokuricsCopy.text("信息", "Info"))
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
@@ -263,7 +263,7 @@ struct RokuricsMarkdownContentView: View {
         let blocks = RokuricsMarkdownRenderer.blocks(from: markdown)
 
         if blocks.isEmpty {
-            Text("暂无内容")
+            Text(RokuricsCopy.text("暂无内容", "No content"))
                 .font(RokuricsTypography.font(for: .body))
                 .foregroundStyle(RokuricsColors.softText)
         } else {
@@ -466,19 +466,27 @@ struct StudyDocumentLoader {
     func loadTranscriptMarkdown(item: StudyItemMetadata) -> StudyDocumentLoadResult {
         let paths = candidateTranscriptMarkdownRelativePaths(for: item)
         guard !paths.isEmpty else {
-            return .failed("未找到转写文档")
+            return .failed(RokuricsCopy.text("未找到转写文档", "Transcript not found"))
         }
 
-        return loadFirstMarkdown(paths: paths, missingMessage: "未找到转写文档", failureMessage: "无法读取转写文档")
+        return loadFirstMarkdown(
+            paths: paths,
+            missingMessage: RokuricsCopy.text("未找到转写文档", "Transcript not found"),
+            failureMessage: RokuricsCopy.text("无法读取转写文档", "Could not read transcript")
+        )
     }
 
     func loadNoteMarkdown(item: StudyItemMetadata) -> StudyDocumentLoadResult {
         guard let path = item.noteRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines),
               !path.isEmpty else {
-            return .failed("未找到笔记文档")
+            return .failed(RokuricsCopy.text("未找到笔记文档", "Note not found"))
         }
 
-        return loadFirstMarkdown(paths: [path], missingMessage: "未找到笔记文档", failureMessage: "无法读取笔记文档")
+        return loadFirstMarkdown(
+            paths: [path],
+            missingMessage: RokuricsCopy.text("未找到笔记文档", "Note not found"),
+            failureMessage: RokuricsCopy.text("无法读取笔记文档", "Could not read note")
+        )
     }
 
     func loadTranscriptResult(item: StudyItemMetadata) -> TranscriptionResult? {
@@ -639,7 +647,7 @@ struct NoteSummaryPreview: Codable, Equatable {
 
     nonisolated static func fallbackSummary(from markdown: String) -> String {
         let text = previewText(from: readableBodyLines(from: markdown), maxCharacters: 220)
-        return text.isEmpty ? "暂无摘要" : text
+        return text.isEmpty ? RokuricsCopy.text("暂无摘要", "No summary") : text
     }
 
     nonisolated static func keyPoints(from markdown: String, maxCount: Int = 4) -> [String] {

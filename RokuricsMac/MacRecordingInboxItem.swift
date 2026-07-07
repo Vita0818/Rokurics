@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct MacRecordingInboxItem: Identifiable, Equatable {
+nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
     let id: String
     let title: String
     let receivedAt: Date
@@ -31,6 +31,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     let isDeleted: Bool
     let deletedAt: Date?
     let transferProgress: LocalNetworkTransferProgress?
+    let canonicalDisplaySyncState: CanonicalDisplaySyncState
 
     init(
         id: String,
@@ -80,27 +81,36 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         self.isDeleted = isDeleted
         self.deletedAt = deletedAt
         self.transferProgress = transferProgress
+        let snapshot = LegacySyncStatusToCanonicalEffectiveStatusAdapter.macAudioSnapshot(
+            recordingID: id,
+            hasLocalAudio: hasAudio,
+            audioChecksum: audioChecksum,
+            audioByteSize: fileSize,
+            receiveStatus: receiveStatus,
+            transferVisible: transferProgress != nil
+        )
+        self.canonicalDisplaySyncState = LegacySyncStatusToCanonicalEffectiveStatusAdapter.displayState(for: snapshot)
     }
 
     var statusText: String {
         switch transcriptionStatus {
         case "queued", "transcribing":
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         case "transcribed":
-            return "已转写"
+            return RokuricsCopy.text("已转写", "Transcribed")
         case "failed":
-            return "转写失败"
+            return RokuricsCopy.text("转写失败", "Transcript failed")
         default:
-            return "待转写"
+            return RokuricsCopy.text("待转写", "Needs transcript")
         }
     }
 
     var canStartTranscription: Bool {
-        hasAudio && (transcriptionStatus == "notStarted" || transcriptionStatus == "failed")
+        displayAudioAvailable && (transcriptionStatus == "notStarted" || transcriptionStatus == "failed")
     }
 
     var transcriptionActionText: String {
-        transcriptionStatus == "failed" ? "重试" : "转写"
+        transcriptionStatus == "failed" ? RokuricsCopy.text("重试", "Retry") : RokuricsCopy.text("转写", "Transcribe")
     }
 
     var isTranscribed: Bool {
@@ -108,7 +118,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
     }
 
     var isWaitingForTranscription: Bool {
-        hasAudio && transcriptionStatus == "notStarted"
+        displayAudioAvailable && transcriptionStatus == "notStarted"
     }
 
     var isTranscriptionActive: Bool {
@@ -127,12 +137,20 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
         noteStatus == "failed"
     }
 
+    var displayAudioAvailable: Bool {
+        canonicalDisplaySyncState.canDisplayAsComplete
+    }
+
+    var displayAudioStatusText: String {
+        displayAudioAvailable ? RokuricsCopy.text("可用", "Available") : RokuricsCopy.text("缺失", "Missing")
+    }
+
     var canStartNoteGeneration: Bool {
         isTranscribed && !isNoteGenerating
     }
 
     var localNetworkReceiveTransferProgress: LocalNetworkTransferProgress? {
-        guard !hasAudio, receiveStatus != "completed" else {
+        guard !displayAudioAvailable else {
             return nil
         }
 
@@ -149,7 +167,7 @@ struct MacRecordingInboxItem: Identifiable, Equatable {
             receivedBytes: 0,
             totalBytes: fileSize > 0 ? fileSize : nil,
             sourceDeviceID: nil,
-            statusText: state == .failed ? "接收失败" : "正在接收"
+            statusText: state == .failed ? RokuricsCopy.text("接收失败", "Receive failed") : RokuricsCopy.text("正在接收", "Receiving")
         )
     }
 
@@ -180,7 +198,7 @@ enum TranscriptionFailureReasonFormatter {
 
         let rawSummary = diagnosticSummary(from: normalizedLines, maxLines: maxLines)
 
-        let reason = rawSummary.isEmpty ? "未记录具体原因" : rawSummary
+        let reason = rawSummary.isEmpty ? RokuricsCopy.text("未记录具体原因", "No specific reason recorded") : rawSummary
         let limitedReason: String
         if reason.count > maxCharacters {
             limitedReason = String(reason.prefix(maxCharacters)) + "..."
@@ -188,7 +206,7 @@ enum TranscriptionFailureReasonFormatter {
             limitedReason = reason
         }
 
-        return "失败原因：\(limitedReason)"
+        return RokuricsCopy.text("失败原因：\(limitedReason)", "Reason: \(limitedReason)")
     }
 
     private static func diagnosticSummary(from lines: [String], maxLines: Int) -> String {

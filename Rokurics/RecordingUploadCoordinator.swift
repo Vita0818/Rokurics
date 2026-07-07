@@ -14,30 +14,606 @@ extension Notification.Name {
 
 @MainActor
 final class RecordingUploadCoordinator: ObservableObject {
+    typealias CanonicalAudioUploadPortFactory = (
+        _ settings: SecureMacConnectionSnapshot,
+        _ configuration: CanonicalAudioUploadRuntimeConfiguration
+    ) -> any CanonicalProductionUploadPort
+    typealias CanonicalTransferRuntimePortFactory = (
+        _ settings: SecureMacConnectionSnapshot,
+        _ configuration: CanonicalTransferRuntimeConfiguration
+    ) -> any CanonicalTransferRuntimePort
+
     @Published private(set) var activeStatuses: [String: RecordingUploadStatus] = [:]
     @Published private(set) var errorMessages: [String: String] = [:]
+    @Published private(set) var effectiveSyncStatusByObjectID: [CanonicalObjectID: CanonicalEffectiveSyncStatus] = [:]
+    @Published private(set) var displaySyncStateByObjectID: [CanonicalObjectID: CanonicalDisplaySyncState] = [:]
 
     private let uploadClient: RecordingUploadClientProtocol
     private let jobStore: RecordingUploadJobStore
     private let retryPolicy: RecordingUploadRetryPolicy
+    private let canonicalKernelSwitchResultProvider: (() -> CanonicalKernelSwitchResult)?
+    private let canonicalAudioUploadJobStore: CanonicalAudioUploadJobStore
+    private let canonicalAudioUploadExecutor: CanonicalAudioUploadRuntimeExecutor
+    private let canonicalAudioUploadPortFactory: CanonicalAudioUploadPortFactory
+    private let canonicalTransferRuntimePortFactory: CanonicalTransferRuntimePortFactory
+    private let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
+    private let canonicalChecksumRuntime: CanonicalChecksumRuntime
     private var uploadTasks: [String: Task<Void, Never>] = [:]
 
     init(
         uploadClient: RecordingUploadClientProtocol? = nil,
         jobStore: RecordingUploadJobStore? = nil,
-        retryPolicy: RecordingUploadRetryPolicy = .standard
+        retryPolicy: RecordingUploadRetryPolicy = .standard,
+        canonicalKernelSwitchResultProvider: (() -> CanonicalKernelSwitchResult)? = nil,
+        canonicalAudioUploadJobStore: CanonicalAudioUploadJobStore? = nil,
+        canonicalAudioUploadExecutor: CanonicalAudioUploadRuntimeExecutor = CanonicalAudioUploadRuntimeExecutor(),
+        canonicalAudioUploadPortFactory: CanonicalAudioUploadPortFactory? = nil,
+        canonicalTransferRuntimePortFactory: CanonicalTransferRuntimePortFactory? = nil,
+        canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
+        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil
     ) {
+        let resolvedJobStore = jobStore ?? RecordingUploadJobStore()
         self.uploadClient = uploadClient ?? RecordingUploadClient()
-        self.jobStore = jobStore ?? RecordingUploadJobStore()
+        self.jobStore = resolvedJobStore
         self.retryPolicy = retryPolicy
+        self.canonicalKernelSwitchResultProvider = canonicalKernelSwitchResultProvider
+        self.canonicalAudioUploadJobStore = canonicalAudioUploadJobStore
+            ?? CanonicalAudioUploadJobStore(persistenceURL: Self.defaultCanonicalAudioUploadLedgerURL(jobStore: resolvedJobStore))
+        self.canonicalAudioUploadExecutor = canonicalAudioUploadExecutor
+        self.canonicalStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
+        self.canonicalChecksumRuntime = canonicalChecksumRuntime ?? CanonicalChecksumRuntime()
+        self.canonicalAudioUploadPortFactory = canonicalAudioUploadPortFactory ?? { settings, configuration in
+            IPhoneCanonicalSecureAudioUploadPort(
+                settings: settings,
+                transport: SecureMacUploadClient(),
+                chunkSizePolicy: configuration.policy.chunkSize
+            )
+        }
+        self.canonicalTransferRuntimePortFactory = canonicalTransferRuntimePortFactory ?? { settings, configuration in
+            IPhoneCanonicalTransferAdapter(
+                settings: settings,
+                transport: SecureMacUploadClient(),
+                chunkSizePolicy: configuration.policy.chunkSize
+            )
+        }
+        preloadDisplaySnapshotsFromLedger()
     }
 
     func displayStatus(for metadata: RecordingMetadata) -> RecordingUploadStatus {
-        activeStatuses[metadata.id] ?? RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus)
+        Self.recordingUploadStatus(for: displaySyncState(for: metadata))
+    }
+
+    func displaySyncState(for metadata: RecordingMetadata) -> CanonicalDisplaySyncState {
+        let objectID = Self.canonicalAudioObjectID(recordingID: metadata.id)
+        if let cached = displaySyncStateByObjectID[objectID] {
+            return cached
+        }
+        return Self.conservativeDisplaySyncState(metadata: metadata, activeStatus: activeStatuses[metadata.id])
+    }
+
+    func refreshDisplaySnapshot(for metadata: RecordingMetadata) {
+        updateDisplaySnapshot(metadata: metadata, activeStatus: activeStatuses[metadata.id], job: try? jobStore.loadJob(recordingID: metadata.id))
     }
 
     func errorMessage(for metadata: RecordingMetadata) -> String? {
         errorMessages[metadata.id]
+    }
+
+    var canonicalStatusTruthReadPathAvailable: Bool {
+        true
+    }
+
+    func produceCanonicalStatusFact(_ fact: CanonicalStatusFact) async -> CanonicalStatusFactMergeResult {
+        let result = await canonicalStatusTruthRuntime.produce(fact)
+        await refreshEffectiveSyncStatusSnapshot(for: fact.objectID)
+        return result
+    }
+
+    func applyCanonicalStatusProjection(_ snapshot: CanonicalStatusProjectionSnapshot) {
+        updateDisplaySnapshot(
+            status: snapshot.effectiveStatus,
+            displayState: CanonicalEffectiveStatusUIProjection.project(snapshot.effectiveStatus),
+            objectID: snapshot.objectID
+        )
+    }
+
+    func effectiveSyncStatus(for objectID: CanonicalObjectID) -> CanonicalEffectiveSyncStatus? {
+        effectiveSyncStatusByObjectID[objectID]
+    }
+
+    func canonicalDisplaySyncState(for objectID: CanonicalObjectID) -> CanonicalDisplaySyncState? {
+        displaySyncStateByObjectID[objectID]
+    }
+
+    func hasActiveUploadInFlight() -> Bool {
+        if activeStatuses.values.contains(.uploading) {
+            return true
+        }
+        guard let jobs = try? jobStore.loadJobs() else {
+            return false
+        }
+        return jobs.contains(where: Self.isActiveUploadJob)
+    }
+
+    private var canonicalFullSyncDisplayBindingAllowed: Bool {
+        let result = canonicalKernelSwitchResultProvider?()
+            ?? CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
+        return result.effectiveMode == .canonicalFullSync && !result.isBlocked
+    }
+
+    private func canonicalAudioUploadRuntimePort(
+        settings: SecureMacConnectionSnapshot,
+        configuration: CanonicalAudioUploadRuntimeConfiguration,
+        switchResult: CanonicalKernelSwitchResult
+    ) -> any CanonicalProductionUploadPort {
+        let port = canonicalAudioUploadPortFactory(settings, configuration)
+        guard switchResult.effectiveMode == .canonicalFullSync,
+              !switchResult.isBlocked,
+              configuration.mode == .canonicalUploadWithLegacyFallback,
+              (port.isDryRunOnly || port is IPhoneCanonicalProductionUploadPort) else {
+            return port
+        }
+        return IPhoneCanonicalSecureAudioUploadPort(
+            settings: settings,
+            transport: SecureMacUploadClient(),
+            chunkSizePolicy: configuration.policy.chunkSize
+        )
+    }
+
+    private static func recordingUploadStatus(for displayState: CanonicalDisplaySyncState) -> RecordingUploadStatus {
+        switch displayState.kind {
+        case .completed, .peerVerified:
+            return .uploaded
+        case .uploading, .finalizing:
+            return .uploading
+        case .blocked, .conflict, .failed:
+            return .failed
+        case .hidden, .deferred, .uploadNeeded, .stale:
+            return .localOnly
+        }
+    }
+
+    private func refreshEffectiveSyncStatusSnapshot(for objectID: CanonicalObjectID) async {
+        guard let snapshot = await canonicalStatusTruthRuntime.projectionSnapshot(for: objectID) else {
+            return
+        }
+        updateDisplaySnapshot(
+            status: snapshot.effectiveStatus,
+            displayState: CanonicalEffectiveStatusUIProjection.project(snapshot.effectiveStatus),
+            objectID: objectID
+        )
+    }
+
+    private func updateDisplaySnapshot(
+        metadata: RecordingMetadata,
+        activeStatus: RecordingUploadStatus?,
+        job: RecordingUploadJob?
+    ) {
+        let provenSignature = Self.provenUploadSignature(from: job)
+        let localSignature = Self.localDisplaySignature(metadata: metadata, job: job)
+        let snapshot = LegacySyncStatusToCanonicalEffectiveStatusAdapter.iPhoneUploadSnapshot(
+            recordingID: metadata.id,
+            localAudioHash: localSignature.hash,
+            localAudioByteSize: localSignature.byteSize,
+            provenUploadHash: provenSignature.hash,
+            provenUploadByteSize: provenSignature.byteSize,
+            legacyStatus: activeStatus?.rawValue ?? metadata.uploadStatus,
+            legacyPhase: metadata.uploadPhase,
+            activeUploadInFlight: activeStatus == .uploading,
+            activeFailure: activeStatus == .failed,
+            viewRefresh: false
+        )
+        let status = LegacySyncStatusToCanonicalEffectiveStatusAdapter.effectiveStatus(for: snapshot)
+        let displayState = canonicalFullSyncDisplayBindingAllowed
+            ? CanonicalEffectiveStatusUIProjection.project(status)
+            : LegacySyncStatusToCanonicalEffectiveStatusAdapter.displayState(for: status)
+        let objectID = snapshot.objectID
+        updateDisplaySnapshot(status: displayState.effectiveStatus, displayState: displayState, objectID: objectID)
+    }
+
+    private func setActiveStatus(
+        _ status: RecordingUploadStatus?,
+        for metadata: RecordingMetadata,
+        job: RecordingUploadJob? = nil
+    ) {
+        updateActiveStatus(status, for: metadata.id)
+        updateDisplaySnapshot(metadata: metadata, activeStatus: status, job: job)
+    }
+
+    private func publishDecisionDisplayState(
+        _ decision: RecordingAudioUploadDecision,
+        metadata: RecordingMetadata,
+        recordingManager: RecordingManager? = nil,
+        peerAudioState: RecordingPeerAudioState,
+        ledgerState: RecordingUploadLedgerState
+    ) {
+        let objectID = Self.canonicalAudioObjectID(recordingID: metadata.id)
+        let displayState = Self.canonicalDisplayState(
+            for: decision,
+            objectID: objectID,
+            peerAudioState: peerAudioState,
+            ledgerState: ledgerState
+        )
+        updateDisplaySnapshot(status: displayState.effectiveStatus, displayState: displayState, objectID: objectID)
+
+        switch decision.displayState {
+        case .preparing, .uploading, .finalizing:
+            updateActiveStatus(.uploading, for: metadata.id)
+            updateErrorMessage(nil, for: metadata.id)
+        case .conflict, .fatalFailed, .failed:
+            updateActiveStatus(.failed, for: metadata.id)
+            updateErrorMessage(decision.reasonCode, for: metadata.id)
+        case .waiting, .retryPending, .manualRetryAvailable, .hidden:
+            updateActiveStatus(nil, for: metadata.id)
+            updateErrorMessage(decision.reasonCode, for: metadata.id)
+        case .uploaded:
+            updateActiveStatus(nil, for: metadata.id)
+            updateErrorMessage(nil, for: metadata.id)
+        }
+
+        updateRecordingProgressForDecision(
+            decision,
+            metadata: metadata,
+            recordingManager: recordingManager
+        )
+    }
+
+    private func updateRecordingProgressForDecision(
+        _ decision: RecordingAudioUploadDecision,
+        metadata: RecordingMetadata,
+        recordingManager: RecordingManager?
+    ) {
+        guard let recordingManager else {
+            return
+        }
+
+        let totalBytes = metadata.fileSize > 0 ? metadata.fileSize : nil
+        switch decision.displayState {
+        case .preparing:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: metadata.uploadProgressFraction,
+                confirmedBytes: metadata.uploadProgressConfirmedBytes,
+                totalBytes: metadata.uploadProgressTotalBytes ?? totalBytes,
+                phase: "preparing",
+                description: "准备上传"
+            )
+        case .uploading:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "uploading",
+                description: "上传进行中"
+            )
+        case .finalizing:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "finalizing",
+                description: "正在确认上传"
+            )
+        case .waiting:
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "deferred",
+                description: "等待对端音频状态"
+            )
+        case .retryPending, .manualRetryAvailable:
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "retryPending",
+                description: "等待自动重试"
+            )
+        case .hidden:
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "deferred",
+                description: decision.reasonCode
+            )
+        case .conflict:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "conflict",
+                description: "上传冲突"
+            )
+        case .fatalFailed:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "fatalFailed",
+                description: decision.reasonCode
+            )
+        case .failed:
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: nil,
+                confirmedBytes: nil,
+                totalBytes: totalBytes,
+                phase: "failed",
+                description: decision.reasonCode
+            )
+        case .uploaded:
+            break
+        }
+    }
+
+    private static func canonicalDisplayState(
+        for decision: RecordingAudioUploadDecision,
+        objectID: CanonicalObjectID,
+        peerAudioState: RecordingPeerAudioState,
+        ledgerState: RecordingUploadLedgerState
+    ) -> CanonicalDisplaySyncState {
+        let status = canonicalEffectiveStatus(
+            for: decision,
+            objectID: objectID,
+            peerAudioState: peerAudioState,
+            ledgerState: ledgerState
+        )
+        return CanonicalEffectiveStatusUIProjection.project(status)
+    }
+
+    private static func canonicalEffectiveStatus(
+        for decision: RecordingAudioUploadDecision,
+        objectID: CanonicalObjectID,
+        peerAudioState: RecordingPeerAudioState,
+        ledgerState: RecordingUploadLedgerState
+    ) -> CanonicalEffectiveSyncStatus {
+        let observedAt = CanonicalTimestamp(Date())
+        let proof = canonicalProof(
+            for: decision,
+            objectID: objectID,
+            peerAudioState: peerAudioState,
+            ledgerState: ledgerState,
+            observedAt: observedAt
+        )
+        let phase: CanonicalStatusPhase
+        let displayState: CanonicalStatusDisplayState
+        let blocker: CanonicalStatusBlocker?
+        let canDisplayAsComplete: Bool
+        let canSuppressLegacyDuplicate: Bool
+
+        switch decision.displayState {
+        case .preparing, .uploading:
+            phase = .uploading
+            displayState = .uploading
+            blocker = nil
+            canDisplayAsComplete = false
+            canSuppressLegacyDuplicate = false
+        case .finalizing:
+            phase = .finalizing
+            displayState = .finalizing
+            blocker = nil
+            canDisplayAsComplete = false
+            canSuppressLegacyDuplicate = false
+        case .uploaded:
+            phase = proof.map { completionPhase(for: $0) } ?? .deferred
+            displayState = proof == nil ? .waiting : .complete
+            blocker = proof == nil ? .completedLedgerRejectedAsPeerProof : nil
+            canDisplayAsComplete = proof != nil
+            canSuppressLegacyDuplicate = proof != nil
+        case .conflict:
+            phase = .conflict
+            displayState = .conflict
+            blocker = .existingDifferentAudioConflict
+            canDisplayAsComplete = false
+            canSuppressLegacyDuplicate = false
+        case .fatalFailed, .failed:
+            phase = .blocked
+            displayState = .blocked
+            blocker = .viewRefreshCannotCreateUploadJob
+            canDisplayAsComplete = false
+            canSuppressLegacyDuplicate = false
+        case .waiting, .retryPending, .manualRetryAvailable, .hidden:
+            phase = .deferred
+            displayState = .waiting
+            if decision.reasonCode.contains("retry") {
+                blocker = .retryDrainerRequiresExistingEligibleJob
+            } else if decision.reasonCode == "trigger_cannot_create_upload" || decision.reasonCode == "view_refresh_only" {
+                blocker = .viewRefreshCannotCreateUploadJob
+            } else {
+                blocker = .peerProofUnavailable
+            }
+            canDisplayAsComplete = false
+            canSuppressLegacyDuplicate = false
+        }
+
+        return CanonicalEffectiveSyncStatus(
+            objectID: objectID,
+            domain: .audioUpload,
+            phase: phase,
+            displayState: displayState,
+            proof: proof,
+            canDisplayAsComplete: canDisplayAsComplete,
+            canCreateUploadJob: decision.shouldCreateUploadJob,
+            canSuppressLegacyDuplicate: canSuppressLegacyDuplicate,
+            blocker: blocker
+        )
+    }
+
+    private static func canonicalProof(
+        for decision: RecordingAudioUploadDecision,
+        objectID: CanonicalObjectID,
+        peerAudioState: RecordingPeerAudioState,
+        ledgerState: RecordingUploadLedgerState,
+        observedAt: CanonicalTimestamp
+    ) -> CanonicalStatusProof? {
+        guard decision.displayState == .uploaded else {
+            return nil
+        }
+        if case .available(let signature) = peerAudioState,
+           let hash = signature.normalizedSHA256,
+           let byteSize = signature.size {
+            return CanonicalStatusProof(
+                kind: .sameHashAndByteSize,
+                objectID: objectID,
+                hash: CanonicalHash(hash),
+                byteSize: byteSize,
+                observedAt: observedAt
+            )
+        }
+        return nil
+    }
+
+    private static func completionPhase(for proof: CanonicalStatusProof) -> CanonicalStatusPhase {
+        switch proof.kind {
+        case .sameHashAndByteSize, .peerHashSize, .peerInventoryHashSizeMatch:
+            return .peerVerified
+        case .finalizeProof, .dualAckProofChain:
+            return .completed
+        default:
+            return .deferred
+        }
+    }
+
+    private func preloadDisplaySnapshotsFromLedger() {
+        guard let jobs = try? jobStore.loadJobs() else {
+            return
+        }
+        for job in jobs {
+            let provenSignature = Self.provenUploadSignature(from: job)
+            let status = Self.effectiveStatusFromLedgerSnapshot(
+                recordingID: job.recordingID,
+                job: job,
+                provenHash: provenSignature.hash,
+                provenByteSize: provenSignature.byteSize
+            )
+            let displayState = CanonicalEffectiveStatusUIProjection.project(status)
+            updateDisplaySnapshot(status: displayState.effectiveStatus, displayState: displayState, objectID: status.objectID)
+        }
+    }
+
+    private func updateDisplaySnapshot(
+        status: CanonicalEffectiveSyncStatus,
+        displayState: CanonicalDisplaySyncState,
+        objectID: CanonicalObjectID
+    ) {
+        if effectiveSyncStatusByObjectID[objectID] != status {
+            effectiveSyncStatusByObjectID[objectID] = status
+        }
+        if displaySyncStateByObjectID[objectID] != displayState {
+            displaySyncStateByObjectID[objectID] = displayState
+        }
+    }
+
+    private func updateActiveStatus(_ status: RecordingUploadStatus?, for recordingID: String) {
+        guard activeStatuses[recordingID] != status else {
+            return
+        }
+        activeStatuses[recordingID] = status
+    }
+
+    private func updateErrorMessage(_ message: String?, for recordingID: String) {
+        guard errorMessages[recordingID] != message else {
+            return
+        }
+        errorMessages[recordingID] = message
+    }
+
+    private static func conservativeDisplaySyncState(
+        metadata: RecordingMetadata,
+        activeStatus: RecordingUploadStatus?
+    ) -> CanonicalDisplaySyncState {
+        let objectID = canonicalAudioObjectID(recordingID: metadata.id)
+        let proof = CanonicalStatusProof(
+            kind: activeStatus == .uploading ? .metadataOnly : .peerUnknown,
+            objectID: objectID,
+            byteSize: metadata.fileSize > 0 ? metadata.fileSize : nil,
+            observedAt: CanonicalTimestamp(Date())
+        )
+        let phase: CanonicalStatusPhase
+        let displayState: CanonicalStatusDisplayState
+        let blocker: CanonicalStatusBlocker?
+        switch activeStatus ?? RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) {
+        case .uploading:
+            phase = .uploading
+            displayState = .uploading
+            blocker = nil
+        case .failed:
+            phase = .blocked
+            displayState = .blocked
+            blocker = .viewRefreshCannotCreateUploadJob
+        case .uploaded, .localOnly:
+            phase = .peerUnknown
+            displayState = .waiting
+            blocker = .peerProofUnavailable
+        }
+
+        let status = CanonicalEffectiveSyncStatus(
+            objectID: objectID,
+            domain: .audioUpload,
+            phase: phase,
+            displayState: displayState,
+            proof: proof,
+            canDisplayAsComplete: false,
+            canCreateUploadJob: false,
+            canSuppressLegacyDuplicate: false,
+            blocker: blocker
+        )
+        return CanonicalEffectiveStatusUIProjection.project(status)
+    }
+
+    private static func effectiveStatusFromLedgerSnapshot(
+        recordingID: String,
+        job: RecordingUploadJob,
+        provenHash: String?,
+        provenByteSize: Int64?
+    ) -> CanonicalEffectiveSyncStatus {
+        let snapshot = LegacySyncStatusToCanonicalEffectiveStatusAdapter.iPhoneUploadSnapshot(
+            recordingID: recordingID,
+            provenUploadHash: provenHash,
+            provenUploadByteSize: provenByteSize,
+            legacyStatus: job.overallState == .succeeded ? RecordingUploadStatus.uploaded.rawValue : nil,
+            legacyPhase: job.resumableState?.rawValue,
+            activeUploadInFlight: job.overallState == .inProgress,
+            activeFailure: job.overallState == .retryableFailed || job.overallState == .fatalFailed,
+            viewRefresh: false
+        )
+        return LegacySyncStatusToCanonicalEffectiveStatusAdapter.effectiveStatus(for: snapshot)
+    }
+
+    private static func provenUploadSignature(from job: RecordingUploadJob?) -> (hash: String?, byteSize: Int64?) {
+        guard let job,
+              (job.overallState == .succeeded || job.audioStage == .succeeded),
+              let hash = job.audioTotalSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !hash.isEmpty,
+              let byteSize = job.audioTotalBytes,
+              byteSize > 0 else {
+            return (nil, nil)
+        }
+        return (hash, byteSize)
+    }
+
+    private static func localDisplaySignature(
+        metadata: RecordingMetadata,
+        job: RecordingUploadJob?
+    ) -> (hash: String?, byteSize: Int64?) {
+        let byteSize = metadata.fileSize > 0 ? metadata.fileSize : job?.audioTotalBytes
+        let hash = job?.audioTotalSHA256?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (hash?.isEmpty == false ? hash : nil, byteSize)
     }
 
     func upload(
@@ -58,36 +634,9 @@ final class RecordingUploadCoordinator: ObservableObject {
             eventResult: "begin",
             uploadStatus: metadata.uploadStatus
         )
-        let transferState: RecordingTransferJobState = uploadTasks[metadata.id] == nil ? .none : .inFlight
-        let ledgerState = uploadLedgerState(try? jobStore.loadJob(recordingID: metadata.id))
-        let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
-            localAudioState: localAudioDecisionState(for: metadata),
-            peerAudioState: peerAudioState,
-            transferJobState: transferState,
-            ledgerState: ledgerState,
-            triggerSource: triggerSource,
-            syncRunID: syncRunID,
-            objectID: Self.audioObjectID(recordingID: metadata.id),
-            recordingID: metadata.id
-        )
-        recordDecision(
-            decision,
-            metadata: metadata,
-            traceID: resolvedTraceID,
-            triggerSource: triggerSource,
-            peerAudioState: peerAudioState,
-            transferJobState: transferState,
-            ledgerState: ledgerState,
-            syncRunID: syncRunID
-        )
-        guard decision.shouldCreateUploadJob else {
-            if decision.kind == .fail {
-                activeStatuses[metadata.id] = .failed
-                errorMessages[metadata.id] = decision.reasonCode
-            }
-            return
-        }
         guard uploadTasks[metadata.id] == nil else {
+            setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
+            updateErrorMessage(nil, for: metadata.id)
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "uploadCoordinatorSkippedWithReason",
@@ -100,18 +649,6 @@ final class RecordingUploadCoordinator: ObservableObject {
             return
         }
 
-        if settings.isPaired {
-            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploading)
-            try? recordingManager.updateUploadProgress(
-                recordingID: metadata.id,
-                fraction: metadata.uploadProgressFraction,
-                confirmedBytes: metadata.uploadProgressConfirmedBytes,
-                totalBytes: metadata.uploadProgressTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
-                phase: "preparing",
-                description: "准备上传"
-            )
-        }
-
         uploadTasks[metadata.id] = Task { [weak self, weak recordingManager] in
             guard let self, let recordingManager else {
                 return
@@ -122,7 +659,11 @@ final class RecordingUploadCoordinator: ObservableObject {
                     metadata: metadata,
                     settings: settings,
                     recordingManager: recordingManager,
-                    traceID: resolvedTraceID
+                    traceID: resolvedTraceID,
+                    triggerSource: triggerSource,
+                    peerAudioState: peerAudioState,
+                    transferJobState: .none,
+                    syncRunID: syncRunID
                 )
             }
             self.uploadTasks[metadata.id] = nil
@@ -165,6 +706,27 @@ final class RecordingUploadCoordinator: ObservableObject {
         transferJobState providedTransferJobState: RecordingTransferJobState,
         syncRunID: String?
     ) async -> RecordingUploadStatus {
+        let perfStartedAt = Date()
+        var perfStages = CanonicalPerfLog.StageDurations.empty
+        ConnectionDiagnosticsStore.shared.recordPerfLog(
+            CanonicalPerfLog.started(operation: .upload),
+            deviceID: settings.deviceID,
+            syncRunID: syncRunID
+        )
+        defer {
+            let totalMs = CanonicalPerfLog.elapsedMs(since: perfStartedAt)
+            for record in CanonicalPerfLog.finishedRecords(
+                operation: .upload,
+                totalMs: totalMs,
+                stages: perfStages
+            ) {
+                ConnectionDiagnosticsStore.shared.recordPerfLog(
+                    record,
+                    deviceID: settings.deviceID,
+                    syncRunID: syncRunID
+                )
+            }
+        }
         let recordingIDPrefix = String(metadata.id.prefix(12))
         print("[RokuricsRecordingUpload] coordinator called recordingIDPrefix=\(recordingIDPrefix), localStatus=\(metadata.uploadStatus)")
         UploadFlightRecorder.record(
@@ -187,6 +749,8 @@ final class RecordingUploadCoordinator: ObservableObject {
         )
 
         if activeStatuses[metadata.id] == .uploading {
+            setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
+            updateErrorMessage(nil, for: metadata.id)
             print("[RokuricsRecordingUpload] coordinator skipped active upload recordingIDPrefix=\(recordingIDPrefix)")
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -202,8 +766,23 @@ final class RecordingUploadCoordinator: ObservableObject {
 
         let existingLedgerJob = try? jobStore.loadJob(recordingID: metadata.id)
         let ledgerDecisionState = uploadLedgerState(existingLedgerJob)
+        let localAudioDecision = await localAudioDecisionState(for: metadata, traceID: traceID)
+        let localAudioState = localAudioDecision.state
+        perfStages.set(.hashMs, durationMs: localAudioDecision.hashDurationMs)
+        if localAudioDecision.hashDurationMs > 0 {
+            ConnectionDiagnosticsStore.shared.recordPerfLog(
+                CanonicalPerfLog.subphaseMeasured(
+                    operation: .upload,
+                    subphase: .hashMs,
+                    durationMs: localAudioDecision.hashDurationMs,
+                    result: "localAudioSignature"
+                ),
+                deviceID: settings.deviceID,
+                syncRunID: syncRunID
+            )
+        }
         let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
-            localAudioState: localAudioDecisionState(for: metadata),
+            localAudioState: localAudioState,
             peerAudioState: peerAudioState,
             transferJobState: providedTransferJobState,
             ledgerState: ledgerDecisionState,
@@ -217,43 +796,35 @@ final class RecordingUploadCoordinator: ObservableObject {
             metadata: metadata,
             traceID: traceID,
             triggerSource: triggerSource,
+            localAudioState: localAudioState,
             peerAudioState: peerAudioState,
             transferJobState: providedTransferJobState,
             ledgerState: ledgerDecisionState,
             syncRunID: syncRunID
         )
         guard decision.shouldCreateUploadJob else {
-            if decision.kind == .fail {
-                activeStatuses[metadata.id] = .failed
-                errorMessages[metadata.id] = decision.reasonCode
-                try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
-                if case .conflict = decision.displayState {
-                    try? recordingManager.updateUploadProgress(
-                        recordingID: metadata.id,
-                        fraction: nil,
-                        confirmedBytes: nil,
-                        totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
-                        phase: "conflict",
-                        description: "上传冲突"
-                    )
-                } else if case .fatalFailed = decision.displayState {
-                    try? recordingManager.updateUploadProgress(
-                        recordingID: metadata.id,
-                        fraction: nil,
-                        confirmedBytes: nil,
-                        totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
-                        phase: "fatalFailed",
-                        description: decision.reasonCode
-                    )
-                }
+            publishDecisionDisplayState(
+                decision,
+                metadata: metadata,
+                recordingManager: recordingManager,
+                peerAudioState: peerAudioState,
+                ledgerState: ledgerDecisionState
+            )
+            switch decision.displayState {
+            case .uploaded:
+                return .uploaded
+            case .preparing, .uploading, .finalizing, .waiting, .retryPending:
+                return .uploading
+            case .conflict, .fatalFailed, .failed:
                 return .failed
+            case .hidden, .manualRetryAvailable:
+                return .localOnly
             }
-            return decision.displayState == .uploaded ? .uploaded : .uploading
         }
 
         guard settings.isPaired else {
-            activeStatuses[metadata.id] = .failed
-            errorMessages[metadata.id] = RecordingUploadError.notPaired.localizedDescription
+            setActiveStatus(.failed, for: metadata)
+            updateErrorMessage(RecordingUploadError.notPaired.localizedDescription, for: metadata.id)
             print("[RokuricsRecordingUpload] coordinator rejected unpaired recordingIDPrefix=\(recordingIDPrefix)")
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -261,7 +832,7 @@ final class RecordingUploadCoordinator: ObservableObject {
                 traceID: traceID,
                 recordingID: metadata.id,
                 eventResult: "fail",
-                reasonCode: "not_paired",
+                reasonCode: "mac_not_paired",
                 uploadStatus: metadata.uploadStatus,
                 safeErrorMessage: RecordingUploadError.notPaired.localizedDescription
             )
@@ -283,8 +854,8 @@ final class RecordingUploadCoordinator: ObservableObject {
                 jobID: existingJob.id
             )
             if existingJob.overallState == .fatalFailed {
-                activeStatuses[metadata.id] = .failed
-                errorMessages[metadata.id] = existingJob.lastErrorMessage ?? "上传已失败，需要先处理冲突。"
+                setActiveStatus(.failed, for: metadata, job: existingJob)
+                updateErrorMessage(existingJob.lastErrorMessage ?? "上传已失败，需要先处理冲突。", for: metadata.id)
                 try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
                 print("[RokuricsRecordingUpload] coordinator rejected fatal ledger recordingIDPrefix=\(recordingIDPrefix), errorCode=\(existingJob.lastErrorCode ?? "unknown")")
                 UploadFlightRecorder.record(
@@ -316,8 +887,8 @@ final class RecordingUploadCoordinator: ObservableObject {
                 )
             }
         } catch {
-            activeStatuses[metadata.id] = .failed
-            errorMessages[metadata.id] = "上传任务账本读取失败：\(error.localizedDescription)"
+            setActiveStatus(.failed, for: metadata)
+            updateErrorMessage("上传任务账本读取失败：\(error.localizedDescription)", for: metadata.id)
             print("[RokuricsRecordingUpload] upload ledger failed recordingIDPrefix=\(recordingIDPrefix), error=\(error.localizedDescription)")
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -333,8 +904,52 @@ final class RecordingUploadCoordinator: ObservableObject {
             return .failed
         }
 
-        activeStatuses[metadata.id] = .uploading
-        errorMessages[metadata.id] = nil
+        if let canonicalStatus = await uploadViaCanonicalAudioRuntimeIfEnabled(
+            metadata: metadata,
+            settings: settings,
+            recordingManager: recordingManager,
+            traceID: traceID,
+            triggerSource: triggerSource,
+            localAudioState: localAudioState,
+            peerAudioState: peerAudioState,
+            ledgerState: uploadLedgerState(try? jobStore.loadJob(recordingID: metadata.id)),
+            syncRunID: syncRunID
+        ) {
+            return canonicalStatus
+        }
+
+        do {
+            let fallbackJob = try jobStore.ensureJob(for: metadata, settings: settings, now: Date())
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "uploadCoordinatorFallbackLedgerReady",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: metadata.uploadStatus,
+                ledgerState: "\(fallbackJob.overallState.rawValue)/\(fallbackJob.metadataStage.rawValue)/\(fallbackJob.audioStage.rawValue)",
+                jobID: fallbackJob.id
+            )
+        } catch {
+            setActiveStatus(.failed, for: metadata)
+            updateErrorMessage("创建上传任务失败：\(error.localizedDescription)", for: metadata.id)
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "uploadCoordinatorFallbackEnsureJobFailed",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "fail",
+                reasonCode: "fallback_ensure_job_failed",
+                uploadStatus: metadata.uploadStatus,
+                errorDomain: "RecordingUploadJobStore",
+                safeErrorMessage: error.localizedDescription
+            )
+            return .failed
+        }
+
+        setActiveStatus(.uploading, for: metadata)
+        updateErrorMessage(nil, for: metadata.id)
 
         do {
             let audioURL = try jobStore.audioURL(for: metadata)
@@ -414,13 +1029,23 @@ final class RecordingUploadCoordinator: ObservableObject {
                 ledgerState: uploadJob.overallState.rawValue,
                 jobID: uploadJob.id
             )
+            var resumeContext = uploadJob.resumeContext
+            if let localSignature = localAudioState.signature {
+                resumeContext.audioTotalSHA256 = localSignature.normalizedSHA256
+                resumeContext.audioTotalBytes = localSignature.size ?? resumeContext.audioTotalBytes
+            }
             let result = try await uploadClient.uploadRecording(
                 metadata: metadata.updatingUploadStatus(.uploading),
                 settings: settings,
                 progress: progress,
-                resumeContext: uploadJob.resumeContext
+                resumeContext: resumeContext
             )
-            let completedJob = try jobStore.markSucceeded(recordingID: metadata.id, result: result, now: Date())
+            let completedJob = try markUploadSucceeded(
+                recordingID: metadata.id,
+                result: result,
+                now: Date(),
+                proofSignature: localAudioState.signature
+            )
             try recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploaded)
             print("[RokuricsRecordingUpload] upload attempt completed recordingIDPrefix=\(recordingIDPrefix), metadataDisposition=\(result.metadataDisposition ?? "unknown"), audioDisposition=\(result.audioDisposition ?? "unknown")")
             UploadFlightRecorder.record(
@@ -454,11 +1079,20 @@ final class RecordingUploadCoordinator: ObservableObject {
                 phase: "completed",
                 description: "上传完成"
             )
-            activeStatuses[metadata.id] = nil
-            errorMessages[metadata.id] = nil
+            _ = await produceLocalUploadSucceededFactIfPresent(
+                recordingID: metadata.id,
+                job: completedJob
+            )
+            let latestMetadata = latestUploadedMetadata(
+                recordingID: metadata.id,
+                fallback: metadata,
+                recordingManager: recordingManager
+            )
+            setActiveStatus(nil, for: latestMetadata, job: completedJob)
+            updateErrorMessage(nil, for: metadata.id)
             return .uploaded
         } catch is CancellationError {
-            _ = try? jobStore.markRetryableFailure(
+            let failedJob = try? jobStore.markRetryableFailure(
                 recordingID: metadata.id,
                 classification: RecordingUploadFailureClassification(
                     code: "upload_cancelled",
@@ -469,7 +1103,15 @@ final class RecordingUploadCoordinator: ObservableObject {
                 now: Date()
             )
             try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
-            activeStatuses[metadata.id] = nil
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: failedJob?.currentProgressFraction,
+                confirmedBytes: failedJob?.audioConfirmedBytes,
+                totalBytes: failedJob?.audioTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
+                phase: "retryPending",
+                description: "上传已中断，可重试。"
+            )
+            setActiveStatus(nil, for: metadata, job: failedJob)
             print("[RokuricsRecordingUpload] upload cancelled recordingIDPrefix=\(recordingIDPrefix)")
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -482,8 +1124,25 @@ final class RecordingUploadCoordinator: ObservableObject {
             )
             return .failed
         } catch {
+            if let storeError = error as? RecordingUploadJobStoreError,
+               case let .jobNotFound(missingRecordingID) = storeError {
+                let lastReadError = jobStore.lastReadError ?? "none"
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "uploadCoordinatorJobNotFoundDiagnostic",
+                    traceID: traceID,
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: "job_not_found_on_fallback",
+                    uploadStatus: RecordingUploadStatus.failed.rawValue,
+                    ledgerState: "ledgerFileExists=\(jobStore.ledgerFileExists)",
+                    errorDomain: "RecordingUploadJobStore",
+                    errorCode: "jobNotFound",
+                    safeErrorMessage: "missingRecordingID=\(String(missingRecordingID.prefix(12)));lastReadError=\(String(lastReadError.prefix(96)))"
+                )
+            }
             let classification = RecordingUploadFailureClassification.classify(error)
-            _ = try? jobStore.markFailure(
+            let failedJob = try? jobStore.markFailure(
                 recordingID: metadata.id,
                 classification: classification,
                 retryPolicy: retryPolicy,
@@ -500,18 +1159,18 @@ final class RecordingUploadCoordinator: ObservableObject {
                 failedDescription = classification.message
             } else {
                 failedPhase = "retryPending"
-                failedDescription = "等待自动重试"
+                failedDescription = "传输失败，可重试"
             }
             try? recordingManager.updateUploadProgress(
                 recordingID: metadata.id,
-                fraction: nil,
-                confirmedBytes: nil,
-                totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+                fraction: failedJob?.currentProgressFraction,
+                confirmedBytes: failedJob?.audioConfirmedBytes,
+                totalBytes: failedJob?.audioTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
                 phase: failedPhase,
                 description: failedDescription
             )
-            activeStatuses[metadata.id] = .failed
-            errorMessages[metadata.id] = error.localizedDescription
+            setActiveStatus(.failed, for: metadata, job: failedJob)
+            updateErrorMessage(error.localizedDescription, for: metadata.id)
             print("[RokuricsRecordingUpload] upload attempt failed recordingIDPrefix=\(recordingIDPrefix), errorCode=\(classification.code)")
             if classification.code.contains("conflict") {
                 UploadFlightRecorder.record(
@@ -570,6 +1229,863 @@ final class RecordingUploadCoordinator: ObservableObject {
             )
             return .failed
         }
+    }
+
+    private func markUploadSucceeded(
+        recordingID: String,
+        result: RecordingUploadResult,
+        now: Date,
+        proofSignature: RecordingAudioSignature?
+    ) throws -> RecordingUploadJob {
+        let succeededJob = try jobStore.markSucceeded(recordingID: recordingID, result: result, now: now)
+        guard let proofSignature else {
+            return succeededJob
+        }
+
+        return (try? jobStore.recordCompletedAudioProof(
+            recordingID: recordingID,
+            signature: proofSignature,
+            now: now
+        )) ?? succeededJob
+    }
+
+    private func latestUploadedMetadata(
+        recordingID: String,
+        fallback metadata: RecordingMetadata,
+        recordingManager: RecordingManager
+    ) -> RecordingMetadata {
+        recordingManager.recordings.first(where: { $0.id == recordingID }) ?? metadata.updatingUploadStatus(.uploaded)
+    }
+
+    private func uploadViaCanonicalAudioRuntimeIfEnabled(
+        metadata: RecordingMetadata,
+        settings: SecureMacConnectionSnapshot,
+        recordingManager: RecordingManager,
+        traceID: String,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        localAudioState: RecordingLocalAudioState,
+        peerAudioState: RecordingPeerAudioState,
+        ledgerState: RecordingUploadLedgerState,
+        syncRunID: String?
+    ) async -> RecordingUploadStatus? {
+        let switchResult = canonicalKernelSwitchResultProvider?()
+            ?? CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
+        if let transferStatus = await uploadViaCanonicalTransferRuntimeIfEnabled(
+            switchResult: switchResult,
+            metadata: metadata,
+            settings: settings,
+            recordingManager: recordingManager,
+            traceID: traceID,
+            triggerSource: triggerSource,
+            localAudioState: localAudioState,
+            syncRunID: syncRunID
+        ) {
+            return transferStatus
+        }
+        let configuration = switchResult.effectiveConfiguration.audioUploadRuntimeConfiguration
+        guard configuration.mode == .canonicalUploadWithLegacyFallback
+                || configuration.mode == .testTransportUpload else {
+            return nil
+        }
+        guard !switchResult.isBlocked else {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: "kernelSwitchBlocked"
+            )
+            return nil
+        }
+        let productionPortInjection = IPhoneCanonicalProductionPortFactory.make(
+            result: switchResult,
+            productionRootURL: recordingManager.studyLibraryStore.libraryRootURL
+        )
+        guard productionPortInjection.audioUploadExecutorEnabled else {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: productionPortInjection.diagnosticsSummary
+            )
+            return nil
+        }
+
+        let source: IPhoneCanonicalAudioUploadFileSource
+        do {
+            source = try await IPhoneCanonicalAudioUploadFileSource(
+                metadata: metadata,
+                audioFileStore: recordingManager.audioFileStore,
+                preferredChunkSize: configuration.policy.chunkSize,
+                precomputedSignature: localAudioState.signature
+            )
+        } catch {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: "sourceUnavailable"
+            )
+            return nil
+        }
+
+        let trigger = Self.canonicalAudioUploadTrigger(from: triggerSource)
+        let existingRetryRecord = await canonicalAudioUploadJobStore.record(for: metadata.id)
+        let retryTruth = CanonicalAudioUploadRetryTruth(
+            hasExistingEligibleRetry: await canonicalAudioUploadJobStore.hasEligibleRetry(objectID: metadata.id, now: Date()),
+            retryPending: existingRetryRecord != nil,
+            canFreshCreateJob: triggerSource.canCreateUploadJob
+        )
+        let candidate = CanonicalAudioUploadCutoverCandidate.evaluate(
+            objectID: metadata.id,
+            localTruth: CanonicalAudioUploadLocalTruth.available(
+                hash: source.contentHash,
+                byteSize: source.byteSize,
+                logicalPathToken: metadata.relativeAudioPath,
+                sourceDeviceID: settings.deviceID
+            ),
+            peerTruth: Self.canonicalPeerAudioTruth(from: peerAudioState),
+            ledgerTruth: Self.canonicalLedgerTruth(from: ledgerState),
+            retryTruth: retryTruth,
+            trigger: trigger
+        )
+        let stateTruth = CanonicalUploadStateTruth.fromCutoverCandidate(
+            candidate,
+            canonicalJobState: existingRetryRecord?.state,
+            canonicalJobAttemptCount: existingRetryRecord?.attemptCount ?? 0
+        )
+        let stateReport = stateTruth.reconcile()
+        for diagnostic in stateReport.diagnostics.prefix(16) {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: diagnostic.kind.rawValue,
+                metadata: metadata,
+                traceID: traceID,
+                result: diagnostic.diagnosticsSummary
+            )
+        }
+        let statusProjection = CanonicalUploadStatusProjectionResult(report: stateReport)
+        for diagnostic in statusProjection.diagnostics.suffix(1) {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: diagnostic.kind.rawValue,
+                metadata: metadata,
+                traceID: traceID,
+                result: diagnostic.diagnosticsSummary
+            )
+        }
+        let port = canonicalAudioUploadRuntimePort(
+            settings: settings,
+            configuration: configuration,
+            switchResult: switchResult
+        )
+        let cutoverExecutor = IPhoneAudioUploadCutoverExecutor(
+            source: source,
+            uploadPort: port,
+            jobStore: canonicalAudioUploadJobStore,
+            runtimeExecutor: canonicalAudioUploadExecutor
+        )
+        let cutoverResult = await cutoverExecutor.execute(
+            CanonicalAudioUploadCutoverExecutionRequest(
+                candidate: candidate,
+                configuration: configuration,
+                syncRunID: syncRunID,
+                nodeRole: .iPhone,
+                legacyFallbackAvailable: configuration.policy.legacyFallbackEnabled
+            )
+        )
+        let result = cutoverResult.runtimeResult ?? CanonicalAudioUploadRuntimeResult(
+            mode: configuration.mode,
+            outcome: cutoverResult.outcome,
+            objectID: candidate.objectID,
+            legacyFallbackReason: cutoverResult.failure?.reason,
+            diagnostics: cutoverResult.diagnostics
+        )
+        for diagnostic in result.diagnostics.prefix(64) {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: diagnostic.kind.rawValue,
+                metadata: metadata,
+                traceID: traceID,
+                result: diagnostic.diagnosticsSummary
+            )
+        }
+        if cutoverResult.failure?.kind == .securityFailure {
+            return await failCanonicalAudioUpload(
+                metadata: metadata,
+                recordingManager: recordingManager,
+                traceID: traceID,
+                result: result,
+                phase: "fatalFailed",
+                description: cutoverResult.failure?.reason ?? "canonical_audio_upload_security_failure"
+            )
+        }
+        if Self.shouldUseLegacyUploadForCanonicalDisabledPort(result) {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result.legacyFallbackReason ?? "iphoneProductionUploadDisabled"
+            )
+            return nil
+        }
+
+        switch result.outcome {
+        case .legacyFallback:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result.legacyFallbackReason ?? "legacyFallback"
+            )
+            return nil
+        case .uploaded, .noOp:
+            if result.outcome == .uploaded, !cutoverResult.postcondition.finalizeProofAccepted {
+                recordCanonicalAudioUploadRuntimeEvent(
+                    stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: result,
+                    reason: "canonical_audio_upload_finalize_proof_missing"
+                )
+                return nil
+            }
+            if result.outcome == .noOp, !cutoverResult.postcondition.peerSameHashAndByteSizeProofAccepted {
+                recordCanonicalAudioUploadRuntimeEvent(
+                    stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: result,
+                    reason: "canonical_audio_upload_noop_peer_proof_missing"
+                )
+                return nil
+            }
+            let legacyResult = RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: nil,
+                audioFileName: metadata.relativeAudioPath,
+                metadataDisposition: "canonicalMetadataLegacyReadable",
+                audioDisposition: result.outcome == .noOp ? "canonicalAudioNoOpPeerMatches" : "canonicalAudioFinalizeVerified"
+            )
+            let completedJob = try? markUploadSucceeded(
+                recordingID: metadata.id,
+                result: legacyResult,
+                now: Date(),
+                proofSignature: localAudioState.signature
+            )
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploaded)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: 1,
+                confirmedBytes: result.confirmedBytes > 0 ? result.confirmedBytes : source.byteSize,
+                totalBytes: source.byteSize,
+                phase: "completed",
+                description: "上传完成"
+            )
+            if let completedJob {
+                _ = await produceLocalUploadSucceededFactIfPresent(
+                    recordingID: metadata.id,
+                    job: completedJob
+                )
+            }
+            let latestMetadata = latestUploadedMetadata(
+                recordingID: metadata.id,
+                fallback: metadata,
+                recordingManager: recordingManager
+            )
+            setActiveStatus(nil, for: latestMetadata, job: completedJob ?? (try? jobStore.loadJob(recordingID: latestMetadata.id)))
+            updateErrorMessage(nil, for: metadata.id)
+            return .uploaded
+        case .diagnosticsOnly, .noCommit:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: result.outcome.rawValue
+            )
+            return nil
+        case .deferred:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: "deferred"
+            )
+            return nil
+        case .retryScheduled:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: "retryScheduled"
+            )
+            return nil
+        case .conflict:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: "conflict"
+            )
+            return nil
+        case .blocked, .failed:
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: result.legacyFallbackReason ?? result.outcome.rawValue
+            )
+            return nil
+        }
+    }
+
+    private func uploadViaCanonicalTransferRuntimeIfEnabled(
+        switchResult: CanonicalKernelSwitchResult,
+        metadata: RecordingMetadata,
+        settings: SecureMacConnectionSnapshot,
+        recordingManager: RecordingManager,
+        traceID: String,
+        triggerSource: RecordingAudioSyncTriggerSource,
+        localAudioState: RecordingLocalAudioState,
+        syncRunID: String?
+    ) async -> RecordingUploadStatus? {
+        let configuration = switchResult.effectiveConfiguration.transferRuntimeConfiguration
+        guard configuration.mode == .canonicalTransferWithLegacyFallback else {
+            return nil
+        }
+        guard switchResult.effectiveMode == .canonicalFullSync, !switchResult.isBlocked else {
+            recordCanonicalAudioUploadRuntimeEvent(
+                stage: "canonicalTransferRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: "kernelSwitchBlocked"
+            )
+            return nil
+        }
+
+        let retryRuntime = CanonicalTransferRetryRuntime(policy: configuration.policy.retryPolicy)
+        if triggerSource.isViewRefreshOnly {
+            let evaluation = retryRuntime.evaluate(
+                trigger: .viewRefresh,
+                job: nil,
+                now: Date(),
+                statusRouteAvailable: configuration.policy.requireExistingSecureUploadRoutes
+            )
+            recordCanonicalTransferRuntimeEvent(
+                stage: "canonicalTransferRetryBlocked",
+                metadata: metadata,
+                traceID: traceID,
+                result: evaluation.blockers.map(\.rawValue).joined(separator: "|")
+            )
+            setActiveStatus(nil, for: metadata)
+            updateErrorMessage(nil, for: metadata.id)
+            return nil
+        }
+
+        if triggerSource == .retryDrainer {
+            let existingJob = try? jobStore.loadJob(recordingID: metadata.id)
+            let evaluation = retryRuntime.evaluate(
+                trigger: .retryDrainer,
+                job: Self.canonicalTransferRetryJob(from: existingJob),
+                now: Date(),
+                statusRouteAvailable: configuration.policy.requireExistingSecureUploadRoutes
+            )
+            if evaluation.decision == .blocked || evaluation.decision == .noExistingEligibleJob {
+                recordCanonicalTransferRuntimeEvent(
+                    stage: "canonicalTransferRetryBlocked",
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: evaluation.blockers.map(\.rawValue).joined(separator: "|")
+                )
+                setActiveStatus(nil, for: metadata, job: existingJob)
+                updateErrorMessage(nil, for: metadata.id)
+                return nil
+            }
+        }
+
+        let productionPortInjection = IPhoneCanonicalProductionPortFactory.make(
+            result: switchResult,
+            productionRootURL: recordingManager.studyLibraryStore.libraryRootURL
+        )
+        guard productionPortInjection.audioUploadExecutorEnabled else {
+            recordCanonicalTransferRuntimeEvent(
+                stage: "canonicalTransferRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: productionPortInjection.diagnosticsSummary
+            )
+            return nil
+        }
+
+        let audioSource: IPhoneCanonicalAudioUploadFileSource
+        do {
+            audioSource = try await IPhoneCanonicalAudioUploadFileSource(
+                metadata: metadata,
+                audioFileStore: recordingManager.audioFileStore,
+                preferredChunkSize: configuration.policy.chunkSize,
+                precomputedSignature: localAudioState.signature
+            )
+        } catch {
+            recordCanonicalTransferRuntimeEvent(
+                stage: "canonicalTransferRuntimeBlocked",
+                metadata: metadata,
+                traceID: traceID,
+                result: "sourceUnavailable"
+            )
+            return nil
+        }
+
+        let transferSource = IPhoneCanonicalTransferFileSource(source: audioSource)
+        let sourceNodeID = CanonicalNodeID("iphone-\(settings.deviceID)")
+        let destinationNodeID = CanonicalNodeID("mac-\(settings.deviceID)")
+        let port = canonicalTransferRuntimePortFactory(settings, configuration)
+        let runtime = CanonicalTransferRuntime(
+            configuration: configuration,
+            port: port,
+            sourceNodeID: sourceNodeID,
+            destinationNodeID: destinationNodeID
+        )
+
+        setActiveStatus(.uploading, for: metadata)
+        updateErrorMessage(nil, for: metadata.id)
+
+        do {
+            let uploadJob = try? jobStore.markAttemptStarted(recordingID: metadata.id, now: Date())
+            let progress: RecordingUploadProgressHandler = { [weak self] event in
+                guard let self else {
+                    return
+                }
+
+                let updatedJob = try self.jobStore.applyProgress(recordingID: metadata.id, event: event, now: Date())
+                Self.recordProgressTrace(event, metadata: metadata, job: updatedJob, traceID: traceID)
+                if let progressUpdate = Self.metadataProgressUpdate(for: event, job: updatedJob) {
+                    try? recordingManager.updateUploadProgress(
+                        recordingID: metadata.id,
+                        fraction: progressUpdate.fraction,
+                        confirmedBytes: progressUpdate.confirmedBytes,
+                        totalBytes: progressUpdate.totalBytes,
+                        phase: progressUpdate.phase,
+                        description: progressUpdate.description
+                    )
+                }
+            }
+            var resumeContext = uploadJob?.resumeContext ?? (try? jobStore.loadJob(recordingID: metadata.id))?.resumeContext
+            if let localSignature = localAudioState.signature {
+                resumeContext?.audioTotalSHA256 = localSignature.normalizedSHA256
+                if let size = localSignature.size {
+                    resumeContext?.audioTotalBytes = size
+                }
+            }
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "canonicalTransferMetadataPreflightStarted",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "begin",
+                uploadStatus: RecordingUploadStatus.uploading.rawValue,
+                ledgerState: uploadJob?.overallState.rawValue,
+                jobID: uploadJob?.id,
+                httpPath: "/upload-recording-metadata"
+            )
+            _ = try await uploadClient.uploadMetadataIfNeeded(
+                metadata: metadata.updatingUploadStatus(.uploading),
+                settings: settings,
+                progress: progress,
+                resumeContext: resumeContext
+            )
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "canonicalTransferMetadataPreflightCompleted",
+                traceID: traceID,
+                recordingID: metadata.id,
+                eventResult: "success",
+                uploadStatus: RecordingUploadStatus.uploading.rawValue,
+                ledgerState: (try? jobStore.loadJob(recordingID: metadata.id))?.metadataStage.rawValue,
+                jobID: uploadJob?.id,
+                httpPath: "/upload-recording-metadata"
+            )
+            let result = try await runtime.transfer(
+                source: transferSource,
+                requestedAt: CanonicalTimestamp(Date())
+            )
+            for diagnostic in result.diagnostics.prefix(64) {
+                recordCanonicalTransferRuntimeEvent(
+                    stage: diagnostic.kind.rawValue,
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: diagnostic.diagnosticsSummary
+                )
+            }
+
+            guard result.outcome == .uploaded,
+                  let proof = result.finalizeProof,
+                  proof.isReceiverAcceptedProof else {
+                recordCanonicalTransferRuntimeEvent(
+                    stage: "canonicalTransferRuntimeLegacyFallbackUsed",
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: result,
+                    reason: "canonical_transfer_finalize_proof_missing"
+                )
+                return nil
+            }
+
+            await produceCanonicalTransferFinalizeProofFact(
+                proof,
+                producerNodeID: sourceNodeID
+            )
+
+            _ = try? jobStore.applyProgress(
+                recordingID: metadata.id,
+                event: .audioResumableSessionStarted(
+                    sessionID: proof.sessionID.rawValue,
+                    totalBytes: proof.byteSize,
+                    chunkSize: configuration.policy.chunkSize,
+                    totalSHA256: proof.contentHash.value,
+                    confirmedBytes: result.confirmedBytes
+                ),
+                now: Date()
+            )
+            _ = try? jobStore.applyProgress(
+                recordingID: metadata.id,
+                event: .audioSucceeded(disposition: "canonicalTransferFinalizeVerified"),
+                now: Date()
+            )
+            let legacyResult = RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: nil,
+                audioFileName: metadata.relativeAudioPath,
+                metadataDisposition: "canonicalMetadataLegacyReadable",
+                audioDisposition: "canonicalTransferFinalizeVerified"
+            )
+            let completedJob = try? markUploadSucceeded(
+                recordingID: metadata.id,
+                result: legacyResult,
+                now: Date(),
+                proofSignature: RecordingAudioSignature(sha256: proof.contentHash.value, size: proof.byteSize)
+            )
+            try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .uploaded)
+            try? recordingManager.updateUploadProgress(
+                recordingID: metadata.id,
+                fraction: 1,
+                confirmedBytes: proof.byteSize,
+                totalBytes: proof.byteSize,
+                phase: "completed",
+                description: "上传完成"
+            )
+            let latestMetadata = latestUploadedMetadata(
+                recordingID: metadata.id,
+                fallback: metadata,
+                recordingManager: recordingManager
+            )
+            setActiveStatus(nil, for: latestMetadata, job: completedJob ?? (try? jobStore.loadJob(recordingID: latestMetadata.id)))
+            updateErrorMessage(nil, for: metadata.id)
+            return .uploaded
+        } catch {
+            if Self.isCanonicalDisabledUploadPortError(error) {
+                recordCanonicalTransferRuntimeEvent(
+                    stage: "canonicalTransferRuntimeLegacyFallbackUsed",
+                    metadata: metadata,
+                    traceID: traceID,
+                    result: "iphoneProductionUploadDisabled"
+                )
+                return nil
+            }
+            let code = error.localizedDescription.lowercased()
+            let isConflict = code.contains("conflict") || code.contains("mismatch")
+            let result = CanonicalTransferRuntimeResult(
+                mode: configuration.mode,
+                outcome: isConflict ? .conflict : .failed,
+                objectID: Self.canonicalAudioObjectID(recordingID: metadata.id),
+                diagnostics: [
+                    CanonicalTransferDiagnosticRecord(
+                        kind: isConflict ? .finalizeProofRejected : .runtimeBlocked,
+                        objectID: Self.canonicalAudioObjectID(recordingID: metadata.id),
+                        redactedDetail: String(error.localizedDescription.prefix(96))
+                    )
+                ]
+            )
+            recordCanonicalTransferRuntimeEvent(
+                stage: "canonicalTransferRuntimeLegacyFallbackUsed",
+                metadata: metadata,
+                traceID: traceID,
+                result: result,
+                reason: isConflict ? "conflict" : "runtimeError"
+            )
+            return nil
+        }
+    }
+
+    @discardableResult
+    private func produceCanonicalTransferFinalizeProofFact(
+        _ proof: CanonicalTransferFinalizeProof,
+        producerNodeID: CanonicalNodeID
+    ) async -> CanonicalStatusFactMergeResult {
+        let fact = CanonicalStatusFact(
+            factID: "transfer-finalize-\(Self.safeFactToken(proof.sessionID.rawValue))-\(Self.safeFactToken(proof.objectID.rawValue))",
+            objectID: proof.objectID,
+            source: .transferFinalizeProof,
+            producerNodeID: producerNodeID,
+            logicalTime: CanonicalLogicalTime(
+                counter: UInt64(max(0, proof.finalizedAt.date.timeIntervalSince1970.rounded())),
+                nodeID: producerNodeID
+            ),
+            proof: CanonicalStatusProof(
+                kind: .finalizeProof,
+                objectID: proof.objectID,
+                hash: proof.contentHash,
+                byteSize: proof.byteSize,
+                peerNodeID: proof.receiverNodeID,
+                finalizeProof: proof,
+                observedAt: proof.finalizedAt
+            ),
+            domain: .audioUpload,
+            phase: .completed,
+            causality: CanonicalStatusCausality(trigger: .transferFinalize)
+        )
+        return await produceCanonicalStatusFact(fact)
+    }
+
+    @discardableResult
+    private func produceLocalUploadSucceededFactIfPresent(
+        recordingID: String,
+        job: RecordingUploadJob,
+        acceptedAt: Date = Date()
+    ) async -> CanonicalStatusFactMergeResult? {
+        guard let hash = job.audioTotalSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !hash.isEmpty,
+              let byteSize = job.audioTotalBytes,
+              byteSize > 0 else {
+            return nil
+        }
+
+        let objectID = Self.canonicalAudioObjectID(recordingID: recordingID)
+        let proof = CanonicalTransferFinalizeProof.v930(
+            receiverNodeID: CanonicalNodeID("mac-peer"),
+            sessionID: CanonicalTransferSessionID("legacy-upload-\(recordingID)"),
+            objectID: objectID,
+            byteSize: byteSize,
+            contentHash: CanonicalHash(hash),
+            finalizedAt: CanonicalTimestamp(acceptedAt),
+            verified: true
+        )
+        return await produceCanonicalTransferFinalizeProofFact(
+            proof,
+            producerNodeID: CanonicalNodeID("iphone-local")
+        )
+    }
+
+    private static func canonicalTransferRetryJob(from job: RecordingUploadJob?) -> CanonicalTransferRetryJob? {
+        guard let job,
+              let sessionID = job.resumableSessionID,
+              let byteSize = job.audioTotalBytes,
+              let totalHash = job.audioTotalSHA256 else {
+            return nil
+        }
+        let state: CanonicalTransferRuntimeState
+        switch job.resumableState {
+        case .some(.notStarted):
+            state = .started
+        case .some(.starting):
+            state = .started
+        case .some(.uploading):
+            state = .chunking
+        case .some(.paused):
+            state = .interrupted
+        case .some(.retryableFailed):
+            state = .interrupted
+        case .some(.fatalFailed):
+            state = .failed
+        case .some(.finalizing):
+            state = .finalizing
+        case .some(.completed):
+            state = .finalized
+        case .none:
+            state = job.overallState == .retryableFailed ? .interrupted : .idle
+        }
+        return CanonicalTransferRetryJob(
+            objectID: canonicalAudioObjectID(recordingID: job.recordingID),
+            sessionID: CanonicalTransferSessionID(sessionID),
+            state: state,
+            confirmedBytes: job.audioConfirmedBytes ?? 0,
+            byteSize: byteSize,
+            hashPrefix: totalHash,
+            attemptCount: job.attemptCount,
+            maxAttempts: 3,
+            nextRetryAfter: job.nextRetryAfter.map(CanonicalTimestamp.init),
+            requiresStatusRefreshBeforeResume: true,
+            blockers: job.isFatal ? [.security] : []
+        )
+    }
+
+    private static func safeFactToken(_ value: String) -> String {
+        let allowed = value.filter { character in
+            character.isLetter || character.isNumber || character == "-" || character == "_"
+        }
+        return String((allowed.isEmpty ? "unknown" : allowed).prefix(48))
+    }
+
+    private static func shouldUseLegacyUploadForCanonicalDisabledPort(
+        _ result: CanonicalAudioUploadRuntimeResult
+    ) -> Bool {
+        let diagnosticText = ([result.legacyFallbackReason] + result.diagnostics.map(\.reason) + result.diagnostics.map(\.result))
+            .compactMap { $0 }
+            .joined(separator: " ")
+        return containsCanonicalDisabledUploadReason(diagnosticText)
+    }
+
+    private func recordCanonicalTransferRuntimeEvent(
+        stage: String,
+        metadata: RecordingMetadata,
+        traceID: String,
+        result: CanonicalTransferRuntimeResult,
+        reason: String
+    ) {
+        recordCanonicalTransferRuntimeEvent(
+            stage: stage,
+            metadata: metadata,
+            traceID: traceID,
+            result: "reason=\(reason),outcome=\(result.outcome.rawValue),confirmedBytes=\(result.confirmedBytes)"
+        )
+    }
+
+    private func recordCanonicalAudioUploadRuntimeEvent(
+        stage: String,
+        metadata: RecordingMetadata,
+        traceID: String,
+        result: CanonicalAudioUploadRuntimeResult,
+        reason: String
+    ) {
+        recordCanonicalAudioUploadRuntimeEvent(
+            stage: stage,
+            metadata: metadata,
+            traceID: traceID,
+            result: "reason=\(reason),outcome=\(result.outcome.rawValue),startedTransport=\(result.startedTransport),confirmedBytes=\(result.confirmedBytes)"
+        )
+    }
+
+    private static func isCanonicalDisabledUploadPortError(_ error: Error) -> Bool {
+        containsCanonicalDisabledUploadReason("\(error) \(error.localizedDescription)")
+    }
+
+    private static func containsCanonicalDisabledUploadReason(_ value: String) -> Bool {
+        let text = value.lowercased()
+        return text.contains("iphoneproductionuploaddisabled")
+            || text.contains("productionmutationattempted")
+            || text.contains("productionuploaddisabled")
+    }
+
+    private func failCanonicalTransferRuntime(
+        metadata: RecordingMetadata,
+        recordingManager: RecordingManager,
+        traceID: String,
+        result: CanonicalTransferRuntimeResult,
+        phase: String,
+        description: String
+    ) async -> RecordingUploadStatus {
+        let isFatal = phase == "conflict" || phase == "blocked" || phase == "fatalFailed"
+        _ = try? jobStore.markFailure(
+            recordingID: metadata.id,
+            classification: RecordingUploadFailureClassification(
+                code: "canonical_transfer_\(result.outcome.rawValue)",
+                message: description,
+                isFatal: isFatal
+            ),
+            retryPolicy: retryPolicy,
+            now: Date()
+        )
+        try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+        try? recordingManager.updateUploadProgress(
+            recordingID: metadata.id,
+            fraction: nil,
+            confirmedBytes: result.confirmedBytes > 0 ? result.confirmedBytes : nil,
+            totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+            phase: phase,
+            description: description
+        )
+        setActiveStatus(.failed, for: metadata)
+        updateErrorMessage(description, for: metadata.id)
+        recordCanonicalTransferRuntimeEvent(
+            stage: "canonicalTransferRuntimeFailed",
+            metadata: metadata,
+            traceID: traceID,
+            result: "terminal=\(isFatal),outcome=\(result.outcome.rawValue)"
+        )
+        return .failed
+    }
+
+    private func failCanonicalAudioUpload(
+        metadata: RecordingMetadata,
+        recordingManager: RecordingManager,
+        traceID: String,
+        result: CanonicalAudioUploadRuntimeResult,
+        phase: String,
+        description: String
+    ) async -> RecordingUploadStatus {
+        let isFatal = phase == "conflict" || phase == "blocked" || phase == "fatalFailed"
+        _ = try? jobStore.markFailure(
+            recordingID: metadata.id,
+            classification: RecordingUploadFailureClassification(
+                code: "canonical_audio_upload_\(result.outcome.rawValue)",
+                message: description,
+                isFatal: isFatal
+            ),
+            retryPolicy: retryPolicy,
+            now: Date()
+        )
+        try? recordingManager.updateUploadStatus(recordingID: metadata.id, status: .failed)
+        try? recordingManager.updateUploadProgress(
+            recordingID: metadata.id,
+            fraction: nil,
+            confirmedBytes: result.confirmedBytes > 0 ? result.confirmedBytes : nil,
+            totalBytes: metadata.fileSize > 0 ? metadata.fileSize : nil,
+            phase: phase,
+            description: description
+        )
+        setActiveStatus(.failed, for: metadata)
+        updateErrorMessage(description, for: metadata.id)
+        recordCanonicalAudioUploadRuntimeEvent(
+            stage: "canonicalAudioUploadRuntimeLegacyFallbackUsed",
+            metadata: metadata,
+            traceID: traceID,
+            result: "terminal=\(isFatal),outcome=\(result.outcome.rawValue)"
+        )
+        return .failed
+    }
+
+    private func recordCanonicalAudioUploadRuntimeEvent(
+        stage: String,
+        metadata: RecordingMetadata,
+        traceID: String,
+        result: String
+    ) {
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: stage,
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: "canonical",
+            reasonCode: String(result.prefix(96)),
+            uploadStatus: metadata.uploadStatus
+        )
+    }
+
+    private func recordCanonicalTransferRuntimeEvent(
+        stage: String,
+        metadata: RecordingMetadata,
+        traceID: String,
+        result: String
+    ) {
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: stage,
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: "canonicalTransfer",
+            reasonCode: String(result.prefix(96)),
+            uploadStatus: metadata.uploadStatus
+        )
     }
 
     func retryQueue() -> RecordingUploadQueue {
@@ -717,18 +2233,209 @@ final class RecordingUploadCoordinator: ObservableObject {
         "recordingAudio:\(recordingID)"
     }
 
-    private func localAudioDecisionState(for metadata: RecordingMetadata) -> RecordingLocalAudioState {
-        do {
-            let audioURL = try jobStore.audioURL(for: metadata)
-            guard jobStore.fileExists(at: audioURL) else {
-                return .missing
-            }
-            let size = try? jobStore.fileSize(at: audioURL)
-            let checksum = try? SecureUploadUtilities.sha256Hex(fileURL: audioURL)
-            return .available(RecordingAudioSignature(sha256: checksum, size: size ?? (metadata.fileSize > 0 ? metadata.fileSize : nil)))
-        } catch {
-            return .unreadable(reason: error.localizedDescription)
+    private static func canonicalAudioObjectID(recordingID: String) -> CanonicalObjectID {
+        CanonicalObjectID(audioObjectID(recordingID: recordingID))
+    }
+
+    private static func defaultCanonicalAudioUploadLedgerURL(jobStore: RecordingUploadJobStore) -> URL? {
+        try? jobStore.ledgerURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("canonical-audio-upload-runtime-ledger", isDirectory: false)
+            .appendingPathExtension("json")
+            .standardizedFileURL
+    }
+
+    private static func canonicalAudioUploadTrigger(from triggerSource: RecordingAudioSyncTriggerSource) -> CanonicalAudioUploadTriggerSource {
+        switch triggerSource {
+        case .manualUploadButton:
+            return .manualUploadButton
+        case .retryDrainer:
+            return .retryDrainer
+        case .manualSyncIPhone:
+            return .manualSyncIPhone
+        case .manualSyncMacHint:
+            return .manualSyncMacHint
+        case .periodicSync:
+            return .periodicSync
+        case .appActivationRefresh:
+            return .appActivationRefresh
+        case .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh:
+            return .viewRefresh
         }
+    }
+
+    private static func canonicalPeerAudioTruth(from state: RecordingPeerAudioState) -> CanonicalAudioUploadPeerTruth {
+        switch state {
+        case .unknown:
+            return CanonicalAudioUploadPeerTruth(state: .unknown, diagnosticsSummary: "peerUnknown")
+        case .missing:
+            return CanonicalAudioUploadPeerTruth(state: .missing, diagnosticsSummary: "peerMissing")
+        case .metadataOnly:
+            return CanonicalAudioUploadPeerTruth(
+                state: .metadataOnly,
+                metadataUploaded: true,
+                diagnosticsSummary: "peerMetadataOnly"
+            )
+        case .available(let signature):
+            let contentHash = signature.normalizedSHA256.map { CanonicalHash($0) }
+            return CanonicalAudioUploadPeerTruth(
+                state: .available,
+                contentHash: contentHash,
+                byteSize: signature.size,
+                diagnosticsSummary: "peerAvailable"
+            )
+        case .different(let signature):
+            let contentHash = signature?.normalizedSHA256.map { CanonicalHash($0) }
+            return CanonicalAudioUploadPeerTruth(
+                state: .different,
+                contentHash: contentHash,
+                byteSize: signature?.size,
+                diagnosticsSummary: "peerDifferent"
+            )
+        case .deleted:
+            return CanonicalAudioUploadPeerTruth(state: .deleted, diagnosticsSummary: "peerDeleted")
+        }
+    }
+
+    private static func canonicalLedgerTruth(from state: RecordingUploadLedgerState) -> CanonicalAudioUploadLedgerTruth {
+        switch state {
+        case .none:
+            return CanonicalAudioUploadLedgerTruth()
+        case .queued:
+            return CanonicalAudioUploadLedgerTruth(phase: .queued)
+        case .inFlight:
+            return CanonicalAudioUploadLedgerTruth(phase: .inFlight)
+        case .finalizing:
+            return CanonicalAudioUploadLedgerTruth(phase: .finalizing)
+        case .completed(let signature):
+            let contentHash = signature?.normalizedSHA256.map { CanonicalHash($0) }
+            return CanonicalAudioUploadLedgerTruth(
+                phase: .completed,
+                contentHash: contentHash,
+                byteSize: signature?.size,
+                uiUploaded: true
+            )
+        case .failed:
+            return CanonicalAudioUploadLedgerTruth(phase: .failed)
+        case .retryPending:
+            return CanonicalAudioUploadLedgerTruth(phase: .retryPending)
+        case .fatalFailed:
+            return CanonicalAudioUploadLedgerTruth(phase: .fatalFailed)
+        }
+    }
+
+    private struct LocalAudioDecisionOutcome {
+        var state: RecordingLocalAudioState
+        var hashDurationMs: Int
+    }
+
+    private func localAudioDecisionState(for metadata: RecordingMetadata, traceID: String?) async -> LocalAudioDecisionOutcome {
+        let audioURL: URL
+        do {
+            audioURL = try jobStore.audioURL(for: metadata)
+        } catch {
+            return LocalAudioDecisionOutcome(
+                state: .unreadable(reason: error.localizedDescription),
+                hashDurationMs: 0
+            )
+        }
+
+        let cacheDirectoryURL: URL
+        do {
+            cacheDirectoryURL = try jobStore.canonicalChecksumCacheDirectoryURL()
+        } catch {
+            return LocalAudioDecisionOutcome(
+                state: .unreadable(reason: error.localizedDescription),
+                hashDurationMs: 0
+            )
+        }
+        let fallbackSize = metadata.fileSize > 0 ? metadata.fileSize : nil
+        let relativeAudioPath = metadata.relativeAudioPath
+        let result = await Self.resolveLocalAudioSignature(
+            audioURL: audioURL,
+            cacheDirectoryURL: cacheDirectoryURL,
+            checksumRuntime: canonicalChecksumRuntime,
+            relativeAudioPath: relativeAudioPath,
+            fallbackSize: fallbackSize
+        )
+
+        UploadFlightRecorder.record(
+            side: .iPhone,
+            stage: "localAudioSignatureResolved",
+            traceID: traceID,
+            recordingID: metadata.id,
+            eventResult: result.state,
+            reasonCode: result.cacheState,
+            uploadStatus: metadata.uploadStatus,
+            fileExists: result.state != "missing",
+            fileSize: result.size,
+            resolvedRelativePathToken: metadata.relativeAudioPath,
+            safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);background=true;cache=\(result.cacheState)"
+        )
+
+        switch result.state {
+        case "available":
+            return LocalAudioDecisionOutcome(
+                state: .available(RecordingAudioSignature(sha256: result.sha256, size: result.size ?? fallbackSize)),
+                hashDurationMs: result.hashDurationMs
+            )
+        case "missing":
+            return LocalAudioDecisionOutcome(state: .missing, hashDurationMs: result.hashDurationMs)
+        default:
+            return LocalAudioDecisionOutcome(
+                state: .unreadable(reason: result.reason ?? "local_audio_signature_failed"),
+                hashDurationMs: result.hashDurationMs
+            )
+        }
+    }
+
+    private nonisolated static func resolveLocalAudioSignature(
+        audioURL: URL,
+        cacheDirectoryURL: URL,
+        checksumRuntime: CanonicalChecksumRuntime,
+        relativeAudioPath: String,
+        fallbackSize: Int64?
+    ) async -> (state: String, sha256: String?, size: Int64?, reason: String?, hashDurationMs: Int, cacheState: String) {
+        let existsStartedAt = Date()
+        let exists = await Task.detached(priority: .utility) {
+            FileManager.default.fileExists(atPath: audioURL.path)
+        }.value
+        let existsDurationMs = CanonicalPerfLog.elapsedMs(since: existsStartedAt)
+        if existsDurationMs > 0 {
+            Task { @MainActor in
+                ConnectionDiagnosticsStore.shared.recordPerfLog(
+                    CanonicalPerfLog.subphaseMeasured(
+                        operation: .upload,
+                        subphase: .waitBackgroundMs,
+                        durationMs: existsDurationMs,
+                        result: "localAudioExists"
+                    )
+                )
+            }
+        }
+        guard exists else {
+            return ("missing", nil, nil, nil, 0, "notApplicable")
+        }
+
+        let result = await checksumRuntime.checksum(
+            fileURL: audioURL,
+            logicalToken: relativeAudioPath,
+            nodeRole: .iPhone,
+            cacheDirectoryURL: cacheDirectoryURL
+        )
+        let durationMs = result.hashDurationMs
+        let cacheState = result.event.rawValue
+        guard let checksum = result.sha256 else {
+            return (
+                "unreadable",
+                nil,
+                fallbackSize,
+                result.failure?.rawValue ?? "local_audio_signature_failed",
+                durationMs,
+                cacheState
+            )
+        }
+        return ("available", checksum, result.byteSize > 0 ? result.byteSize : fallbackSize, nil, durationMs, cacheState)
     }
 
     private func uploadLedgerState(_ job: RecordingUploadJob?) -> RecordingUploadLedgerState {
@@ -753,17 +2460,31 @@ final class RecordingUploadCoordinator: ObservableObject {
         return .none
     }
 
+    private static func isActiveUploadJob(_ job: RecordingUploadJob) -> Bool {
+        if job.overallState == .inProgress
+            || job.metadataStage == .inProgress
+            || job.audioStage == .inProgress {
+            return true
+        }
+        switch job.resumableState {
+        case .starting, .uploading, .finalizing:
+            return true
+        case .notStarted, .paused, .retryableFailed, .completed, .fatalFailed, .none:
+            return false
+        }
+    }
+
     private func recordDecision(
         _ decision: RecordingAudioUploadDecision,
         metadata: RecordingMetadata,
         traceID: String,
         triggerSource: RecordingAudioSyncTriggerSource,
+        localAudioState: RecordingLocalAudioState,
         peerAudioState: RecordingPeerAudioState,
         transferJobState: RecordingTransferJobState,
         ledgerState: RecordingUploadLedgerState,
         syncRunID: String?
     ) {
-        let localAudioState = localAudioDecisionState(for: metadata)
         let summary = RecordingAudioUploadDecisionDiagnostics.result(
             recordingID: metadata.id,
             objectID: Self.audioObjectID(recordingID: metadata.id),
@@ -1002,14 +2723,14 @@ final class RecordingUploadCoordinator: ObservableObject {
     }
 }
 
-enum RecordingUploadJobStageState: String, Codable, Equatable {
+nonisolated enum RecordingUploadJobStageState: String, Codable, Equatable {
     case pending
     case inProgress
     case succeeded
     case failed
 }
 
-enum RecordingUploadJobOverallState: String, Codable, Equatable {
+nonisolated enum RecordingUploadJobOverallState: String, Codable, Equatable {
     case pending
     case inProgress
     case succeeded
@@ -1017,7 +2738,7 @@ enum RecordingUploadJobOverallState: String, Codable, Equatable {
     case fatalFailed
 }
 
-enum RecordingUploadJobDisposition: String, Codable, Equatable {
+nonisolated enum RecordingUploadJobDisposition: String, Codable, Equatable {
     case none
     case acceptedNew
     case acceptedExisting
@@ -1034,7 +2755,7 @@ enum RecordingUploadJobDisposition: String, Codable, Equatable {
     }
 }
 
-struct RecordingUploadJob: Codable, Equatable, Identifiable {
+nonisolated struct RecordingUploadJob: Codable, Equatable, Identifiable {
     var id: String { recordingID }
 
     let recordingID: String
@@ -1114,7 +2835,7 @@ struct RecordingUploadJob: Codable, Equatable, Identifiable {
     }
 }
 
-struct RecordingUploadJobLedger: Codable, Equatable {
+nonisolated struct RecordingUploadJobLedger: Codable, Equatable {
     static let currentVersion = 2
 
     var version: Int
@@ -1210,10 +2931,24 @@ final class RecordingUploadJobStore {
         self.fileManager = fileManager
     }
 
+    var ledgerFileExists: Bool {
+        guard let url = try? ledgerURL() else {
+            return false
+        }
+        return fileManager.fileExists(atPath: url.path)
+    }
+
     func ledgerURL() throws -> URL {
         try ledgerDirectory()
             .appendingPathComponent("upload-ledger")
             .appendingPathExtension("json")
+            .standardizedFileURL
+    }
+
+    func canonicalChecksumCacheDirectoryURL() throws -> URL {
+        try audioFileStore.baseDirectory()
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
             .standardizedFileURL
     }
 
@@ -1394,6 +3129,28 @@ final class RecordingUploadJobStore {
     }
 
     @discardableResult
+    func recordCompletedAudioProof(
+        recordingID: String,
+        signature: RecordingAudioSignature,
+        now: Date
+    ) throws -> RecordingUploadJob {
+        try updateJob(recordingID: recordingID) { job in
+            job.updatedAt = now
+            if let hash = signature.normalizedSHA256 {
+                job.audioTotalSHA256 = hash
+            }
+            if let size = signature.size, size > 0 {
+                job.audioTotalBytes = size
+                job.audioConfirmedBytes = size
+                job.audioNextOffset = size
+            }
+            job.currentProgressFraction = 1
+            job.lastProgressAt = now
+            job.lastConfirmedByMacAt = now
+        }
+    }
+
+    @discardableResult
     func markRetryableFailure(
         recordingID: String,
         classification: RecordingUploadFailureClassification,
@@ -1566,7 +3323,7 @@ final class RecordingUploadJobStore {
             )
         } catch {
             lastReadError = "upload ledger read failed: \(error.localizedDescription)"
-            return .empty
+            throw error
         }
     }
 

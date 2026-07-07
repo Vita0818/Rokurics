@@ -1,0 +1,29 @@
+{
+  "bitrate" : 128000,
+  "channels" : 1,
+  "codec" : "AAC",
+  "createdAt" : "2026-05-28T00:02:38Z",
+  "duration" : 5473.73462585034,
+  "endedAt" : "2026-05-28T01:38:13Z",
+  "fileName" : "rokurics_2026-05-28_08-02-38_fallback.m4a",
+  "fileSize" : 12442609,
+  "format" : "m4a",
+  "id" : "rokurics_2026-05-28_08-02-38_fallback",
+  "isDeleted" : false,
+  "noteStatus" : "notStarted",
+  "relativeAudioPath" : "Recordings\/rokurics_2026-05-28_08-02-38_fallback.m4a",
+  "relativeMetadataPath" : "Metadata\/rokurics_2026-05-28_08-02-38_fallback.json",
+  "sampleRate" : 44100,
+  "studyFiling" : {
+    "chapter" : "Unit6",
+    "subject" : "大英IV",
+    "topic" : "Class2",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "title" : "大英IV · Unit6 · Class2",
+  "transcriptionStatus" : "notStarted",
+  "uploadStatus" : "uploaded"
+}

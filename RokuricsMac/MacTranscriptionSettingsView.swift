@@ -38,7 +38,7 @@ struct MacTranscriptionSettingsView: View {
     private var providerSettings: some View {
         VStack(alignment: .leading, spacing: RokuricsSettingsMetrics.groupSpacing) {
             RokuricsSettingsGroup(title: "Provider") {
-                RokuricsSettingsPickerRow(title: "转写 Provider", selection: providerBinding) {
+                RokuricsSettingsPickerRow(title: RokuricsCopy.text("转写 Provider", "Transcription"), selection: providerBinding) {
                     ForEach(TranscriptionProviderKind.allCases) { providerKind in
                         Text(providerKind.displayName)
                             .tag(providerKind)
@@ -49,8 +49,10 @@ struct MacTranscriptionSettingsView: View {
                 RokuricsSettingsDivider()
 
                 RokuricsSettingsRow(
-                    title: "状态",
-                    valueText: settingsStore.selectedProviderKind.isEnabledInCurrentBuild ? "可用" : "暂未启用"
+                    title: RokuricsCopy.text("状态", "Status"),
+                    valueText: settingsStore.selectedProviderKind.isEnabledInCurrentBuild
+                        ? RokuricsCopy.text("可用", "Available")
+                        : RokuricsCopy.text("暂未启用", "Disabled")
                 )
             }
         }
@@ -61,8 +63,8 @@ struct MacTranscriptionSettingsView: View {
             if settingsStore.selectedProviderKind == .whisperCpp {
                 MacWhisperCppSettingsView(settingsStore: settingsStore, mode: .model)
             } else {
-                RokuricsSettingsGroup(title: "模型") {
-                    RokuricsSettingsRow(title: "当前模型", valueText: "Mock")
+                RokuricsSettingsGroup(title: RokuricsCopy.text("模型", "Model")) {
+                    RokuricsSettingsRow(title: RokuricsCopy.text("当前模型", "Current"), valueText: "Mock")
                 }
             }
         }
@@ -73,10 +75,13 @@ struct MacTranscriptionSettingsView: View {
             if settingsStore.selectedProviderKind == .whisperCpp {
                 MacWhisperCppSettingsView(settingsStore: settingsStore, mode: .authorizationAndTest)
             } else {
-                RokuricsSettingsGroup(title: "授权与测试") {
+                RokuricsSettingsGroup(title: RokuricsCopy.text("授权与测试", "Access & Test")) {
                     RokuricsSettingsRow(title: "Provider", valueText: "Mock Transcription")
                     RokuricsSettingsDivider()
-                    RokuricsSettingsRow(title: "状态", valueText: "无需外部配置")
+                    RokuricsSettingsRow(
+                        title: RokuricsCopy.text("状态", "Status"),
+                        valueText: RokuricsCopy.text("无需外部配置", "No setup needed")
+                    )
                 }
             }
         }

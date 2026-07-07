@@ -1,0 +1,12 @@
+[
+  {
+    "id" : "course-view",
+    "levels" : [
+      "type",
+      "subject",
+      "chapter",
+      "topic"
+    ],
+    "name" : "课程视图"
+  }
+]

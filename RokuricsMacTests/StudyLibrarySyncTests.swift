@@ -103,7 +103,7 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func disabledSyncEndpointsSkipGitAndPreservePendingState() throws {
+    @Test func disabledSyncEndpointsSkipGitAndPreservePendingState() async throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let gitSpyURL = try makeGitSpyShim(rootURL: rootURL)
@@ -132,7 +132,7 @@ struct StudyLibrarySyncTests {
 
         let statusResponse = server.syncStatusResponseForVerifiedDevice(device)
         let manifestResponse = try server.syncManifestResponseForVerifiedDevice(device)
-        let applyResponse = try server.syncApplyResponseForVerifiedDevice(device, requestBody: Data("not json".utf8))
+        let applyResponse = try await server.syncApplyResponseForVerifiedDevice(device, requestBody: Data("not json".utf8))
 
         #expect(statusResponse.ok)
         #expect(statusResponse.error == StudyLibrarySyncRuntimeConfiguration.disabledReason)
@@ -338,8 +338,15 @@ struct StudyLibrarySyncTests {
     @Test func gitCommitFailurePreservesMetadataPendingUploadsAndWritesSyncError() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        let gitShimURL = try makeCommitFailingGitShim(rootURL: rootURL)
-        let gitStore = GitBackedStudyMetadataStore(rootURL: rootURL, gitExecutableURL: gitShimURL)
+        let gitStore = GitBackedStudyMetadataStore(
+            rootURL: rootURL,
+            gitCommandInterceptor: { arguments in
+                guard arguments.contains("commit") else {
+                    return nil
+                }
+                throw GitBackedStudyMetadataStoreError.gitFailed("simulated signing failure")
+            }
+        )
         let manifest = makeSyncManifest(recordingID: "commit-failure")
 
         var thrownMessage: String?
@@ -371,7 +378,15 @@ struct StudyLibrarySyncTests {
         #expect(retryMessage?.contains("git_metadata_commit_temporarily_suppressed") == true)
         #expect(gitStore.gitInvocations.filter { $0.arguments.contains("commit") }.count == 1)
 
-        let restartedGitStore = GitBackedStudyMetadataStore(rootURL: rootURL, gitExecutableURL: gitShimURL)
+        let restartedGitStore = GitBackedStudyMetadataStore(
+            rootURL: rootURL,
+            gitCommandInterceptor: { arguments in
+                guard arguments.contains("commit") else {
+                    return nil
+                }
+                throw GitBackedStudyMetadataStoreError.gitFailed("simulated signing failure")
+            }
+        )
         var restartedRetryMessage: String?
         do {
             _ = try restartedGitStore.commitManifest(manifest, deviceDisplayName: "Vita iPhone")
@@ -386,7 +401,7 @@ struct StudyLibrarySyncTests {
         #expect(suppressedState.gitCommitSuppressedUntil != nil)
     }
 
-    @Test func iPhoneMetadataPushAppliesToMacStoreAndCreatesGitCommit() throws {
+    @Test func iPhoneMetadataPushAppliesToMacStoreAndCreatesGitCommit() async throws {
         let (fileStore, appRootURL, scratchURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
 
@@ -413,7 +428,7 @@ struct StudyLibrarySyncTests {
             localManifestHash: "iphone-local"
         )
 
-        let applyResult = try studyStore.applySyncManifest(incoming, localDeviceID: "mac-01")
+        let applyResult = try await studyStore.applySyncManifest(incoming, localDeviceID: "mac-01")
         var merged = studyStore.makeSyncManifest(deviceID: "mac-01")
         let commit = try gitStore.commitManifest(merged, deviceDisplayName: "Vita iPhone")
         merged.commitID = commit.commitID
@@ -426,11 +441,11 @@ struct StudyLibrarySyncTests {
         #expect(merged.commitID == commit.commitID)
     }
 
-    @Test func macSnapshotPullUsesLastWriteWinsAndKeepsMissingReferencesSafe() throws {
+    @Test func macSnapshotPullUsesLastWriteWinsAndKeepsMissingReferencesSafe() async throws {
         let (fileStore, appRootURL, scratchURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
 
-        let recordingDirectory = try saveInboxRecording(
+        let recordingDirectory = try await saveInboxRecording(
             id: "mac-pull-lww",
             title: "旧标题",
             store: fileStore,
@@ -452,7 +467,7 @@ struct StudyLibrarySyncTests {
             folders: []
         )
 
-        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
+        let result = try await studyStore.applySyncManifest(manifest, localDeviceID: "iphone-01")
         let synced = try #require(studyStore.item(recordingID: "mac-pull-lww"))
 
         #expect(result.appliedItemCount == 1)
@@ -461,11 +476,11 @@ struct StudyLibrarySyncTests {
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
     }
 
-    @Test func deleteMetadataOnlyTombstoneDoesNotDeleteRealAudioDuringSync() throws {
+    @Test func deleteMetadataOnlyTombstoneDoesNotDeleteRealAudioDuringSync() async throws {
         let (fileStore, appRootURL, scratchURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
 
-        let recordingDirectory = try saveInboxRecording(id: "sync-tombstone-audio", title: "保留音频", store: fileStore)
+        let recordingDirectory = try await saveInboxRecording(id: "sync-tombstone-audio", title: "保留音频", store: fileStore)
         let audioURL = recordingDirectory.appendingPathComponent("audio.m4a", isDirectory: false)
         let studyStore = StudyLibraryStore(rootURL: appRootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         let item = try #require(studyStore.item(recordingID: "sync-tombstone-audio"))
@@ -485,7 +500,7 @@ struct StudyLibrarySyncTests {
             tombstones: [tombstone]
         )
 
-        let result = try studyStore.applySyncManifest(manifest, localDeviceID: "mac-01")
+        let result = try await studyStore.applySyncManifest(manifest, localDeviceID: "mac-01")
 
         #expect(result.tombstoneCount == 1)
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
@@ -603,12 +618,12 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncInventoryReturnsReceiveAndTranscriptMetadataWithoutSecretsOrPaths() throws {
+    @Test func localNetworkSyncInventoryReturnsReceiveAndTranscriptMetadataWithoutSecretsOrPaths() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
         let fileStore = MacRecordingFileStore(rootURL: appRootURL)
-        _ = try saveInboxRecording(id: "inventory-recording", title: "已转写", store: fileStore)
+        _ = try await saveInboxRecording(id: "inventory-recording", title: "已转写", store: fileStore)
         let transcriptRelativePath = "transcripts/inventory-recording/transcript.md"
         let transcriptURL = appRootURL.appendingPathComponent(transcriptRelativePath, isDirectory: false)
         try FileManager.default.createDirectory(at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -631,7 +646,7 @@ struct StudyLibrarySyncTests {
             runtimeConfiguration: .default
         )
 
-        let response = server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice())
+        let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice())
         let inventory = try #require(response.inventory)
         let encoded = String(data: try JSONEncoder().encode(inventory), encoding: .utf8) ?? ""
 
@@ -648,12 +663,185 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncArtifactRequestRejectsTraversalAndServesApprovedTranscript() throws {
+    @Test func localNetworkSyncInventoryBuildsMetadataJobsAndHashesOffMain() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
         let fileStore = MacRecordingFileStore(rootURL: appRootURL)
-        _ = try saveInboxRecording(id: "artifact-recording", title: "Artifact", store: fileStore)
+        _ = try await saveInboxRecording(id: "off-main-inventory", title: "Off Main", store: fileStore)
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            onConnectionDiagnostic: diagnostics.append
+        )
+
+        let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(),
+            syncRunID: "mac-off-main-inventory"
+        )
+        let report = try #require(diagnostics.events().last { $0.phase == "canonicalInventoryRuntimeReportWritten" }?.errorMessage)
+        let manifestOffMain = try #require(diagnostics.events().last { $0.phase == "macInventoryManifestBuildOffMain" }?.errorMessage)
+        let manifestCompleted = try #require(diagnostics.events().last { $0.phase == "macInventoryManifestBuildCompleted" }?.errorMessage)
+
+        #expect(response.ok)
+        #expect(diagnostics.events().contains { $0.phase == "inventoryBuildDurationMs" && $0.errorMessage?.isEmpty == false })
+        #expect(manifestOffMain.contains("offMain=true"))
+        #expect(manifestCompleted.contains("manifestBuildDurationMs="))
+        #expect(report.contains("metadataLoadDurationMs="))
+        #expect(report.contains("jobsLoadDurationMs="))
+        #expect(report.contains("manifestBuildDurationMs="))
+        #expect(report.contains("hashSkippedByCacheHitCount="))
+        #expect(report.contains("mainActorMetadataLoadAttemptCount=0"))
+        #expect(report.contains("mainActorJobsLoadAttemptCount=0"))
+        #expect(report.contains("mainActorManifestBuildAttemptCount=0"))
+        #expect(report.contains("mainActorHashAttemptCount=0"))
+        #expect(report.contains("duplicateSnapshotBuildCount=0"))
+    }
+
+    @MainActor
+    @Test func oldKernelMacInventorySkipsCanonicalBuildAndPreservesLegacySchema() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try await saveInboxRecording(id: "old-kernel-inventory", title: "Old Kernel", store: fileStore)
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalKernelMode: .oldKernel,
+            onConnectionDiagnostic: diagnostics.append
+        )
+
+        let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(),
+            syncRunID: "old-kernel-skip"
+        )
+        let inventory = try #require(response.inventory)
+        let events = diagnostics.events()
+        let phases = Set(events.map(\.phase))
+        let routeCompleted = try #require(events.last { $0.phase == "macInventoryRouteCompleted" }?.errorMessage)
+        let encoded = try JSONEncoder().encode(response)
+        let decoded = try JSONDecoder().decode(LocalNetworkSyncInventoryResponse.self, from: encoded)
+        let encodedText = String(data: encoded, encoding: .utf8) ?? ""
+
+        #expect(response.ok)
+        #expect(decoded.ok)
+        #expect(inventory.canonicalManifest == nil)
+        #expect(decoded.inventory?.canonicalManifest == nil)
+        #expect(inventory.schemaVersion == LocalNetworkSyncInventory.appSchemaVersion)
+        #expect(inventory.recordings.contains { $0.recordingID == "old-kernel-inventory" })
+        #expect(!encodedText.contains("canonicalManifest"))
+        #expect(phases.contains("macInventoryCanonicalBuildSkippedBecauseOldKernel"))
+        #expect(!phases.contains("macInventoryCanonicalBuildStarted"))
+        #expect(!phases.contains("canonicalInventoryCoverageReportWritten"))
+        #expect(!phases.contains("canonicalFileKernelSnapshotBuilt"))
+        #expect(!phases.contains("canonicalFileKernelManifestBuilt"))
+        #expect(!phases.contains("macInventorySeamUsedSharedSnapshot"))
+        #expect(routeCompleted.contains("canonicalBuildSkippedCount=1"))
+        #expect(routeCompleted.contains("mainActorCanonicalBuildAttemptCount=0"))
+    }
+
+    @MainActor
+    @Test func canonicalShadowMacInventoryBuildsCanonicalFactsOffMainAndReusesSnapshot() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try await saveInboxRecording(id: "shadow-inventory", title: "Shadow", store: fileStore)
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalKernelMode: .canonicalShadow,
+            onConnectionDiagnostic: diagnostics.append
+        )
+
+        let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(),
+            syncRunID: "shadow-off-main"
+        )
+        let inventory = try #require(response.inventory)
+        let events = diagnostics.events()
+        let phases = Set(events.map(\.phase))
+        let offMain = try #require(events.last { $0.phase == "macInventoryCanonicalBuildOffMain" }?.errorMessage)
+        let fileSnapshot = try #require(events.last { $0.phase == "canonicalFileKernelSnapshotBuilt" }?.errorMessage)
+        let fileManifest = try #require(events.last { $0.phase == "canonicalFileKernelManifestBuilt" }?.errorMessage)
+        let completed = try #require(events.last { $0.phase == "macInventoryRouteCompleted" }?.errorMessage)
+
+        #expect(response.ok)
+        #expect(inventory.canonicalManifest != nil)
+        #expect(phases.contains("macInventoryCanonicalBuildStarted"))
+        #expect(phases.contains("macInventoryCanonicalBuildCompleted"))
+        #expect(phases.contains("macInventoryCanonicalBuildReused"))
+        #expect(phases.contains("macInventoryCanonicalDuplicateBuildPrevented"))
+        #expect(phases.contains("macInventorySeamUsedSharedSnapshot"))
+        #expect(!phases.contains("macInventoryCanonicalBuildSkippedBecauseOldKernel"))
+        #expect(offMain.contains("offMain=true"))
+        #expect(offMain.contains("mainActorCanonicalBuildAttemptCount=0"))
+        #expect(fileSnapshot.contains("builtOffMain=true"))
+        #expect(fileSnapshot.contains("mainActorFileTreeAttemptCount=0"))
+        #expect(fileSnapshot.contains("requestBuildCount=1"))
+        #expect(fileManifest.contains("builtOffMain=true"))
+        #expect(fileManifest.contains("cacheKeyPrefix="))
+        #expect(completed.contains("canonicalBuildSkippedCount=0"))
+        #expect(completed.contains("canonicalBuildReusedCount=1"))
+        #expect(completed.contains("duplicateCanonicalBuildPreventedCount=1"))
+        #expect(completed.contains("mainActorCanonicalBuildAttemptCount=0"))
+    }
+
+    @MainActor
+    @Test func canonicalFullSyncMacInventoryBuildsCanonicalSnapshotOncePerRequest() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try await saveInboxRecording(id: "full-sync-inventory", title: "Full Sync", store: fileStore)
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalKernelMode: .canonicalFullSync,
+            onConnectionDiagnostic: diagnostics.append
+        )
+
+        let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(),
+            syncRunID: "full-sync-once"
+        )
+        let events = diagnostics.events()
+        let routeCompleted = try #require(events.last { $0.phase == "macInventoryRouteCompleted" }?.errorMessage)
+        let runtimeReuse = try #require(events.last { $0.phase == "canonicalInventoryRuntimeSnapshotReused" }?.errorMessage)
+
+        #expect(response.ok)
+        #expect(response.inventory?.canonicalManifest != nil)
+        #expect(events.filter { $0.phase == "macInventoryCanonicalBuildStarted" }.count == 1)
+        #expect(events.filter { $0.phase == "macInventoryCanonicalBuildCompleted" }.count == 1)
+        #expect(events.filter { $0.phase == "macInventoryCanonicalBuildReused" }.count == 1)
+        #expect(events.filter { $0.phase == "macInventoryCanonicalDuplicateBuildPrevented" }.count == 1)
+        #expect(events.filter { $0.phase == "canonicalFileKernelSnapshotBuilt" }.count == 1)
+        #expect(events.filter { $0.phase == "canonicalFileKernelManifestBuilt" }.count == 1)
+        #expect(routeCompleted.contains("canonicalBuildReusedCount=1"))
+        #expect(routeCompleted.contains("duplicateCanonicalBuildPreventedCount=1"))
+        #expect(runtimeReuse.contains("reused=true"))
+    }
+
+    @MainActor
+    @Test func localNetworkSyncArtifactRequestRejectsTraversalAndServesApprovedTranscript() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let fileStore = MacRecordingFileStore(rootURL: appRootURL)
+        _ = try await saveInboxRecording(id: "artifact-recording", title: "Artifact", store: fileStore)
         let transcriptRelativePath = "transcripts/artifact-recording/transcript.md"
         let transcriptURL = appRootURL.appendingPathComponent(transcriptRelativePath, isDirectory: false)
         try FileManager.default.createDirectory(at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -675,21 +863,27 @@ struct StudyLibrarySyncTests {
             syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
             runtimeConfiguration: .default
         )
-        let inventory = try #require(server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice()).inventory)
+        let inventory = try #require(await server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice()).inventory)
         let artifact = try #require(inventory.artifacts.first { $0.kind == .transcriptMarkdown })
         let requestBody = try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: artifact.artifactID))
 
-        let response = server.localNetworkSyncArtifactResponseForVerifiedDevice(makePairedDevice(), requestBody: requestBody)
-        let traversal = server.localNetworkSyncArtifactResponseForVerifiedDevice(
+        let response = await server.localNetworkSyncArtifactResponseForVerifiedDevice(makePairedDevice(), requestBody: requestBody)
+        let traversal = await server.localNetworkSyncArtifactResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: "../secret"))
         )
-        let unknown = server.localNetworkSyncArtifactResponseForVerifiedDevice(
+        let unknown = await server.localNetworkSyncArtifactResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder().encode(LocalNetworkSyncArtifactRequest(artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "missing", logicalPathToken: "transcripts/missing.md")))
         )
 
-        let expectedChecksum = try LocalNetworkSyncArtifactFileService.sha256Hex(fileURL: transcriptURL)
+        let expectedChecksum = await CanonicalChecksumRuntime().checksum(
+            fileURL: transcriptURL,
+            logicalToken: "transcripts/artifact-recording/transcript.md",
+            nodeRole: .mac,
+            cacheDirectoryURL: scratchURL.appendingPathComponent("checksum-cache", isDirectory: true),
+            configuration: CanonicalInventoryRuntimeConfiguration(persistentChecksumCacheEnabled: false)
+        ).sha256
 
         #expect(response.ok)
         #expect(response.checksum == expectedChecksum)
@@ -702,7 +896,7 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncArtifactPutStoresApprovedSmallArtifactAndRejectsUnsafePaths() throws {
+    @Test func localNetworkSyncArtifactPutStoresApprovedSmallArtifactAndRejectsUnsafePaths() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
@@ -730,17 +924,17 @@ struct StudyLibrarySyncTests {
             dataBase64: transcriptData.base64EncodedString()
         )
 
-        let response = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let response = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(request)
         )
         let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
-        let repeated = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let repeated = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(request)
         )
         let traversalPath = "transcripts/../secret.md"
-        let traversal = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let traversal = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: traversalPath),
@@ -754,7 +948,7 @@ struct StudyLibrarySyncTests {
             ))
         )
         let absolutePath = "/tmp/rokurics-escape/transcript.md"
-        let absolute = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let absolute = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: absolutePath),
@@ -768,7 +962,7 @@ struct StudyLibrarySyncTests {
             ))
         )
         let wrongKindPath = "notes/incoming-recording/transcript.md"
-        let wrongKind = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let wrongKind = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: LocalNetworkSyncArtifactID.make(kind: .transcriptMarkdown, ownerID: "incoming-recording", logicalPathToken: wrongKindPath),
@@ -782,7 +976,7 @@ struct StudyLibrarySyncTests {
             ))
         )
         let audioPath = "audio/inbox/incoming-recording/audio.m4a"
-        let audio = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let audio = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: LocalNetworkSyncArtifactID.make(kind: .audio, ownerID: "incoming-recording", logicalPathToken: audioPath),
@@ -813,7 +1007,7 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncArtifactPutStoresLargeArtifactInChunks() throws {
+    @Test func localNetworkSyncArtifactPutStoresLargeArtifactInChunks() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
@@ -851,7 +1045,7 @@ struct StudyLibrarySyncTests {
                 totalSize: Int64(transcriptData.count),
                 isFinalChunk: end == transcriptData.count
             )
-            responses.append(server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            responses.append(await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
                 makePairedDevice(),
                 requestBody: try JSONEncoder.syncTestEncoder.encode(request)
             ))
@@ -869,7 +1063,7 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncArtifactStatusReportsIncomingTempOffsetAndPutRejectsOffsetMismatch() throws {
+    @Test func localNetworkSyncArtifactStatusReportsIncomingTempOffsetAndPutRejectsOffsetMismatch() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
@@ -888,7 +1082,7 @@ struct StudyLibrarySyncTests {
         )
         let checksum = MacSecurityUtilities.sha256Hex(transcriptData)
         let firstChunk = transcriptData.subdata(in: 0..<(2 * 1024 * 1024))
-        let firstPut = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let firstPut = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: artifactID,
@@ -906,7 +1100,7 @@ struct StudyLibrarySyncTests {
                 syncRunID: "mac-status-run"
             ))
         )
-        let status = server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+        let status = await server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactStatusRequest(
                 artifactID: artifactID,
@@ -918,7 +1112,7 @@ struct StudyLibrarySyncTests {
                 syncRunID: "mac-status-run"
             ))
         )
-        let badOffset = server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+        let badOffset = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
                 artifactID: artifactID,
@@ -948,12 +1142,12 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
-    @Test func localNetworkSyncApplyMetadataMergesStudyMetadataWithoutTouchingAudio() throws {
+    @Test func localNetworkSyncApplyMetadataMergesStudyMetadataWithoutTouchingAudio() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
         let fileStore = MacRecordingFileStore(rootURL: appRootURL)
-        let recordingDirectory = try saveInboxRecording(id: "apply-metadata-recording", title: "旧标题", store: fileStore)
+        let recordingDirectory = try await saveInboxRecording(id: "apply-metadata-recording", title: "旧标题", store: fileStore)
         let audioURL = recordingDirectory.appendingPathComponent("audio.m4a", isDirectory: false)
         let studyStore = StudyLibraryStore(rootURL: appRootURL, recordingFileStore: fileStore, listenForInboxChanges: false)
         var item = try #require(studyStore.item(recordingID: "apply-metadata-recording"))
@@ -967,7 +1161,7 @@ struct StudyLibrarySyncTests {
             syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
             runtimeConfiguration: .default
         )
-        let response = try server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+        let response = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: manifest))
         )
@@ -977,6 +1171,221 @@ struct StudyLibrarySyncTests {
         #expect(response.applyResult?.appliedItemCount == 1)
         #expect(reloaded.item(recordingID: "apply-metadata-recording")?.title == "同步后的标题")
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+}
+
+struct CanonicalManifestRecordingsApplyTests {
+    @MainActor
+    @Test func canonicalFullSyncServerApplyConsumesManifestRecordingsAndInventoryExposesMetadataOnly() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let canonical = CanonicalKernelSwitchConfiguration(
+            mode: .canonicalFullSync,
+            policy: .debugInternal(manualFullSyncConfirmation: true)
+        ).resolve().effectiveConfiguration
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalSyncRuntimeConfiguration: canonical.syncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonical.applyRuntimeConfiguration,
+            canonicalExistenceApplyRuntimeConfiguration: canonical.existenceApplyRuntimeConfiguration
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_480),
+            items: [],
+            folders: [],
+            recordings: [Self.recordingFact()]
+        )
+
+        let response = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: manifest))
+        )
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+        let ledgerRecord = try port.readRecord(objectID: "manifest-recording-01")
+        let record = try #require(ledgerRecord)
+        let inventoryResponse = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            syncRunID: "v8-48-inventory"
+        )
+        let inventory = try #require(inventoryResponse.inventory)
+        let inventoryRecording = try #require(inventory.recordings.first { $0.recordingID == "manifest-recording-01" })
+        let inboxAudioURL = appRootURL
+            .appendingPathComponent("audio", isDirectory: true)
+            .appendingPathComponent("inbox", isDirectory: true)
+            .appendingPathComponent("manifest-recording-01", isDirectory: true)
+            .appendingPathComponent("audio.m4a", isDirectory: false)
+        let receiveJSONURL = inboxAudioURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("receive.json", isDirectory: false)
+
+        #expect(response.ok)
+        #expect(response.applyResult?.failedChanges == 0)
+        #expect(record.objectID == "manifest-recording-01")
+        #expect(record.metadataHash == "manifest-recording-metadata-hash")
+        #expect(record.audioAvailable == false)
+        #expect(record.audioHash == nil)
+        #expect(record.audioByteSize == nil)
+        #expect(FileManager.default.fileExists(atPath: inboxAudioURL.path) == false)
+        #expect(FileManager.default.fileExists(atPath: receiveJSONURL.path) == false)
+        #expect(inventoryRecording.audioAvailable == false)
+        #expect(inventoryRecording.audioChecksum == nil)
+        #expect(inventoryRecording.audioSize == nil)
+        #expect(inventoryRecording.audioLogicalPathToken == nil)
+        #expect(inventoryRecording.receiveStatus == "canonicalMetadataOnly")
+    }
+
+    @MainActor
+    @Test func defaultServerApplyDoesNotConsumeManifestRecordings() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default
+        )
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_480),
+            items: [],
+            folders: [],
+            recordings: [Self.recordingFact()]
+        )
+
+        let response = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: manifest))
+        )
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+
+        #expect(response.ok)
+        #expect(try port.loadRecords().isEmpty)
+    }
+
+    @MainActor
+    @Test func malformedRecordingFactIsBlockedWithoutPreventingValidFacts() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let canonical = CanonicalKernelSwitchConfiguration(
+            mode: .canonicalFullSync,
+            policy: .debugInternal(manualFullSyncConfirmation: true)
+        ).resolve().effectiveConfiguration
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalSyncRuntimeConfiguration: canonical.syncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonical.applyRuntimeConfiguration,
+            canonicalExistenceApplyRuntimeConfiguration: canonical.existenceApplyRuntimeConfiguration
+        )
+        let malformed = Self.recordingFact(recordingID: "malformed-recording", metadataHash: nil)
+        let valid = Self.recordingFact(recordingID: "valid-recording", metadataHash: "valid-metadata-hash")
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_481),
+            items: [],
+            folders: [],
+            recordings: [malformed, valid]
+        )
+
+        let response = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: manifest))
+        )
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+
+        #expect(response.ok)
+        let malformedRecord = try port.readRecord(objectID: "malformed-recording")
+        let validRecord = try port.readRecord(objectID: "valid-recording")
+        #expect(malformedRecord == nil)
+        #expect(validRecord?.metadataHash == "valid-metadata-hash")
+    }
+
+    @MainActor
+    @Test func repeatedApplyNoOpsAndMetadataHashChangeUpdatesRecord() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let canonical = CanonicalKernelSwitchConfiguration(
+            mode: .canonicalFullSync,
+            policy: .debugInternal(manualFullSyncConfirmation: true)
+        ).resolve().effectiveConfiguration
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalSyncRuntimeConfiguration: canonical.syncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonical.applyRuntimeConfiguration,
+            canonicalExistenceApplyRuntimeConfiguration: canonical.existenceApplyRuntimeConfiguration
+        )
+        let first = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_482),
+            items: [],
+            folders: [],
+            recordings: [Self.recordingFact(metadataHash: "first-metadata-hash")]
+        )
+        let second = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_483),
+            items: [],
+            folders: [],
+            recordings: [Self.recordingFact(metadataHash: "second-metadata-hash")]
+        )
+
+        _ = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: first))
+        )
+        _ = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: first))
+        )
+        _ = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: second))
+        )
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+
+        let record = try port.readRecord(objectID: "manifest-recording-01")
+        #expect(record?.metadataHash == "second-metadata-hash")
+    }
+
+    private static func recordingFact(
+        recordingID: String = "manifest-recording-01",
+        metadataHash: String? = "manifest-recording-metadata-hash"
+    ) -> LocalNetworkSyncRecordingEntry {
+        LocalNetworkSyncRecordingEntry(
+            recordingID: recordingID,
+            metadataHash: metadataHash,
+            audioAvailable: true,
+            audioChecksum: String(repeating: "a", count: 64),
+            audioSize: 16,
+            uploadLedgerState: nil,
+            receiveStatus: nil,
+            processingStatus: nil,
+            updatedAt: Date(timeIntervalSince1970: 8_480),
+            deleted: false,
+            title: "Manifest Recording",
+            createdAt: Date(timeIntervalSince1970: 8_470),
+            tombstone: false,
+            audioAvailability: .local,
+            uploadStatus: nil,
+            transcriptionStatus: nil,
+            noteStatus: nil,
+            sourceDeviceID: "iphone-device",
+            artifactRefs: nil,
+            audioLogicalPathToken: "Recordings/\(recordingID).m4a"
+        )
     }
 }
 
@@ -1038,24 +1447,6 @@ private func gitConfigPairs(from environment: [String: String]) -> [String: Stri
     return result
 }
 
-private func makeCommitFailingGitShim(rootURL: URL) throws -> URL {
-    let shimURL = rootURL.appendingPathComponent("git-commit-fails.sh", isDirectory: false)
-    let script = """
-    #!/bin/sh
-    for arg in "$@"; do
-      if [ "$arg" = "commit" ]; then
-        echo "simulated signing failure" >&2
-        exit 23
-      fi
-    done
-    exec /usr/bin/git "$@"
-
-    """
-    try script.write(to: shimURL, atomically: true, encoding: .utf8)
-    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shimURL.path)
-    return shimURL
-}
-
 private func makeGitSpyShim(rootURL: URL) throws -> URL {
     let shimURL = rootURL.appendingPathComponent("git-spy.sh", isDirectory: false)
     let logURL = rootURL.appendingPathComponent("git-spy-invocations.log", isDirectory: false)
@@ -1070,19 +1461,48 @@ private func makeGitSpyShim(rootURL: URL) throws -> URL {
     return shimURL
 }
 
+private final class LockedConnectionDiagnostics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [SecureConnectionDiagnosticEvent] = []
+
+    func append(_ event: SecureConnectionDiagnosticEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [SecureConnectionDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 @MainActor
 private func makeSyncServer(
     rootURL: URL,
     gitStore: GitBackedStudyMetadataStore?,
     syncStateStore: StudyLibrarySyncStateStore,
-    runtimeConfiguration: StudyLibrarySyncRuntimeConfiguration
+    runtimeConfiguration: StudyLibrarySyncRuntimeConfiguration,
+    canonicalSyncRuntimeConfiguration: CanonicalSyncRuntimeConfiguration = .disabled,
+    canonicalApplyRuntimeConfiguration: CanonicalApplyRuntimeConfiguration = .disabled,
+    canonicalExistenceApplyRuntimeConfiguration: CanonicalExistenceApplyRuntimeConfiguration = .disabled,
+    canonicalReadRuntimeConfiguration: CanonicalReadRuntimeConfiguration = .disabled,
+    canonicalKernelMode: CanonicalKernelSwitchMode = .oldKernel,
+    injectCanonicalExistenceApplyPort: Bool = true,
+    onConnectionDiagnostic: @escaping SecureLocalHTTPSServer.ConnectionDiagnosticHandler = { _ in }
 ) -> SecureLocalHTTPSServer {
     let appRootURL = rootURL.appendingPathComponent("MacApp", isDirectory: true)
     let recordingFileStore = MacRecordingFileStore(rootURL: appRootURL)
+    let existenceApplyPort = injectCanonicalExistenceApplyPort
+        ? MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+        : nil
     let studyLibraryStore = StudyLibraryStore(
         rootURL: appRootURL,
         recordingFileStore: recordingFileStore,
-        listenForInboxChanges: false
+        listenForInboxChanges: false,
+        canonicalExistenceApplyRuntimeConfiguration: canonicalExistenceApplyRuntimeConfiguration,
+        canonicalRecordingExistenceApplyPort: existenceApplyPort
     )
     let pairedDeviceStore = PairedDeviceStore()
     return SecureLocalHTTPSServer(
@@ -1103,7 +1523,14 @@ private func makeSyncServer(
         onFailed: { _ in },
         onPairingChanged: {},
         onUploadAccepted: { _ in },
-        onRecordingAccepted: { _ in }
+        onRecordingAccepted: { _, _ in },
+        onConnectionDiagnostic: onConnectionDiagnostic,
+        canonicalSyncRuntimeConfiguration: canonicalSyncRuntimeConfiguration,
+        canonicalApplyRuntimeConfiguration: canonicalApplyRuntimeConfiguration,
+        canonicalExistenceApplyRuntimeConfiguration: canonicalExistenceApplyRuntimeConfiguration,
+        canonicalReadRuntimeConfiguration: canonicalReadRuntimeConfiguration,
+        canonicalKernelMode: canonicalKernelMode,
+        canonicalRecordingExistenceApplyPort: existenceApplyPort
     )
 }
 
@@ -1171,7 +1598,7 @@ private func saveInboxRecording(
     title: String,
     store: MacRecordingFileStore,
     studyFiling: StudyFilingPath? = nil
-) throws -> URL {
+) async throws -> URL {
     let sourceDevice = PairedDevice(
         id: "device-01",
         deviceName: "Vita iPhone",
@@ -1204,6 +1631,6 @@ private func saveInboxRecording(
     )
 
     let receiveResult = try store.saveMetadata(metadata, sourceDevice: sourceDevice)
-    _ = try store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
+    _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: sourceDevice)
     return receiveResult.directoryURL
 }

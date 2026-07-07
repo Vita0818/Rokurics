@@ -42,49 +42,49 @@ enum TranscriptionConfigurationValidationStatus: String, Codable, Equatable {
     var displayText: String {
         switch self {
         case .notConfigured:
-            return "未配置"
+            return RokuricsCopy.text("未配置", "Not set")
         case .valid:
-            return "配置有效"
+            return RokuricsCopy.text("配置有效", "Valid")
         case .executableNotFound:
-            return "可执行文件不存在"
+            return RokuricsCopy.text("可执行文件不存在", "Executable missing")
         case .executableIsDirectory:
-            return "可执行文件路径是文件夹"
+            return RokuricsCopy.text("可执行文件路径是文件夹", "Executable is a folder")
         case .executableNotExecutable:
-            return "缺少执行权限"
+            return RokuricsCopy.text("缺少执行权限", "Not executable")
         case .executableAccessDenied:
-            return "未授权"
+            return RokuricsCopy.text("未授权", "No access")
         case .executableEntitlementMissing:
-            return "缺少执行授权"
+            return RokuricsCopy.text("缺少执行授权", "Missing entitlement")
         case .bookmarkEntitlementMissing:
-            return "缺少书签授权"
+            return RokuricsCopy.text("缺少书签授权", "Missing bookmark entitlement")
         case .modelNotFound:
-            return "模型文件不存在"
+            return RokuricsCopy.text("模型文件不存在", "Model missing")
         case .modelIsDirectory:
-            return "模型路径是文件夹"
+            return RokuricsCopy.text("模型路径是文件夹", "Model is a folder")
         case .modelAccessDenied:
-            return "模型未授权"
+            return RokuricsCopy.text("模型未授权", "Model access denied")
         case .whisperCppRootDirectoryNotFound:
-            return "根目录不存在"
+            return RokuricsCopy.text("根目录不存在", "Root missing")
         case .whisperCppRootDirectoryIsFile:
-            return "根目录不是文件夹"
+            return RokuricsCopy.text("根目录不是文件夹", "Root is not a folder")
         case .whisperCppRootDirectoryAccessDenied:
-            return "根目录未授权"
+            return RokuricsCopy.text("根目录未授权", "Root access denied")
         case .whisperCppRootDirectoryInvalid:
-            return "根目录不完整"
+            return RokuricsCopy.text("根目录不完整", "Root incomplete")
         case .ffmpegNotFound:
-            return "ffmpeg 不存在"
+            return RokuricsCopy.text("ffmpeg 不存在", "ffmpeg missing")
         case .ffmpegIsDirectory:
-            return "ffmpeg 路径是文件夹"
+            return RokuricsCopy.text("ffmpeg 路径是文件夹", "ffmpeg is a folder")
         case .ffmpegNotExecutable:
-            return "ffmpeg 缺少执行权限"
+            return RokuricsCopy.text("ffmpeg 缺少执行权限", "ffmpeg not executable")
         case .ffmpegAccessDenied:
-            return "ffmpeg 未授权"
+            return RokuricsCopy.text("ffmpeg 未授权", "ffmpeg access denied")
         case .ffmpegEntitlementMissing:
-            return "缺少执行授权"
+            return RokuricsCopy.text("缺少执行授权", "Missing entitlement")
         case .outputDirectoryNotWritable:
-            return "输出目录不可写"
+            return RokuricsCopy.text("输出目录不可写", "Output not writable")
         case .checkFailed:
-            return "检查失败"
+            return RokuricsCopy.text("检查失败", "Check failed")
         }
     }
 }
@@ -124,7 +124,7 @@ final class TranscriptionSettingsStore: ObservableObject {
             selectedProviderKind = .mock
             whisperConfiguration = .default
             lastValidationStatus = .notConfigured
-            lastValidationMessage = "Mock Transcription 无需外部配置"
+            lastValidationMessage = RokuricsCopy.text("Mock Transcription 无需外部配置", "Mock Transcription needs no setup")
         }
     }
 
@@ -155,7 +155,10 @@ final class TranscriptionSettingsStore: ObservableObject {
         }
         updateValidation(
             status: .notConfigured,
-            message: "已清除旧 sandbox 授权和路径，请重新选择 whisper.cpp、模型、根目录和 ffmpeg。"
+            message: RokuricsCopy.text(
+                "已清除旧 sandbox 授权和路径，请重新选择 whisper.cpp、模型、根目录和 ffmpeg。",
+                "Cleared old sandbox access and paths. Rechoose whisper.cpp, model, root, and ffmpeg."
+            )
         )
     }
 

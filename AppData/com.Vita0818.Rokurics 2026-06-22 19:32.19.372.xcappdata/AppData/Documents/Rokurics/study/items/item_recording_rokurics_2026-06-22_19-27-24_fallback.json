@@ -1,0 +1,35 @@
+{
+  "audioRelativePath" : "Recordings\/rokurics_2026-06-22_19-27-24_fallback.m4a",
+  "createdAt" : "2026-06-22T11:27:25Z",
+  "customProperties" : {
+    "localNetworkTransferObjectID" : "rokurics_2026-06-22_19-27-24_fallback",
+    "localNetworkTransferObjectKind" : "receiveJSON",
+    "localNetworkTransferProgressFraction" : "0.0",
+    "localNetworkTransferReceivedBytes" : "0",
+    "localNetworkTransferSourceDeviceID" : "mac-d6c0ef1617bf4af1",
+    "localNetworkTransferState" : "pending",
+    "localNetworkTransferStatusText" : "等待传输",
+    "localNetworkTransferTotalBytes" : "1172"
+  },
+  "duration" : 4.684013605442177,
+  "filing" : {
+
+  },
+  "folderIDs" : [
+    "folder_type_未分类"
+  ],
+  "isTrashed" : false,
+  "itemID" : "item_recording_rokurics_2026-06-22_19-27-24_fallback",
+  "kind" : "recordingBundle",
+  "noteStatus" : "notStarted",
+  "recordingID" : "rokurics_2026-06-22_19-27-24_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-06-22_19-27-24_fallback",
+  "sourceDescription" : "iPhone",
+  "syncConflictStatus" : "conflict_preserved_local",
+  "tags" : [
+
+  ],
+  "title" : "录音 2026-06-22 19:27",
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-06-22T11:27:32Z"
+}

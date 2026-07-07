@@ -9,7 +9,7 @@ import AppKit
 import SwiftUI
 
 struct MacStudyLibraryHeaderModel {
-    static let title = "学习库"
+    static var title: String { RokuricsCopy.text("学习库", "Library") }
     static let showsLeadingIcon = false
     static let titleStyle: RokuricsTextStyle = .pageTitle
 }
@@ -66,6 +66,7 @@ struct MacStudyLibraryView: View {
     ]
 
     var body: some View {
+        let _ = ConnectionDiagnosticsStore.shared.recordRuntimeCounterTick(scope: "MacStudyLibraryList", kind: "body")
         ZStack {
             MacTheme.pageGradient(for: colorScheme)
                 .ignoresSafeArea()
@@ -75,18 +76,31 @@ struct MacStudyLibraryView: View {
             }
         }
         .onAppear {
+            let perfStartedAt = Date()
+            ConnectionDiagnosticsStore.shared.recordPerfLog(
+                CanonicalPerfLog.started(operation: .enterStudyLibrary)
+            )
             audioInboxStore.refreshRecordingInbox()
             studyLibraryStore.refresh()
             keepBrowsePathValid()
+            let totalMs = CanonicalPerfLog.elapsedMs(since: perfStartedAt)
+            let stages = CanonicalPerfLog.StageDurations(projectionRebuildMs: totalMs)
+            for record in CanonicalPerfLog.finishedRecords(
+                operation: .enterStudyLibrary,
+                totalMs: totalMs,
+                stages: stages
+            ) {
+                ConnectionDiagnosticsStore.shared.recordPerfLog(record)
+            }
         }
         .onChange(of: audioInboxStore.recordingItems) {
             studyLibraryStore.refresh()
             keepBrowsePathValid()
         }
-        .onChange(of: studyLibraryStore.allStudyItems) {
+        .onChange(of: studyLibraryStore.effectiveStudyItems) {
             keepBrowsePathValid()
         }
-        .onChange(of: studyLibraryStore.allStudyFolders) {
+        .onChange(of: studyLibraryStore.effectiveStudyFolders) {
             keepBrowsePathValid()
         }
         .confirmationDialog(
@@ -94,11 +108,11 @@ struct MacStudyLibraryView: View {
             isPresented: $isPermanentDeleteConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("永久删除", role: .destructive) {
+            Button(RokuricsCopy.text("永久删除", "Delete"), role: .destructive) {
                 commitPermanentDelete()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 permanentDeleteTarget = nil
             }
         } message: {
@@ -123,8 +137,8 @@ struct MacStudyLibraryView: View {
             )
             .frame(minWidth: 360, minHeight: 190)
         }
-        .alert("学习库操作失败", isPresented: operationErrorBinding) {
-            Button("好", role: .cancel) {
+        .alert(RokuricsCopy.text("学习库操作失败", "Library Operation Failed"), isPresented: operationErrorBinding) {
+            Button(RokuricsCopy.text("好", "OK"), role: .cancel) {
                 operationErrorMessage = nil
             }
         } message: {
@@ -143,10 +157,12 @@ struct MacStudyLibraryView: View {
                 self.selectedNoteItem = nil
             }
         } else if let detailItem = selectedRecordingDetailItem {
+            let displaySyncState = canonicalDisplaySyncState(for: detailItem)
             MacStudyRecordingDetailPage(
                 item: detailItem,
-                allStudyItems: studyLibraryStore.allStudyItems,
-                allStudyFolders: studyLibraryStore.allStudyFolders,
+                displaySyncState: displaySyncState,
+                allStudyItems: studyLibraryStore.effectiveStudyItems,
+                allStudyFolders: studyLibraryStore.effectiveStudyFolders,
                 type: $typeDraft,
                 subject: $subjectDraft,
                 chapter: $chapterDraft,
@@ -168,14 +184,14 @@ struct MacStudyLibraryView: View {
                 },
                 onTranscribe: {
                     transcriptionCoordinator.startTranscription(recordingID: detailItem.id)
-                    statusMessage = "转写任务已提交"
+                    statusMessage = RokuricsCopy.text("转写任务已提交", "Transcription queued")
                 },
                 onViewNote: {
                     selectedNoteItem = detailItem
                 },
                 onGenerateNote: {
                     noteGenerationCoordinator.startNoteGeneration(recordingID: detailItem.id)
-                    statusMessage = "笔记任务已提交"
+                    statusMessage = RokuricsCopy.text("笔记任务已提交", "Note queued")
                 },
                 onImportToChat: {
                     importRecordingToChat(detailItem)
@@ -209,8 +225,8 @@ struct MacStudyLibraryView: View {
             MacStudyToolbarIconButton(systemImage: "chevron.left", isEnabled: !navigationState.browsePath.isRoot) {
                 navigationState.browsePath = navigationState.browsePath.parent
             }
-            .help("返回上一级")
-            .accessibilityLabel("返回上一级")
+            .help(RokuricsCopy.text("返回上一级", "Back"))
+            .accessibilityLabel(RokuricsCopy.text("返回上一级", "Back"))
 
             MacStudyBreadcrumbView(path: navigationState.browsePath) { path in
                 navigationState.navigate(to: path)
@@ -224,19 +240,19 @@ struct MacStudyLibraryView: View {
                 isNewFolderSheetPresented = true
             }
                 .help(newFolderHelpText)
-                .accessibilityLabel("新建文件夹")
+                .accessibilityLabel(RokuricsCopy.text("新建文件夹", "New Folder"))
 
             MacStudyToolbarIconButton(systemImage: "bubble.left.and.bubble.right", isEnabled: true) {
                 importCurrentBrowseContext()
             }
-            .help("导入 AI 对话上下文")
-            .accessibilityLabel("导入 AI 对话上下文")
+            .help(RokuricsCopy.text("导入 AI 对话上下文", "Import to AI Chat"))
+            .accessibilityLabel(RokuricsCopy.text("导入 AI 对话上下文", "Import to AI Chat"))
 
             MacStudyToolbarIconButton(systemImage: "trash", isEnabled: true) {
                 isTrashSheetPresented = true
             }
-            .help("打开废纸篓")
-            .accessibilityLabel("打开废纸篓")
+            .help(RokuricsCopy.text("打开废纸篓", "Open Trash"))
+            .accessibilityLabel(RokuricsCopy.text("打开废纸篓", "Open Trash"))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -247,22 +263,22 @@ struct MacStudyLibraryView: View {
     }
 
     private var newFolderLevelTitle: String {
-        StudyFolderMetadata.level(forDepth: navigationState.browsePath.depth)?.title ?? "文件夹"
+        StudyFolderMetadata.level(forDepth: navigationState.browsePath.depth)?.title ?? RokuricsCopy.text("文件夹", "Folder")
     }
 
     private var newFolderHelpText: String {
-        canCreateFolderHere ? "新建\(newFolderLevelTitle)虚拟文件夹" : "当前层级不能新建子文件夹"
+        canCreateFolderHere ? RokuricsCopy.text("新建\(newFolderLevelTitle)虚拟文件夹", "New \(newFolderLevelTitle) folder") : RokuricsCopy.text("当前层级不能新建子文件夹", "Cannot create a child folder here")
     }
 
     private var browserContent: some View {
         let content = StudyLibraryBrowser.content(
-            items: studyLibraryStore.allStudyItems,
-            folders: studyLibraryStore.allStudyFolders,
+            items: studyLibraryStore.effectiveStudyItems,
+            folders: studyLibraryStore.effectiveStudyFolders,
             path: navigationState.browsePath
         )
 
         return Group {
-            if studyLibraryStore.allStudyItems.isEmpty && studyLibraryStore.allStudyFolders.isEmpty {
+            if studyLibraryStore.effectiveStudyItems.isEmpty && studyLibraryStore.effectiveStudyFolders.isEmpty {
                 emptyLibraryState
             } else if content.folders.isEmpty && content.items.isEmpty {
                 emptyFolderState
@@ -296,8 +312,10 @@ struct MacStudyLibraryView: View {
                                 ForEach(content.items) { item in
                                     if item.kind == .recordingBundle, let recordingID = item.recordingID {
                                         let inboxItem = liveInboxItem(for: recordingID) ?? item.asInboxItem()
+                                        let displaySyncState = canonicalDisplaySyncState(for: inboxItem)
                                         MacStudyRecordingCard(
                                             item: inboxItem,
+                                            displaySyncState: displaySyncState,
                                             isTranscribing: transcriptionCoordinator.isTranscribing(recordingID: inboxItem.id),
                                             isGeneratingNote: noteGenerationCoordinator.isGenerating(recordingID: inboxItem.id),
                                             onPlay: {
@@ -351,12 +369,12 @@ struct MacStudyLibraryView: View {
                 .font(.system(size: 28, weight: .semibold))
                 .foregroundStyle(MacTheme.aqua)
 
-            Text("暂无学习内容")
-                .font(MacTypography.chineseTitle(size: 22, weight: .bold))
+            Text(RokuricsCopy.text("暂无学习内容", "No study items"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseTitle(size: 22, weight: .bold) : MacTypography.englishTitle(size: 22, weight: .bold))
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
 
-            Text("收到或保存的录音会在这里按门类、课程、章节和主题逐层显示。")
-                .font(MacTypography.chineseBody(size: 14, weight: .medium))
+            Text(RokuricsCopy.text("收到或保存的录音会在这里按门类、课程、章节和主题逐层显示。", "Saved recordings appear by type, course, chapter, and topic."))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
         }
         .padding(22)
@@ -365,8 +383,8 @@ struct MacStudyLibraryView: View {
     }
 
     private var emptyFolderState: some View {
-        Text("这个文件夹里暂时没有学习内容")
-            .font(MacTypography.chineseBody(size: 14, weight: .medium))
+        Text(RokuricsCopy.text("这个文件夹里暂时没有学习内容", "This folder is empty for now."))
+            .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
             .foregroundStyle(MacTheme.softText(for: colorScheme))
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -391,6 +409,11 @@ struct MacStudyLibraryView: View {
         return liveInboxItem(for: recordingID) ?? studyLibraryStore.item(recordingID: recordingID)?.asInboxItem()
     }
 
+    private func canonicalDisplaySyncState(for item: MacRecordingInboxItem) -> CanonicalDisplaySyncState? {
+        let objectID = CanonicalObjectID("recordingAudio:\(item.id)")
+        return studyLibraryStore.canonicalDisplaySyncState(for: objectID)
+    }
+
     private func openDetail(_ item: MacRecordingInboxItem) {
         loadDraft(from: item)
         statusMessage = nil
@@ -409,7 +432,7 @@ struct MacStudyLibraryView: View {
     private func saveFilingDraft(for recordingID: String) {
         do {
             try studyLibraryStore.updateFiling(for: recordingID, studyFiling: currentFilingDraft.filingPath)
-            statusMessage = "归档已保存"
+            statusMessage = RokuricsCopy.text("归档已保存", "Filing saved")
             keepBrowsePathValid()
         } catch {
             operationErrorMessage = error.localizedDescription
@@ -437,7 +460,7 @@ struct MacStudyLibraryView: View {
     private func createFilingValue(level: StudyFolderLevel, name: String, for recordingID: String) {
         let draft = currentFilingDraft
         guard let parentPath = draft.parentBrowsePath(for: level) else {
-            operationErrorMessage = "请先选择上一级归类"
+            operationErrorMessage = RokuricsCopy.text("请先选择上一级归类", "Choose the parent category first")
             return
         }
 
@@ -447,7 +470,7 @@ struct MacStudyLibraryView: View {
             updatedDraft.select(level, value: name)
             applyFilingDraft(updatedDraft)
             try studyLibraryStore.updateFiling(for: recordingID, studyFiling: updatedDraft.filingPath)
-            statusMessage = "归档已保存"
+            statusMessage = RokuricsCopy.text("归档已保存", "Filing saved")
             keepBrowsePathValid()
         } catch {
             operationErrorMessage = error.localizedDescription
@@ -457,7 +480,7 @@ struct MacStudyLibraryView: View {
     private func commitCreateFolder() {
         do {
             let folder = try studyLibraryStore.createFolder(named: newFolderNameDraft, at: navigationState.browsePath)
-            statusMessage = "已新建\(folder.level.title)：\(folder.name)"
+            statusMessage = RokuricsCopy.text("已新建\(folder.level.title)：\(folder.name)", "Created \(folder.level.title): \(folder.name)")
             isNewFolderSheetPresented = false
             newFolderNameDraft = ""
             keepBrowsePathValid()
@@ -468,7 +491,7 @@ struct MacStudyLibraryView: View {
 
     private func importCurrentBrowseContext() {
         let exporter = StudyLibraryContextExporter(rootURL: studyLibraryStore.libraryRootURL)
-        let context = exporter.export(items: studyLibraryStore.allStudyItems, path: navigationState.browsePath)
+        let context = exporter.export(items: studyLibraryStore.effectiveStudyItems, path: navigationState.browsePath)
         onImportContext(context)
     }
 
@@ -539,7 +562,7 @@ struct MacStudyLibraryView: View {
             keepBrowsePathValid()
         } catch {
             operationErrorMessage = error.localizedDescription == "study_folder_not_empty"
-                ? "文件夹不为空"
+                ? RokuricsCopy.text("文件夹不为空", "Folder is not empty")
                 : error.localizedDescription
         }
     }
@@ -578,8 +601,8 @@ struct MacStudyLibraryView: View {
     private func keepBrowsePathValid() {
         while !navigationState.browsePath.isRoot {
             let content = StudyLibraryBrowser.content(
-                items: studyLibraryStore.allStudyItems,
-                folders: studyLibraryStore.allStudyFolders,
+                items: studyLibraryStore.effectiveStudyItems,
+                folders: studyLibraryStore.effectiveStudyFolders,
                 path: navigationState.browsePath
             )
             guard content.folders.isEmpty && content.items.isEmpty else {
@@ -599,7 +622,7 @@ struct MacStudyLibraryView: View {
             let audioURL = try audioInboxStore.audioFileURL(recordingID: item.id)
             NSWorkspace.shared.open(audioURL)
         } catch {
-            operationErrorMessage = "无法打开录音文件"
+            operationErrorMessage = RokuricsCopy.text("无法打开录音文件", "Could not open audio file")
         }
     }
 
@@ -723,7 +746,7 @@ private struct BreadcrumbSegmentButton: View {
 private struct MacStudyToolbarIconButton: View {
     let systemImage: String
     let isEnabled: Bool
-    var accessibilityTitle = "操作"
+    var accessibilityTitle = RokuricsCopy.text("操作", "Action")
     let action: () -> Void
 
     var body: some View {
@@ -945,8 +968,8 @@ private struct MacStudyFolderTile: View {
                     .minimumScaleFactor(0.82)
             }
 
-            Text("\(folder.itemCount) 项")
-                .font(MacTypography.chineseCaption(size: 11, weight: .semibold))
+            Text(RokuricsCopy.itemCount(folder.itemCount))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseCaption(size: 11, weight: .semibold) : MacTypography.englishCaption(size: 11, weight: .semibold))
                 .foregroundStyle(MacTheme.softText(for: colorScheme))
         }
         .padding(.horizontal, 12)
@@ -981,7 +1004,7 @@ private struct MacStudyFolderTile: View {
                 }
             )
         }
-        .help("打开\(folder.title)")
+        .help(RokuricsCopy.openLabel(folder.title))
     }
 }
 
@@ -1183,7 +1206,7 @@ private struct MacStudyStandaloneNoteCard: View {
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
-                    MacStudyStatusChip(text: "笔记", systemImage: "doc.text", tint: MacTheme.mint)
+                    MacStudyStatusChip(text: RokuricsCopy.text("笔记", "Note"), systemImage: "doc.text", tint: MacTheme.mint)
                     MacStudyStatusChip(text: item.filingPath.displaySummary, systemImage: "folder", tint: MacTheme.softText(for: colorScheme))
                 }
             }
@@ -1194,7 +1217,7 @@ private struct MacStudyStandaloneNoteCard: View {
                 systemImage: "bubble.left.and.bubble.right",
                 isEnabled: true,
                 tint: MacTheme.aqua,
-                helpText: "导入 AI 对话",
+                helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
                 action: onImportToChat
             )
         }
@@ -1206,7 +1229,7 @@ private struct MacStudyStandaloneNoteCard: View {
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
@@ -1214,6 +1237,7 @@ private struct MacStudyStandaloneNoteCard: View {
 
 private struct MacStudyRecordingCard: View {
     let item: MacRecordingInboxItem
+    let displaySyncState: CanonicalDisplaySyncState?
     let isTranscribing: Bool
     let isGeneratingNote: Bool
     let onPlay: () -> Void
@@ -1237,7 +1261,7 @@ private struct MacStudyRecordingCard: View {
                     }
                 }
                 .onTapGesture(count: 2, perform: onDelete)
-                .help("双击移入废纸篓")
+                .help(RokuricsCopy.text("双击移入废纸篓", "Double-click to trash"))
 
             VStack(alignment: .leading, spacing: 8) {
                 InlineEditableText(
@@ -1286,7 +1310,7 @@ private struct MacStudyRecordingCard: View {
     }
 
     private var canUseTranscriptionButton: Bool {
-        item.hasAudio && !isTranscribing && !item.isTranscriptionActive
+        displayAudioAvailable && !isTranscribing && !item.isTranscriptionActive
     }
 
     private var canUseNoteButton: Bool {
@@ -1295,16 +1319,17 @@ private struct MacStudyRecordingCard: View {
 
     @ViewBuilder
     private var actionArea: some View {
-        if let transfer = item.localNetworkReceiveTransferProgress,
+        if !displayAudioAvailable,
+           let transfer = item.localNetworkReceiveTransferProgress,
            transfer.isVisibleInActionArea {
             StudyRecordingTransferProgressView(transfer: transfer)
         } else {
             HStack(spacing: 8) {
                 MacStudyCardIconButton(
                     systemImage: "play.fill",
-                    isEnabled: item.hasAudio,
+                    isEnabled: displayAudioAvailable,
                     tint: MacTheme.leaf,
-                    helpText: "播放录音",
+                    helpText: RokuricsCopy.text("播放录音", "Play Recording"),
                     action: onPlay
                 )
 
@@ -1312,7 +1337,7 @@ private struct MacStudyRecordingCard: View {
                     systemImage: item.isTranscribed ? "arrow.clockwise" : "waveform.and.magnifyingglass",
                     isEnabled: canUseTranscriptionButton,
                     tint: MacTheme.aqua,
-                    helpText: item.isTranscribed ? "重新转写" : transcriptionHelpText,
+                    helpText: item.isTranscribed ? RokuricsCopy.text("重新转写", "Transcribe Again") : transcriptionHelpText,
                     action: onTranscribe
                 )
 
@@ -1320,7 +1345,7 @@ private struct MacStudyRecordingCard: View {
                     systemImage: item.isNoteGenerated ? "sparkles.rectangle.stack" : "sparkles",
                     isEnabled: canUseNoteButton,
                     tint: MacTheme.mint,
-                    helpText: item.isNoteGenerated ? "重新总结" : noteHelpText,
+                    helpText: item.isNoteGenerated ? RokuricsCopy.text("重新总结", "Summarize Again") : noteHelpText,
                     action: onGenerateNote
                 )
 
@@ -1328,16 +1353,20 @@ private struct MacStudyRecordingCard: View {
                     systemImage: "bubble.left.and.bubble.right",
                     isEnabled: true,
                     tint: MacTheme.aqua,
-                    helpText: "导入 AI 对话",
+                    helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
                     action: onImportToChat
                 )
             }
         }
     }
 
+    private var displayAudioAvailable: Bool {
+        displaySyncState?.canDisplayAsComplete == true
+    }
+
     private var transcriptionHelpText: String {
         if isTranscribing || item.isTranscriptionActive {
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         }
 
         return item.transcriptionActionText
@@ -1345,15 +1374,15 @@ private struct MacStudyRecordingCard: View {
 
     private var noteHelpText: String {
         if isGeneratingNote || item.isNoteGenerating {
-            return "总结中"
+            return RokuricsCopy.text("总结中", "Summarizing")
         }
 
-        return item.isNoteGenerated ? "重新总结" : "AI 总结"
+        return item.isNoteGenerated ? RokuricsCopy.text("重新总结", "Summarize Again") : RokuricsCopy.text("AI 总结", "AI Summary")
     }
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
@@ -1458,8 +1487,8 @@ private struct MacStudyNewFolderSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("新建\(levelTitle)")
-                .font(MacTypography.chineseTitle(size: 20, weight: .bold))
+            Text(RokuricsCopy.text("新建\(levelTitle)", "New \(levelTitle)"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseTitle(size: 20, weight: .bold) : MacTypography.englishTitle(size: 20, weight: .bold))
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
 
             TextField(levelTitle, text: $name)
@@ -1469,9 +1498,9 @@ private struct MacStudyNewFolderSheet: View {
             HStack {
                 Spacer()
 
-                Button("取消", action: onCancel)
+                Button(RokuricsCopy.text("取消", "Cancel"), action: onCancel)
 
-                Button("保存", action: onSave)
+                Button(RokuricsCopy.text("保存", "Save"), action: onSave)
                     .keyboardShortcut(.defaultAction)
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -1484,6 +1513,7 @@ private struct MacStudyNewFolderSheet: View {
 
 private struct MacStudyRecordingDetailPage: View {
     let item: MacRecordingInboxItem
+    let displaySyncState: CanonicalDisplaySyncState?
     let allStudyItems: [StudyItemMetadata]
     let allStudyFolders: [StudyFolderMetadata]
     @Binding var type: String
@@ -1519,7 +1549,7 @@ private struct MacStudyRecordingDetailPage: View {
                     )
 
                     MacStudyDetailActionButton(
-                        title: "查看转写",
+                        title: RokuricsCopy.text("查看转写", "Transcript"),
                         systemImage: "text.quote",
                         isEnabled: item.isTranscribed,
                         action: onViewTranscript
@@ -1533,7 +1563,7 @@ private struct MacStudyRecordingDetailPage: View {
                     )
 
                     MacStudyDetailActionButton(
-                        title: "查看总结",
+                        title: RokuricsCopy.text("查看总结", "Summary"),
                         systemImage: "doc.text",
                         isEnabled: item.isNoteGenerated,
                         action: onViewNote
@@ -1559,7 +1589,7 @@ private struct MacStudyRecordingDetailPage: View {
                     }
                 }
 
-                MacStudyFileStatusPanel(item: item)
+                MacStudyFileStatusPanel(item: item, displaySyncState: displaySyncState)
 
                 MacStudyNoteSummaryPreviewCard(item: item, onOpenNote: onViewNote)
             }
@@ -1582,7 +1612,7 @@ private struct MacStudyRecordingDetailPage: View {
             MacStudySheetCircularIconButton(
                 systemImage: "bubble.left.and.bubble.right",
                 tint: MacTheme.aqua,
-                helpText: "导入 AI 对话",
+                helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
                 role: nil,
                 action: onImportToChat
             )
@@ -1590,7 +1620,7 @@ private struct MacStudyRecordingDetailPage: View {
             MacStudySheetCircularIconButton(
                 systemImage: "trash",
                 tint: MacTheme.coral,
-                helpText: "移入废纸篓",
+                helpText: RokuricsCopy.text("移入废纸篓", "Move to Trash"),
                 role: .destructive,
                 action: onMoveToTrash
             )
@@ -1607,16 +1637,20 @@ private struct MacStudyRecordingDetailPage: View {
     }
 
     private var canUseTranscriptionButton: Bool {
-        item.hasAudio && !isTranscribing && !item.isTranscriptionActive
+        displayAudioAvailable && !isTranscribing && !item.isTranscriptionActive
+    }
+
+    private var displayAudioAvailable: Bool {
+        displaySyncState?.canDisplayAsComplete == true
     }
 
     private var transcriptionActionTitle: String {
         if isTranscribing || item.isTranscriptionActive {
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         }
 
         if item.isTranscribed {
-            return "重新转写"
+            return RokuricsCopy.text("重新转写", "Transcribe Again")
         }
 
         return item.transcriptionActionText
@@ -1624,10 +1658,10 @@ private struct MacStudyRecordingDetailPage: View {
 
     private var noteActionTitle: String {
         if isGeneratingNote || item.isNoteGenerating {
-            return "总结中"
+            return RokuricsCopy.text("总结中", "Summarizing")
         }
 
-        return item.isNoteGenerated ? "重新总结" : "AI 总结"
+        return item.isNoteGenerated ? RokuricsCopy.text("重新总结", "Summarize Again") : RokuricsCopy.text("AI 总结", "AI Summary")
     }
 
     private func detailPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1641,7 +1675,7 @@ private struct MacStudyRecordingDetailPage: View {
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
@@ -1660,10 +1694,13 @@ enum MacStudyRecordingDetailDisplayModel {
         .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    static func advancedFileStatusRows(for item: MacRecordingInboxItem) -> [RokuricsDocumentMetadataRow] {
+    static func advancedFileStatusRows(
+        for item: MacRecordingInboxItem,
+        displaySyncState: CanonicalDisplaySyncState?
+    ) -> [RokuricsDocumentMetadataRow] {
         [
             RokuricsDocumentMetadataRow("recordingID", item.id, isTechnical: true),
-            RokuricsDocumentMetadataRow("audio", item.hasAudio ? "可用" : "缺失"),
+            RokuricsDocumentMetadataRow("audio", displaySyncState?.canDisplayAsComplete == true ? RokuricsCopy.text("可用", "Available") : RokuricsCopy.text("缺失", "Missing")),
             RokuricsDocumentMetadataRow("audio path", item.audioRelativePath, isTechnical: true),
             RokuricsDocumentMetadataRow("transcript", transcriptStatusText(for: item)),
             RokuricsDocumentMetadataRow("transcript path", item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),
@@ -1675,38 +1712,39 @@ enum MacStudyRecordingDetailDisplayModel {
 
     private static func transcriptStatusText(for item: MacRecordingInboxItem) -> String {
         if item.isTranscribed {
-            return "已生成"
+            return RokuricsCopy.text("已生成", "Ready")
         }
         if item.isTranscriptionActive {
-            return "转写中"
+            return RokuricsCopy.text("转写中", "Transcribing")
         }
         if item.transcriptionStatus == "failed" {
-            return "失败"
+            return RokuricsCopy.text("失败", "Failed")
         }
-        return "未生成"
+        return RokuricsCopy.text("未生成", "Not ready")
     }
 
     private static func noteStatusText(for item: MacRecordingInboxItem) -> String {
         if item.isNoteGenerated {
-            return "已生成"
+            return RokuricsCopy.text("已生成", "Ready")
         }
         if item.isNoteGenerating {
-            return "生成中"
+            return RokuricsCopy.text("生成中", "Generating")
         }
         if item.isNoteFailed {
-            return "失败"
+            return RokuricsCopy.text("失败", "Failed")
         }
-        return "未生成"
+        return RokuricsCopy.text("未生成", "Not ready")
     }
 }
 
 private struct MacStudyFileStatusPanel: View {
     let item: MacRecordingInboxItem
+    let displaySyncState: CanonicalDisplaySyncState?
 
     var body: some View {
         RokuricsDocumentAdvancedInfoCard(
-            title: "文件状态",
-            rows: MacStudyRecordingDetailDisplayModel.advancedFileStatusRows(for: item)
+            title: RokuricsCopy.text("文件状态", "File Status"),
+            rows: MacStudyRecordingDetailDisplayModel.advancedFileStatusRows(for: item, displaySyncState: displaySyncState)
         )
     }
 }
@@ -1720,7 +1758,7 @@ private struct MacStudyNoteSummaryPreviewCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        RokuricsDocumentContentCard(title: "AI 摘要") {
+        RokuricsDocumentContentCard(title: RokuricsCopy.text("AI 摘要", "AI Summary")) {
             VStack(alignment: .leading, spacing: 12) {
                 if let preview, preview.isVisible {
                     Text(preview.shortSummary)
@@ -1746,7 +1784,7 @@ private struct MacStudyNoteSummaryPreviewCard: View {
                         }
                     }
                 } else {
-                    Text("暂无摘要")
+                    Text(RokuricsCopy.text("暂无摘要", "No summary yet"))
                         .font(RokuricsDetailTypography.metadataValue)
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                 }
@@ -1818,7 +1856,7 @@ private struct MacStudyFilingPicker: View {
                 }
 
                 HStack(spacing: 6) {
-                    TextField("新建", text: $newValueDraft)
+                    TextField(RokuricsCopy.text("新建", "New"), text: $newValueDraft)
                         .textFieldStyle(.plain)
                         .font(MacTypography.chineseBody(size: 13, weight: .medium))
                         .foregroundStyle(MacTheme.deepText(for: colorScheme))
@@ -1827,7 +1865,7 @@ private struct MacStudyFilingPicker: View {
 
                     RokuricsCircleIconButton(
                         systemImage: "plus",
-                        accessibilityTitle: "新建\(selectionLevel.title)",
+                        accessibilityTitle: RokuricsCopy.newLabel(selectionLevel.title),
                         tint: MacTheme.aqua,
                         isEnabled: !newValueDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                         action: createCurrentValue
@@ -1943,7 +1981,7 @@ private struct MacStudyFilingLevelButton: View {
                     .font(MacTypography.chineseCaption(size: 10, weight: .bold))
                     .foregroundStyle(MacTheme.tertiaryText(for: colorScheme))
 
-                Text(value.isEmpty ? "未选择" : value)
+                Text(value.isEmpty ? RokuricsCopy.text("未选择", "Not set") : value)
                     .font(MacTypography.chineseCaption(size: 12, weight: .bold))
                     .foregroundStyle(isEnabled ? MacTheme.deepText(for: colorScheme) : MacTheme.tertiaryText(for: colorScheme))
                     .lineLimit(1)

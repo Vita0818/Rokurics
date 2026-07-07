@@ -1,0 +1,28 @@
+{
+  "bitrate" : 128000,
+  "channels" : 1,
+  "codec" : "AAC",
+  "createdAt" : "2026-06-18T00:02:22Z",
+  "duration" : 3492.0973469387754,
+  "endedAt" : "2026-06-18T01:00:34Z",
+  "fileName" : "rokurics_2026-06-18_08-02-22_fallback.m4a",
+  "fileSize" : 55678995,
+  "format" : "m4a",
+  "id" : "rokurics_2026-06-18_08-02-22_fallback",
+  "isDeleted" : false,
+  "noteStatus" : "notStarted",
+  "relativeAudioPath" : "Recordings\/rokurics_2026-06-18_08-02-22_fallback.m4a",
+  "relativeMetadataPath" : "Metadata\/rokurics_2026-06-18_08-02-22_fallback.json",
+  "sampleRate" : 44100,
+  "studyFiling" : {
+    "chapter" : "Unit8",
+    "subject" : "大英IV",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "title" : "大英IV · Unit8",
+  "transcriptionStatus" : "notStarted",
+  "uploadStatus" : "uploaded"
+}

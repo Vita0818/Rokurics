@@ -347,7 +347,7 @@ protocol SyncStorageAdapter {
     func createPlaceholder(for object: SyncObject) throws
     func openReadStream(for object: SyncObject) throws -> InputStream
     func openWriteTemp(for object: SyncObject) throws -> URL
-    func verifyChecksum(for object: SyncObject, at url: URL) throws -> Bool
+    func verifyChecksum(for object: SyncObject, at url: URL) async throws -> Bool
     func atomicApply(tempURL: URL, for object: SyncObject) throws
     func markTransferState(_ state: SyncTransferState, for object: SyncObject) throws
     func markConflict(_ status: String, for object: SyncObject) throws

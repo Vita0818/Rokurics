@@ -1,0 +1,23 @@
+{
+  "childFolderIDs" : [
+    "folder_chapter_通识_大学物理乙_Ch10"
+  ],
+  "createdAt" : "2026-05-22T04:26:13Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_subject_通识_大学物理乙",
+  "isTrashed" : false,
+  "itemIDs" : [
+
+  ],
+  "level" : "subject",
+  "modifiedByDeviceID" : "iphone-1158bb44-fa4c-4683-a6b6-abeb9eaaac2e",
+  "name" : "大学物理乙",
+  "parentFolderID" : "folder_type_通识",
+  "path" : {
+    "subject" : "大学物理乙",
+    "type" : "通识"
+  },
+  "updatedAt" : "2026-06-22T11:32:01Z"
+}

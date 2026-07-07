@@ -53,6 +53,7 @@ final class GitBackedStudyMetadataStore {
 
     private let fileManager: FileManager
     private let gitExecutableURL: URL
+    private let gitCommandInterceptor: (([String]) throws -> String?)?
     private(set) var gitInvocations: [GitBackedStudyGitInvocation] = []
     private var gitCommitFuseUntil: Date?
     private let signingFailureRetryDelay: TimeInterval = 24 * 60 * 60
@@ -60,10 +61,12 @@ final class GitBackedStudyMetadataStore {
     init(
         fileManager: FileManager = .default,
         rootURL: URL? = nil,
-        gitExecutableURL: URL? = nil
+        gitExecutableURL: URL? = nil,
+        gitCommandInterceptor: (([String]) throws -> String?)? = nil
     ) {
         self.fileManager = fileManager
         self.gitExecutableURL = gitExecutableURL ?? Self.defaultGitExecutableURL(fileManager: fileManager)
+        self.gitCommandInterceptor = gitCommandInterceptor
 
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
@@ -357,6 +360,10 @@ final class GitBackedStudyMetadataStore {
         let environment = try gitProcessEnvironment()
         process.environment = environment
         gitInvocations.append(GitBackedStudyGitInvocation(arguments: arguments, environment: environment))
+
+        if let interceptedOutput = try gitCommandInterceptor?(arguments) {
+            return interceptedOutput
+        }
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()

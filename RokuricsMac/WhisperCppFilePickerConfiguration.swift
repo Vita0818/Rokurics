@@ -67,7 +67,7 @@ struct WhisperCppFilePickerConfiguration {
         panel.allowsMultipleSelection = allowsMultipleSelection
         panel.canCreateDirectories = canCreateDirectories
         panel.treatsFilePackagesAsDirectories = treatsFilePackagesAsDirectories
-        panel.prompt = "选择"
+        panel.prompt = RokuricsCopy.text("选择", "Choose")
     }
 }
 
@@ -78,11 +78,14 @@ enum WhisperCppFileSelectionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .directorySelected(.executable):
-            return "请选择可执行文件，不要选择文件夹。"
+            return RokuricsCopy.text("请选择可执行文件，不要选择文件夹。", "Choose an executable file, not a folder.")
         case .directorySelected(.model):
-            return "请选择模型文件，不要选择文件夹。"
+            return RokuricsCopy.text("请选择模型文件，不要选择文件夹。", "Choose a model file, not a folder.")
         case .bookmarkCreationFailed:
-            return "无法为所选文件创建 sandbox 授权，请重新选择。"
+            return RokuricsCopy.text(
+                "无法为所选文件创建 sandbox 授权，请重新选择。",
+                "Could not create sandbox access. Choose again."
+            )
         }
     }
 }
@@ -135,9 +138,14 @@ struct WhisperCppBookmarkCreationFailureDiagnostic {
     }
 
     var userMessage: String {
-        let hint = role == "model" ? "" : "；可改选其所在文件夹授权"
+        let hint = role == "model"
+            ? ""
+            : RokuricsCopy.text("；可改选其所在文件夹授权", "; try folder access instead")
         return limited(
-            "无法创建 sandbox 授权：domain=\(nsErrorDomain) code=\(nsErrorCode) \(localizedDescription)\(hint)",
+            RokuricsCopy.text(
+                "无法创建 sandbox 授权：domain=\(nsErrorDomain) code=\(nsErrorCode) \(localizedDescription)\(hint)",
+                "Sandbox access failed: domain=\(nsErrorDomain) code=\(nsErrorCode) \(localizedDescription)\(hint)"
+            ),
             maxCharacters: 240
         )
     }

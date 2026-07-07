@@ -26,7 +26,7 @@ struct IPhoneAIChatView: View {
 
     var body: some View {
         ChatConversationView(
-            title: "AI 对话",
+            title: RokuricsCopy.text("AI 对话", "AI Chat"),
             contextPathDisplay: activeContext?.pathDisplay,
             messages: messages,
             greetingText: ChatGreeting.current(displayName: userProfileStore.profile.displayName).text,
@@ -92,11 +92,11 @@ struct IPhoneAIChatView: View {
                     )
                     .padding(16)
                 }
-                .navigationTitle("最近对话")
+                .navigationTitle(RokuricsCopy.text("最近对话", "Recent Chats"))
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("完成") {
+                        Button(RokuricsCopy.text("完成", "Done")) {
                             isRecentConversationsPresented = false
                         }
                     }
@@ -114,7 +114,7 @@ struct IPhoneAIChatView: View {
         let context: IPhoneChatContext
         switch selection {
         case .folder(let path):
-            context = exporter.export(items: studyLibraryStore.allStudyItems, path: path)
+            context = exporter.export(items: studyLibraryStore.effectiveStudyItems, path: path)
         case .item(let item):
             context = exporter.export(item: item)
         }
@@ -267,7 +267,7 @@ struct IPhoneAIChatView: View {
             return String(title.prefix(28))
         }
 
-        return "新对话"
+        return RokuricsCopy.text("新对话", "New Chat")
     }
 
     private func currentConversationPreview() -> String? {

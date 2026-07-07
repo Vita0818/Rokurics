@@ -1,0 +1,89 @@
+{
+  "audioFileName" : "audio.m4a",
+  "audioRelativePath" : "audio\/inbox\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/audio.m4a",
+  "checksum" : "8bc48b56e293b0384866219f0997dbd50ce4960c196a194a5088a8c89b679e35",
+  "createdAt" : "2026-05-28T00:02:38Z",
+  "duration" : 5473.73462585034,
+  "fileSize" : 12442609,
+  "isDeleted" : false,
+  "lastUploadAttemptAt" : "2026-05-31T15:37:04Z",
+  "metadataFileName" : "metadata.json",
+  "metadataRelativePath" : "audio\/inbox\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/metadata.json",
+  "normalizedTitle" : "大英IV · Unit6 · Class2",
+  "noteStatus" : "notGenerated",
+  "originalAudioFileName" : "rokurics_2026-05-28_08-02-38_fallback.m4a",
+  "originalTitle" : "大英IV · Unit6 · Class2",
+  "processingStatus" : "transcribing",
+  "receivedAt" : "2026-05-31T05:56:06Z",
+  "recordingID" : "rokurics_2026-05-28_08-02-38_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-05-28_08-02-38_fallback",
+  "sourceDeviceID" : "iphone-a683dbf2-9705-4341-912e-9a28f13a3771",
+  "sourceDeviceName" : "iPhone",
+  "status" : "completed",
+  "studyFiling" : {
+    "chapter" : "Unit6",
+    "subject" : "大英IV",
+    "topic" : "Class2",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "transcriptMarkdownRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/transcript.md",
+  "transcriptRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/transcript.json",
+  "transcriptionChunks" : [
+    {
+      "endTime" : 900,
+      "index" : 0,
+      "startTime" : 0,
+      "status" : "generated",
+      "transcriptMarkdownRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_000.md",
+      "transcriptRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_000.json"
+    },
+    {
+      "endTime" : 1800,
+      "index" : 1,
+      "startTime" : 900,
+      "status" : "generated",
+      "transcriptMarkdownRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_001.md",
+      "transcriptRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_001.json"
+    },
+    {
+      "endTime" : 2700,
+      "index" : 2,
+      "startTime" : 1800,
+      "status" : "generated",
+      "transcriptMarkdownRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_002.md",
+      "transcriptRelativePath" : "transcripts\/2026-05-28\/rokurics_2026-05-28_08-02-38_fallback\/chunks\/chunk_002.json"
+    },
+    {
+      "endTime" : 3600,
+      "index" : 3,
+      "startTime" : 2700,
+      "status" : "processing"
+    },
+    {
+      "endTime" : 4500,
+      "index" : 4,
+      "startTime" : 3600,
+      "status" : "pending"
+    },
+    {
+      "endTime" : 5400,
+      "index" : 5,
+      "startTime" : 4500,
+      "status" : "pending"
+    },
+    {
+      "endTime" : 5473.73462585034,
+      "index" : 6,
+      "startTime" : 5400,
+      "status" : "pending"
+    }
+  ],
+  "transcriptionMode" : "chunked",
+  "transcriptionProviderID" : "whisperCpp",
+  "transcriptionStartedAt" : "2026-05-31T05:59:16Z",
+  "transcriptionStatus" : "transcribing",
+  "updatedAt" : "2026-05-31T15:37:04Z"
+}

@@ -347,12 +347,19 @@ struct MacMixedLanguageTitle: View {
     var weight: Font.Weight = .semibold
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        if RokuricsCopy.usesChinese {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(english)
+                    .font(MacTypography.englishLargeTitle(size: englishSize, weight: weight))
+
+                Text(chinese)
+                    .font(MacTypography.chineseLargeTitle(size: chineseSize, weight: weight))
+            }
+        } else {
             Text(english)
                 .font(MacTypography.englishLargeTitle(size: englishSize, weight: weight))
-
-            Text(chinese)
-                .font(MacTypography.chineseLargeTitle(size: chineseSize, weight: weight))
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
         }
     }
 }

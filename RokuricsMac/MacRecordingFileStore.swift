@@ -170,14 +170,23 @@ final class MacRecordingFileStore {
     private let transcriptsURL: URL
     private let metadataIndexURL: URL
     private let receiveLogURL: URL
+    private let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
+    private let canonicalChecksumRuntime: CanonicalChecksumRuntime
 
-    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
+    nonisolated init(
+        fileManager: FileManager = .default,
+        rootURL: URL? = nil,
+        canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
+        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil
+    ) {
         self.fileManager = fileManager
         if let rootURL {
             self.rootURL = rootURL.standardizedFileURL
         } else {
             self.rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
         }
+        self.canonicalStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
+        self.canonicalChecksumRuntime = canonicalChecksumRuntime ?? CanonicalChecksumRuntime()
         audioInboxURL = self.rootURL
             .appendingPathComponent("audio", isDirectory: true)
             .appendingPathComponent("inbox", isDirectory: true)
@@ -201,12 +210,109 @@ final class MacRecordingFileStore {
         try? ensureLibraryDirectories()
     }
 
+    private var canonicalChecksumCacheDirectoryURL: URL {
+        rootURL
+            .appendingPathComponent("sync", isDirectory: true)
+            .appendingPathComponent("CanonicalChecksumCache", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private func canonicalAudioChecksum(
+        fileURL: URL,
+        logicalToken: String,
+        persistentCacheEnabled: Bool = false
+    ) async throws -> String {
+        let configuration = CanonicalInventoryRuntimeConfiguration(persistentChecksumCacheEnabled: persistentCacheEnabled)
+        let result = await canonicalChecksumRuntime.checksum(
+            fileURL: fileURL,
+            logicalToken: logicalToken,
+            nodeRole: .mac,
+            cacheDirectoryURL: canonicalChecksumCacheDirectoryURL,
+            configuration: configuration
+        )
+        if let checksum = result.sha256 {
+            UploadFlightRecorder.record(
+                side: .Mac,
+                stage: "macAudioChecksumResolved",
+                eventResult: result.hashComputed ? "computed" : "cacheHit",
+                reasonCode: result.event.rawValue,
+                fileSize: result.byteSize,
+                safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);persistentCache=\(persistentCacheEnabled)"
+            )
+            return checksum
+        }
+        UploadFlightRecorder.record(
+            side: .Mac,
+            stage: "macAudioChecksumResolved",
+            eventResult: "fail",
+            reasonCode: result.failure.map(String.init(describing:)) ?? "checksum_unavailable",
+            fileSize: result.byteSize,
+            safeErrorMessage: "hashDurationMs=\(result.hashDurationMs);persistentCache=\(persistentCacheEnabled)"
+        )
+        throw MacRecordingFileStoreError.audioConflict
+    }
+
+    private nonisolated static func hashDataOffMain(_ data: Data) async -> String {
+        let startedAt = Date()
+        let hash = await Task.detached(priority: .utility) {
+            MacSecurityUtilities.sha256Hex(data)
+        }.value
+        Task { @MainActor in
+            ConnectionDiagnosticsStore.shared.recordPerfLog(
+                CanonicalPerfLog.subphaseMeasured(
+                    operation: .upload,
+                    subphase: .hashMs,
+                    durationMs: CanonicalPerfLog.elapsedMs(since: startedAt),
+                    result: "macReceiveHash"
+                )
+            )
+        }
+        return hash
+    }
+
     var libraryRootURL: URL {
         rootURL
     }
 
     var libraryRootDisplayPath: String {
         rootURL.path
+    }
+
+    func receiveRecordCountForDiagnostics() -> Int {
+        loadInboxItems(includeDeleted: true).count
+    }
+
+    var canonicalStatusTruthReadPathAvailable: Bool {
+        true
+    }
+
+    func produceCanonicalStatusFact(_ fact: CanonicalStatusFact) async -> CanonicalStatusFactMergeResult {
+        await canonicalStatusTruthRuntime.produce(fact)
+    }
+
+    func canonicalEffectiveStatus(for facts: [CanonicalStatusFact]) async -> CanonicalEffectiveSyncStatus {
+        await canonicalStatusTruthRuntime.effectiveStatus(for: facts)
+    }
+
+    func uploadSessionCountForDiagnostics() -> Int? {
+        guard fileManager.fileExists(atPath: uploadSessionsURL.path),
+              let sessionDirectories = try? fileManager.contentsOfDirectory(
+                at: uploadSessionsURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+              ) else {
+            return 0
+        }
+        return sessionDirectories.filter { directoryURL in
+            guard isInsideUploadSessionsDirectory(directoryURL.standardizedFileURL) else {
+                return false
+            }
+            let sessionURL = directoryURL
+                .appendingPathComponent("session.json", isDirectory: false)
+                .standardizedFileURL
+            return isInsideUploadSessionsDirectory(sessionURL)
+                && fileManager.fileExists(atPath: sessionURL.path)
+        }.count
     }
 
     func saveMetadata(
@@ -387,7 +493,7 @@ final class MacRecordingFileStore {
         requestedFileName: String?,
         sourceDevice: PairedDevice,
         uploadTraceID: String? = nil
-    ) throws -> RecordingReceiveResult {
+    ) async throws -> RecordingReceiveResult {
         UploadFlightRecorder.record(
             side: .Mac,
             stage: "audioReceiveRecordLookupStarted",
@@ -447,7 +553,7 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.metadataMissing
         }
 
-        let incomingChecksum = MacSecurityUtilities.sha256Hex(body)
+        let incomingChecksum = await Self.hashDataOffMain(body)
         UploadFlightRecorder.record(
             side: .Mac,
             stage: "audioChecksumComputed",
@@ -458,7 +564,7 @@ final class MacRecordingFileStore {
             bodyBytes: body.count
         )
         if fileManager.fileExists(atPath: audioURL.path) {
-            return try handleExistingAudioUpload(
+            return try await handleExistingAudioUpload(
                 recordingID: recordingID,
                 recordingDirectoryURL: recordingDirectoryURL,
                 audioURL: audioURL,
@@ -631,7 +737,7 @@ final class MacRecordingFileStore {
         checksum: String,
         fileSize: Int64,
         uploadTraceID: String? = nil
-    ) throws -> RecordingReceiveResult {
+    ) async throws -> RecordingReceiveResult {
         UploadFlightRecorder.record(
             side: .Mac,
             stage: "audioReceiveRecordLookupStarted",
@@ -705,7 +811,7 @@ final class MacRecordingFileStore {
         )
 
         if fileManager.fileExists(atPath: audioURL.path) {
-            let result = try handleExistingAudioUpload(
+            let result = try await handleExistingAudioUpload(
                 recordingID: recordingID,
                 recordingDirectoryURL: recordingDirectoryURL,
                 audioURL: audioURL,
@@ -844,12 +950,12 @@ final class MacRecordingFileStore {
     func startResumableAudioUpload(
         _ request: ResumableAudioUploadStartRequest,
         sourceDevice: PairedDevice
-    ) throws -> ResumableAudioUploadSessionResponse {
+    ) async throws -> ResumableAudioUploadSessionResponse {
         try ensureLibraryDirectories()
         try validateResumableRequest(recordingID: request.recordingID, totalBytes: request.totalBytes, chunkSize: request.chunkSize)
 
         let recordingResources = try recordingResources(for: request.recordingID)
-        if let completed = try completedAudioResponseIfPresent(
+        if let completed = try await completedAudioResponseIfPresent(
             recordingID: request.recordingID,
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
@@ -984,11 +1090,11 @@ final class MacRecordingFileStore {
     func resumableAudioUploadStatus(
         _ request: ResumableAudioUploadStatusRequest,
         sourceDevice: PairedDevice
-    ) throws -> ResumableAudioUploadSessionResponse {
+    ) async throws -> ResumableAudioUploadSessionResponse {
         try ensureLibraryDirectories()
         let sessionID = try safeResumableSessionID(request.sessionID)
         let recordingResources = try recordingResources(for: request.recordingID)
-        if let completed = try completedAudioResponseIfPresent(
+        if let completed = try await completedAudioResponseIfPresent(
             recordingID: request.recordingID,
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
@@ -1063,7 +1169,7 @@ final class MacRecordingFileStore {
         totalSHA256: String,
         body: Data,
         sourceDevice: PairedDevice
-    ) throws -> ResumableAudioUploadSessionResponse {
+    ) async throws -> ResumableAudioUploadSessionResponse {
         try ensureLibraryDirectories()
         let sessionID = try safeResumableSessionID(rawSessionID)
         guard length == body.count,
@@ -1073,13 +1179,13 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.chunkOffsetMismatch
         }
 
-        let bodyChecksum = MacSecurityUtilities.sha256Hex(body)
+        let bodyChecksum = await Self.hashDataOffMain(body)
         guard MacSecurityUtilities.constantTimeEquals(bodyChecksum, chunkSHA256) else {
             throw MacRecordingFileStoreError.chunkChecksumMismatch
         }
 
         let recordingResources = try recordingResources(for: recordingID)
-        if let completed = try completedAudioResponseIfPresent(
+        if let completed = try await completedAudioResponseIfPresent(
             recordingID: recordingID,
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
@@ -1177,13 +1283,13 @@ final class MacRecordingFileStore {
     func finalizeResumableAudioUpload(
         _ request: ResumableAudioUploadFinalizeRequest,
         sourceDevice: PairedDevice
-    ) throws -> ResumableAudioUploadSessionResponse {
+    ) async throws -> ResumableAudioUploadSessionResponse {
         try ensureLibraryDirectories()
         let sessionID = try safeResumableSessionID(request.sessionID)
         try validateResumableRequest(recordingID: request.recordingID, totalBytes: request.totalBytes, chunkSize: 1)
         let recordingResources = try recordingResources(for: request.recordingID)
 
-        if let completed = try completedAudioResponseIfPresent(
+        if let completed = try await completedAudioResponseIfPresent(
             recordingID: request.recordingID,
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
@@ -1226,7 +1332,11 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.sessionConflict
         }
 
-        let checksum = try MacSecurityUtilities.sha256Hex(fileURL: partURL)
+        let checksum = try await canonicalAudioChecksum(
+            fileURL: partURL,
+            logicalToken: "upload-session-\(sessionID)-part",
+            persistentCacheEnabled: false
+        )
         guard MacSecurityUtilities.constantTimeEquals(checksum, request.totalSHA256) else {
             try markResumableSessionError(&session, error: "recording_audio_conflict")
             try? markUploadConflict(
@@ -1316,7 +1426,7 @@ final class MacRecordingFileStore {
         }
     }
 
-    func loadInboxItems(includeDeleted: Bool = false) -> [MacRecordingInboxItem] {
+    nonisolated func loadInboxItems(includeDeleted: Bool = false) -> [MacRecordingInboxItem] {
         guard fileManager.fileExists(atPath: audioInboxURL.path) else {
             return []
         }
@@ -1645,6 +1755,18 @@ final class MacRecordingFileStore {
                 status: status
             )
             postInboxChanged()
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .transcriptionStatusChanged,
+                source: "MacRecordingFileStore.updateTranscriptionStatus",
+                recordingID: recordingID
+            )
+            if status == "transcribed" || transcriptRelativePath != nil || transcriptMarkdownRelativePath != nil {
+                LocalNetworkSyncEventTrigger.post(
+                    .generatedArtifactAvailabilityChanged,
+                    source: "MacRecordingFileStore.updateTranscriptionStatus",
+                    recordingID: recordingID
+                )
+            }
             print("[RokuricsRecordingStore] transcription status updated: \(recordingID) -> \(status)")
             debugLogTranscriptionStatusUpdate(receiveURL: receiveURL, recordingID: recordingID, status: status, errorMessage: errorMessage)
         } catch let error as MacRecordingFileStoreError {
@@ -1725,6 +1847,18 @@ final class MacRecordingFileStore {
                 status: record.noteStatus
             )
             postInboxChanged()
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .noteStatusChanged,
+                source: "MacRecordingFileStore.updateNoteGenerationStatus",
+                recordingID: recordingID
+            )
+            if record.noteStatus == "generated" || noteRelativePath != nil {
+                LocalNetworkSyncEventTrigger.post(
+                    .generatedArtifactAvailabilityChanged,
+                    source: "MacRecordingFileStore.updateNoteGenerationStatus",
+                    recordingID: recordingID
+                )
+            }
             print("[RokuricsRecordingStore] note status updated: \(recordingID) -> \(record.noteStatus)")
             debugLogNoteStatusUpdate(receiveURL: receiveURL, recordingID: recordingID, status: record.noteStatus, errorMessage: errorMessage)
         } catch let error as MacRecordingFileStoreError {
@@ -1842,7 +1976,7 @@ final class MacRecordingFileStore {
         incomingChecksum: String,
         incomingFileSize: Int64,
         uploadTraceID: String? = nil
-    ) throws -> RecordingReceiveResult {
+    ) async throws -> RecordingReceiveResult {
         guard isInsideRoot(recordingDirectoryURL),
               isInsideRoot(audioURL),
               isInsideRoot(receiveURL) else {
@@ -1855,7 +1989,11 @@ final class MacRecordingFileStore {
 
         var record = try loadReceiveRecord(at: receiveURL)
         let existingFileSize = fileSize(at: audioURL)
-        let existingChecksum = try MacSecurityUtilities.sha256Hex(fileURL: audioURL)
+        let existingChecksum = try await canonicalAudioChecksum(
+            fileURL: audioURL,
+            logicalToken: "recording-\(recordingID)-audio",
+            persistentCacheEnabled: false
+        )
         guard existingFileSize == incomingFileSize,
               MacSecurityUtilities.constantTimeEquals(existingChecksum, incomingChecksum) else {
             let conflictSummary = [
@@ -2051,7 +2189,7 @@ final class MacRecordingFileStore {
         receiveURL: URL,
         expectedChecksum: String,
         expectedFileSize: Int64?
-    ) throws -> ResumableAudioUploadSessionResponse? {
+    ) async throws -> ResumableAudioUploadSessionResponse? {
         guard fileManager.fileExists(atPath: audioURL.path) else {
             return nil
         }
@@ -2061,7 +2199,11 @@ final class MacRecordingFileStore {
             throw MacRecordingFileStoreError.audioConflict
         }
 
-        let existingChecksum = try MacSecurityUtilities.sha256Hex(fileURL: audioURL)
+        let existingChecksum = try await canonicalAudioChecksum(
+            fileURL: audioURL,
+            logicalToken: "recording-\(recordingID)-audio",
+            persistentCacheEnabled: false
+        )
         guard MacSecurityUtilities.constantTimeEquals(existingChecksum, expectedChecksum) else {
             throw MacRecordingFileStoreError.audioConflict
         }

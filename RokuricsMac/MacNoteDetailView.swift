@@ -40,7 +40,11 @@ struct MacNoteDetailView: View {
         switch loadResult {
         case .loaded(let markdown):
             let receiveRecord = metadataLoader.loadReceiveRecord(item: item)
-            RokuricsDocumentPageHeader(title: item.title, subtitle: "AI 总结 / note", onBack: onBack) {
+            RokuricsDocumentPageHeader(
+                title: item.title,
+                subtitle: RokuricsCopy.text("AI 总结 / note", "AI note"),
+                onBack: onBack
+            ) {
                 RokuricsInfoButton {
                     isInfoPresented = true
                 }
@@ -60,7 +64,11 @@ struct MacNoteDetailView: View {
                 }
             }
         default:
-            RokuricsDocumentPageHeader(title: item.title, subtitle: "AI 总结 / note", onBack: onBack)
+            RokuricsDocumentPageHeader(
+                title: item.title,
+                subtitle: RokuricsCopy.text("AI 总结 / note", "AI note"),
+                onBack: onBack
+            )
         }
     }
 
@@ -69,12 +77,12 @@ struct MacNoteDetailView: View {
         switch loadResult {
         case .loading:
             RokuricsDocumentContentCard {
-                Text("正在读取笔记")
+                Text(RokuricsCopy.text("正在读取笔记", "Loading note"))
                     .font(RokuricsDetailTypography.metadataValue)
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
             }
         case .loaded(let markdown):
-            RokuricsDocumentContentCard(title: "总结正文") {
+            RokuricsDocumentContentCard(title: RokuricsCopy.text("总结正文", "Summary")) {
                 RokuricsMarkdownContentView(markdown: RokuricsNoteMarkdownCleaner.cleanedBody(from: markdown))
             }
         case .failed(let message):
@@ -115,17 +123,17 @@ struct NoteMarkdownDocumentLoader {
         guard let path = item.noteRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines),
               !path.isEmpty,
               let url = resolvedURL(relativePath: path) else {
-            return .failed("未找到笔记文档")
+            return .failed(RokuricsCopy.text("未找到笔记文档", "Note not found"))
         }
 
         guard fileManager.fileExists(atPath: url.path) else {
-            return .failed("未找到笔记文档")
+            return .failed(RokuricsCopy.text("未找到笔记文档", "Note not found"))
         }
 
         do {
             return .loaded(try String(contentsOf: url, encoding: .utf8))
         } catch {
-            return .failed("无法读取笔记文档")
+            return .failed(RokuricsCopy.text("无法读取笔记文档", "Could not read note"))
         }
     }
 

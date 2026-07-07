@@ -122,12 +122,12 @@ struct RecordingUploadCapsulePresentation: Equatable {
     let fillOpacity: Double
 
     static func resolve(status: RecordingUploadStatus, isMacPaired: Bool) -> RecordingUploadCapsulePresentation {
-        let isEnabled = isMacPaired && status != .uploading
+        let isEnabled = isMacPaired && status != .uploading && status != .uploaded
 
         switch status {
         case .localOnly:
             return RecordingUploadCapsulePresentation(
-                label: "上传",
+                label: RokuricsCopy.text("上传", "Upload"),
                 systemImage: "arrow.up.circle",
                 tint: isMacPaired ? .primary : .muted,
                 isEnabled: isEnabled,
@@ -135,7 +135,7 @@ struct RecordingUploadCapsulePresentation: Equatable {
             )
         case .uploading:
             return RecordingUploadCapsulePresentation(
-                label: "上传中",
+                label: RokuricsCopy.text("上传中", "Uploading"),
                 systemImage: "arrow.triangle.2.circlepath",
                 tint: .active,
                 isEnabled: isEnabled,
@@ -143,7 +143,7 @@ struct RecordingUploadCapsulePresentation: Equatable {
             )
         case .uploaded:
             return RecordingUploadCapsulePresentation(
-                label: "已上传",
+                label: RokuricsCopy.text("已上传", "Uploaded"),
                 systemImage: "checkmark.circle.fill",
                 tint: .success,
                 isEnabled: isEnabled,
@@ -151,7 +151,7 @@ struct RecordingUploadCapsulePresentation: Equatable {
             )
         case .failed:
             return RecordingUploadCapsulePresentation(
-                label: "重试",
+                label: RokuricsCopy.text("重试", "Retry"),
                 systemImage: "arrow.clockwise",
                 tint: .failure,
                 isEnabled: isEnabled,
@@ -173,16 +173,16 @@ struct RecordingUploadActionAreaPresentation {
 
         let displayState = displayState(metadata: metadata, status: status)
         if case .failed(let reason) = displayState, reason == "local_audio_missing" {
-            return .statusWithActions("本地音频缺失")
+            return .statusWithActions(RokuricsCopy.text("本地音频缺失", "Missing audio"))
         }
 
         switch displayState {
         case .waiting:
-            return .statusWithActions("等待上传")
+            return .statusWithActions(RokuricsCopy.text("等待上传", "Waiting"))
         case .retryPending:
-            return .statusWithActions("等待自动重试")
+            return .statusWithActions(RokuricsCopy.text("等待自动重试", "Auto retry"))
         case .manualRetryAvailable:
-            return .statusWithActions("可手动重试")
+            return .statusWithActions(RokuricsCopy.text("可手动重试", "Retry ready"))
         case .preparing:
             return .progressOnly(preparingProgress(for: metadata))
         case .uploading:
@@ -196,11 +196,53 @@ struct RecordingUploadActionAreaPresentation {
         case .hidden, .uploaded:
             return nil
         case .conflict:
-            return .statusWithActions("上传冲突")
+            return .statusWithActions(RokuricsCopy.text("上传冲突", "Conflict"))
         case .fatalFailed:
-            return .statusWithActions("上传失败")
+            return .statusWithActions(RokuricsCopy.text("上传失败", "Upload failed"))
         case .failed:
-            return .statusWithActions("上传失败")
+            return .statusWithActions(RokuricsCopy.text("上传失败", "Upload failed"))
+        }
+    }
+
+    static func resolve(
+        metadata: RecordingMetadata?,
+        displaySyncState: CanonicalDisplaySyncState?,
+        isMacPaired _: Bool
+    ) -> StudyRecordingActionAreaPresentation? {
+        guard let metadata else {
+            return nil
+        }
+
+        let displayState = displayState(metadata: metadata, displaySyncState: displaySyncState)
+        if case .failed(let reason) = displayState, reason == "local_audio_missing" {
+            return .statusWithActions(RokuricsCopy.text("本地音频缺失", "Missing audio"))
+        }
+
+        switch displayState {
+        case .waiting:
+            return .statusWithActions(RokuricsCopy.text("等待上传", "Waiting"))
+        case .retryPending:
+            return .statusWithActions(RokuricsCopy.text("等待自动重试", "Auto retry"))
+        case .manualRetryAvailable:
+            return .statusWithActions(RokuricsCopy.text("可手动重试", "Retry ready"))
+        case .preparing:
+            return .progressOnly(preparingProgress(for: metadata))
+        case .uploading:
+            guard let progress = StudyItemMetadata.recordingUploadTransferProgress(for: metadata, status: .uploading),
+                  progress.isVisibleInActionArea else {
+                return .progressOnly(preparingProgress(for: metadata))
+            }
+            return .progressOnly(progress)
+        case .finalizing:
+            return .progressOnly(preparingProgress(for: metadata))
+        case .hidden, .uploaded:
+            return nil
+        case .conflict:
+            return .statusWithActions(RokuricsCopy.text("上传冲突", "Conflict"))
+        case .fatalFailed:
+            return .statusWithActions(RokuricsCopy.text("上传失败", "Upload failed"))
+        case .failed:
+            return .statusWithActions(RokuricsCopy.text("上传失败", "Upload failed"))
         }
     }
 
@@ -253,6 +295,45 @@ struct RecordingUploadActionAreaPresentation {
         }
     }
 
+    static func displayState(
+        metadata: RecordingMetadata?,
+        displaySyncState: CanonicalDisplaySyncState?
+    ) -> RecordingUploadDisplayState {
+        guard let metadata else {
+            return .hidden
+        }
+        if hasMissingLocalAudio(metadata) {
+            return .failed("local_audio_missing")
+        }
+        guard let displaySyncState else {
+            return .waiting
+        }
+
+        switch displaySyncState.kind {
+        case .completed, .peerVerified, .hidden:
+            return .hidden
+        case .deferred, .uploadNeeded, .stale:
+            return .waiting
+        case .uploading:
+            return .uploading(progressFraction: metadata.uploadProgressFraction)
+        case .finalizing:
+            return .finalizing
+        case .conflict:
+            return .conflict(metadata.uploadProgressDescription)
+        case .blocked:
+            return .fatalFailed(metadata.uploadProgressDescription)
+        case .failed:
+            let phase = metadata.uploadPhase?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if phase.contains("retry") {
+                return .retryPending
+            }
+            if phase.contains("conflict") {
+                return .conflict(metadata.uploadProgressDescription)
+            }
+            return .failed(nil)
+        }
+    }
+
     private static func hasMissingLocalAudio(_ metadata: RecordingMetadata) -> Bool {
         metadata.relativeAudioPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || metadata.fileSize <= 0
     }
@@ -266,7 +347,7 @@ struct RecordingUploadActionAreaPresentation {
             receivedBytes: metadata.uploadProgressConfirmedBytes,
             totalBytes: metadata.uploadProgressTotalBytes ?? (metadata.fileSize > 0 ? metadata.fileSize : nil),
             sourceDeviceID: nil,
-            statusText: "准备上传"
+            statusText: RokuricsCopy.text("准备上传", "Preparing")
         )
     }
 }
@@ -323,8 +404,8 @@ private struct RecordingRowContent<Trailing: View>: View {
             RecordingLeadingIcon()
                 .contentShape(Circle())
                 .onTapGesture(count: RecordingRowIconInteraction.deletionTapCount, perform: onIconDoubleTap)
-                .accessibilityLabel("录音图标，双击移入废纸篓")
-                .accessibilityAction(named: Text("移入废纸篓"), onIconDoubleTap)
+                .accessibilityLabel(RokuricsCopy.text("录音图标，双击移入废纸篓", "Recording icon, double-tap to trash"))
+                .accessibilityAction(named: Text(RokuricsCopy.text("移入废纸篓", "Move to Trash")), onIconDoubleTap)
 
             VStack(alignment: .leading, spacing: 9) {
                 Button(action: onTitleTap) {

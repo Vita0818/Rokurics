@@ -12,6 +12,7 @@ struct RecordingLibraryView: View {
     @ObservedObject var macConnectionStore: SecureMacConnectionStore
     @ObservedObject var uploadCoordinator: RecordingUploadCoordinator
     @ObservedObject private var studyLibraryStore: StudyLibraryStore
+    @ObservedObject private var connectionStatusStore = DeviceConnectionStatusStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var browsePath = StudyBrowsePath()
     @State private var renameTarget: StudyItemMetadata?
@@ -36,13 +37,18 @@ struct RecordingLibraryView: View {
     }
 
     var body: some View {
+        let _ = ConnectionDiagnosticsStore.shared.recordRuntimeCounterTick(
+            scope: "iPhoneStudyLibraryList",
+            kind: "body",
+            deviceID: macConnectionStore.snapshot.deviceID
+        )
         StudyLibraryPageShell {
             StudyLibraryBrowserView(
-                items: studyLibraryStore.allStudyItems,
-                folders: studyLibraryStore.allStudyFolders,
+                items: studyLibraryStore.effectiveStudyItems,
+                folders: studyLibraryStore.effectiveStudyFolders,
                 browsePath: $browsePath,
                 layout: .iPhone,
-                emptyLibraryMessage: "收到或保存的录音会在这里按门类、课程、章节和主题逐层显示。",
+                emptyLibraryMessage: RokuricsCopy.text("收到或保存的录音会在这里按门类、课程、章节和主题逐层显示。", "Saved recordings appear here by type, course, chapter, and topic."),
                 headerLeading: {
                     StudyLibraryPageBackButton(action: { dismiss() })
                 },
@@ -91,6 +97,11 @@ struct RecordingLibraryView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
+            let perfStartedAt = Date()
+            ConnectionDiagnosticsStore.shared.recordPerfLog(
+                CanonicalPerfLog.started(operation: .enterStudyLibrary),
+                deviceID: macConnectionStore.snapshot.deviceID
+            )
             let traceID = UploadFlightRecorder.makeTraceID()
             UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshTriggeredLocalReloadOnly", traceID: traceID, eventResult: "begin")
             recordViewRefreshDecision(traceID: traceID)
@@ -101,11 +112,23 @@ struct RecordingLibraryView: View {
             keepBrowsePathValid()
             UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshDidNotEnqueueUpload", traceID: traceID, eventResult: "success")
             UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "success")
+            let totalMs = CanonicalPerfLog.elapsedMs(since: perfStartedAt)
+            let stages = CanonicalPerfLog.StageDurations(projectionRebuildMs: totalMs)
+            for record in CanonicalPerfLog.finishedRecords(
+                operation: .enterStudyLibrary,
+                totalMs: totalMs,
+                stages: stages
+            ) {
+                ConnectionDiagnosticsStore.shared.recordPerfLog(
+                    record,
+                    deviceID: macConnectionStore.snapshot.deviceID
+                )
+            }
         }
-        .onChange(of: studyLibraryStore.allStudyItems) {
+        .onChange(of: studyLibraryStore.effectiveStudyItems) {
             keepBrowsePathValid()
         }
-        .onChange(of: studyLibraryStore.allStudyFolders) {
+        .onChange(of: studyLibraryStore.effectiveStudyFolders) {
             keepBrowsePathValid()
         }
         .onReceive(NotificationCenter.default.publisher(for: .localNetworkStudyLibraryDidChange)) { _ in
@@ -120,13 +143,13 @@ struct RecordingLibraryView: View {
             UploadFlightRecorder.record(side: .iPhone, stage: "viewRefreshReloadOnly", traceID: traceID, eventResult: "success")
         }
         .alert(RecordingLocalOperationCopy.renameTitle, isPresented: $isRenameAlertPresented) {
-            TextField("录音名称", text: $renameDraft)
+            TextField(RokuricsCopy.text("录音名称", "Recording Name"), text: $renameDraft)
 
-            Button("保存") {
+            Button(RokuricsCopy.text("保存", "Save")) {
                 commitRename()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 clearRenameState()
             }
         }
@@ -135,11 +158,11 @@ struct RecordingLibraryView: View {
             isPresented: $isDeleteConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("移入废纸篓", role: .destructive) {
+            Button(RokuricsCopy.text("移入废纸篓", "Move to Trash"), role: .destructive) {
                 commitDelete()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 deleteTarget = nil
             }
         } message: {
@@ -150,18 +173,18 @@ struct RecordingLibraryView: View {
             isPresented: $isPermanentDeleteConfirmationPresented,
             titleVisibility: .visible
         ) {
-            Button("永久删除", role: .destructive) {
+            Button(RokuricsCopy.text("永久删除", "Delete"), role: .destructive) {
                 commitPermanentDelete()
             }
 
-            Button("取消", role: .cancel) {
+            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
                 permanentDeleteTarget = nil
             }
         } message: {
             Text(RecordingLocalOperationCopy.iPhonePermanentDeleteMessage)
         }
         .sheet(isPresented: $isTrashSheetPresented) {
-            StudyTrashSheet(items: recordingManager.trashedRecordings, emptyTitle: "废纸篓为空") { metadata in
+            StudyTrashSheet(items: recordingManager.trashedRecordings, emptyTitle: RokuricsCopy.text("废纸篓为空", "Trash is empty")) { metadata in
                 StudyRecordingTrashRow(
                     title: metadata.title,
                     metadataText: metadataText(for: metadata),
@@ -170,8 +193,8 @@ struct RecordingLibraryView: View {
                 )
             }
         }
-        .alert("操作失败", isPresented: operationErrorBinding) {
-            Button("好", role: .cancel) {
+        .alert(RokuricsCopy.text("操作失败", "Operation Failed"), isPresented: operationErrorBinding) {
+            Button(RokuricsCopy.text("好", "OK"), role: .cancel) {
                 operationErrorMessage = nil
             }
         } message: {
@@ -213,17 +236,20 @@ struct RecordingLibraryView: View {
         .buttonStyle(RokuricsScaleButtonStyle())
     }
 
-    private func uploadStatus(for item: StudyItemMetadata) -> RecordingUploadStatus {
-        recordingMetadata(for: item).map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly
-    }
-
     private func uploadActionAreaPresentation(for item: StudyItemMetadata) -> StudyRecordingActionAreaPresentation? {
         let metadata = recordingMetadata(for: item)
         return RecordingUploadActionAreaPresentation.resolve(
             metadata: metadata,
-            status: metadata.map { uploadCoordinator.displayStatus(for: $0) } ?? .localOnly,
-            isMacPaired: macConnectionStore.isPaired
+            displaySyncState: canonicalDisplaySyncState(for: item),
+            isMacPaired: canStartManualUpload
         )
+    }
+
+    private func canonicalDisplaySyncState(for item: StudyItemMetadata) -> CanonicalDisplaySyncState? {
+        guard let recordingID = item.recordingID else {
+            return nil
+        }
+        return uploadCoordinator.canonicalDisplaySyncState(for: CanonicalObjectID("recordingAudio:\(recordingID)"))
     }
 
     private func recordingMetadata(for item: StudyItemMetadata) -> RecordingMetadata? {
@@ -245,8 +271,8 @@ struct RecordingLibraryView: View {
     private func cardActionModels(for item: StudyItemMetadata) -> [StudyRecordingCardActionModel] {
         IPhoneStudyRecordingCardActions.actions(
             for: item,
-            status: uploadStatus(for: item),
-            isMacPaired: macConnectionStore.isPaired,
+            displaySyncState: canonicalDisplaySyncState(for: item),
+            isMacPaired: canStartManualUpload,
             uploadAction: {
                 uploadRecording(from: item, source: "recordingCard")
             }
@@ -272,16 +298,26 @@ struct RecordingLibraryView: View {
             reasonCode: source
         )
 
-        guard macConnectionStore.isPaired else {
+        if let blockedReason = manualUploadHardBlockedReason() {
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "manualUploadSkippedWithReason",
                 traceID: traceID,
                 recordingID: item.recordingID,
                 eventResult: "skip",
-                reasonCode: "mac_not_paired"
+                reasonCode: blockedReason == "not_paired" ? "mac_not_paired" : blockedReason
             )
             return
+        }
+        if let softReason = manualUploadSoftBlockedReason() {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "manualUploadPresenceSoftBypassed",
+                traceID: traceID,
+                recordingID: item.recordingID,
+                eventResult: "continue",
+                reasonCode: softReason
+            )
         }
 
         recordingManager.reloadRecordings()
@@ -340,6 +376,49 @@ struct RecordingLibraryView: View {
             eventResult: "success",
             uploadStatus: latestMetadata.uploadStatus
         )
+    }
+
+    private var canStartManualUpload: Bool {
+        manualUploadHardBlockedReason() == nil
+    }
+
+    private func manualUploadHardBlockedReason(now: Date = Date()) -> String? {
+        let snapshot = macConnectionStore.snapshot
+        guard snapshot.isPaired else {
+            return "not_paired"
+        }
+        guard macConnectionStore.userConnectionIntent == .wantsConnected else {
+            return "user_does_not_want_connection"
+        }
+        guard let status = connectionStatusStore.status(for: snapshot.deviceID, now: now) else {
+            return nil
+        }
+        if status.presenceSnapshot(now: now).state == .securityError {
+            return "security_error"
+        }
+        return nil
+    }
+
+    private func manualUploadSoftBlockedReason(now: Date = Date()) -> String? {
+        guard manualUploadHardBlockedReason(now: now) == nil else {
+            return nil
+        }
+        let snapshot = macConnectionStore.snapshot
+        guard let status = connectionStatusStore.status(for: snapshot.deviceID, now: now) else {
+            return "presence_unavailable"
+        }
+        let blockedReason = MacUploadTestPresenceGate.blockedReason(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            userConnectionIntent: macConnectionStore.userConnectionIntent
+        )
+        switch blockedReason {
+        case "heartbeat_interrupted", "heartbeat_disconnected", "heartbeat_not_online", "presence_unavailable":
+            return blockedReason
+        default:
+            return nil
+        }
     }
 
     private func recordViewRefreshDecision(traceID: String) {
@@ -456,7 +535,7 @@ struct RecordingLibraryView: View {
             keepBrowsePathValid()
         } catch {
             operationErrorMessage = error.localizedDescription == "study_folder_not_empty"
-                ? "文件夹不为空"
+                ? RokuricsCopy.text("文件夹不为空", "Folder is not empty")
                 : error.localizedDescription
         }
     }
@@ -542,8 +621,8 @@ struct RecordingLibraryView: View {
     private func keepBrowsePathValid() {
         while !browsePath.isRoot {
             let content = StudyLibraryBrowser.content(
-                items: studyLibraryStore.allStudyItems,
-                folders: studyLibraryStore.allStudyFolders,
+                items: studyLibraryStore.effectiveStudyItems,
+                folders: studyLibraryStore.effectiveStudyFolders,
                 path: browsePath
             )
             guard content.folders.isEmpty && content.items.isEmpty else {
@@ -565,12 +644,12 @@ struct RecordingLibraryView: View {
 private enum IPhoneStudyRecordingCardActions {
     static func actions(
         for item: StudyItemMetadata,
-        status: RecordingUploadStatus,
+        displaySyncState: CanonicalDisplaySyncState?,
         isMacPaired: Bool,
         uploadAction: @escaping () -> Void
     ) -> [StudyRecordingCardActionModel] {
-        let uploadPresentation = RecordingUploadCapsulePresentation.resolve(
-            status: status,
+        let uploadPresentation = uploadPresentation(
+            displaySyncState: displaySyncState,
             isMacPaired: isMacPaired
         )
 
@@ -586,6 +665,45 @@ private enum IPhoneStudyRecordingCardActions {
             StudyRecordingStatusPresentation.noteAction(for: item),
             StudyRecordingActionPolicy.detailAction()
         ]
+    }
+
+    private static func uploadPresentation(
+        displaySyncState: CanonicalDisplaySyncState?,
+        isMacPaired: Bool
+    ) -> RecordingUploadCapsulePresentation {
+        guard let displaySyncState else {
+            return RecordingUploadCapsulePresentation.resolve(status: .localOnly, isMacPaired: isMacPaired)
+        }
+
+        let isUploadActionEnabled = isMacPaired && displaySyncState.kind != .uploading && displaySyncState.kind != .finalizing
+        switch displaySyncState.kind {
+        case .completed, .peerVerified:
+            return RecordingUploadCapsulePresentation(
+                label: RokuricsCopy.text("已上传", "Uploaded"),
+                systemImage: "checkmark.circle.fill",
+                tint: .success,
+                isEnabled: false,
+                fillOpacity: 0.24
+            )
+        case .uploading, .finalizing:
+            return RecordingUploadCapsulePresentation(
+                label: RokuricsCopy.text("上传中", "Uploading"),
+                systemImage: "arrow.triangle.2.circlepath",
+                tint: .active,
+                isEnabled: false,
+                fillOpacity: 0.24
+            )
+        case .blocked, .conflict, .failed:
+            return RecordingUploadCapsulePresentation(
+                label: RokuricsCopy.text("重试", "Retry"),
+                systemImage: "arrow.clockwise",
+                tint: .failure,
+                isEnabled: isUploadActionEnabled,
+                fillOpacity: isUploadActionEnabled ? 0.38 : 0.24
+            )
+        case .hidden, .deferred, .uploadNeeded, .stale:
+            return RecordingUploadCapsulePresentation.resolve(status: .localOnly, isMacPaired: isMacPaired)
+        }
     }
 }
 

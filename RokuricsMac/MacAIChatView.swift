@@ -25,7 +25,7 @@ struct MacAIChatView: View {
 
     var body: some View {
         ChatConversationView(
-            title: "AI 对话",
+            title: RokuricsCopy.text("AI 对话", "AI Chat"),
             contextPathDisplay: chatCoordinator.conversation.contextPathDisplay,
             messages: chatCoordinator.visibleMessages,
             greetingText: ChatGreeting.current(
@@ -164,7 +164,7 @@ struct MacAIChatView: View {
         let context: ChatContext
         switch selection {
         case .folder(let path):
-            context = exporter.export(items: studyLibraryStore.allStudyItems, path: path)
+            context = exporter.export(items: studyLibraryStore.effectiveStudyItems, path: path)
         case .item(let item):
             context = exporter.export(item: item)
         }
@@ -207,11 +207,11 @@ enum MacAIChatAttachmentMenuAction: CaseIterable, Equatable {
     var title: String {
         switch self {
         case .importStudyLibrary:
-            return "导入学习库内容"
+            return RokuricsCopy.text("导入学习库内容", "Import Library")
         case .uploadFile:
-            return "上传文件"
+            return RokuricsCopy.text("上传文件", "Upload File")
         case .uploadImage:
-            return "上传图片"
+            return RokuricsCopy.text("上传图片", "Upload Image")
         }
     }
 
@@ -272,8 +272,8 @@ private struct MacRecentConversationsPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if conversations.isEmpty {
-                Text("暂无对话")
-                    .font(MacTypography.chineseBody(size: 13, weight: .medium))
+                Text(RokuricsCopy.text("暂无对话", "No chats"))
+                    .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 13, weight: .medium) : MacTypography.englishBody(size: 13, weight: .medium))
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
                     .padding(14)
             } else {
@@ -318,7 +318,7 @@ private struct MacRecentConversationRow: View {
 
             RokuricsCircleIconButton(
                 systemImage: "trash",
-                accessibilityTitle: "删除对话",
+                accessibilityTitle: RokuricsCopy.text("删除对话", "Delete Chat"),
                 tint: MacTheme.coral,
                 role: .destructive,
                 action: onDelete

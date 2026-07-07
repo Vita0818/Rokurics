@@ -263,10 +263,10 @@ struct LongProcessingTests {
         #expect(decoded.noteSections?.first?.sourceEnd == 100)
     }
 
-    @Test func shortTaskReceiveJSONDoesNotNeedChunkFields() throws {
+    @Test func shortTaskReceiveJSONDoesNotNeedChunkFields() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "short-receive", store: store)
+        try await saveMacInboxRecording(id: "short-receive", store: store)
 
         try store.updateTranscriptionStatus(
             recordingID: "short-receive",
@@ -297,10 +297,10 @@ struct LongProcessingTests {
         #expect(record.noteSections == nil)
     }
 
-    @Test func longTaskReceiveJSONRecordsChunkMetadata() throws {
+    @Test func longTaskReceiveJSONRecordsChunkMetadata() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "long-receive", store: store)
+        try await saveMacInboxRecording(id: "long-receive", store: store)
         let chunks = [
             RecordingTranscriptionChunkRecord(index: 0, startTime: 0, endTime: 900, status: .generated),
             RecordingTranscriptionChunkRecord(index: 1, startTime: 900, endTime: 1_800, status: .failed, error: "timeout")
@@ -343,10 +343,10 @@ struct LongProcessingTests {
         #expect(record.noteSections == sections)
     }
 
-    @Test func failedTranscriptionStatusDoesNotClearExistingTranscriptPaths() throws {
+    @Test func failedTranscriptionStatusDoesNotClearExistingTranscriptPaths() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "transcript-failure", store: store)
+        try await saveMacInboxRecording(id: "transcript-failure", store: store)
         try store.updateTranscriptionStatus(
             recordingID: "transcript-failure",
             status: "transcribed",
@@ -379,10 +379,10 @@ struct LongProcessingTests {
         #expect(record.transcriptionChunks?.first?.status == .failed)
     }
 
-    @Test func failedNoteStatusDoesNotClearExistingNotePathWithSections() throws {
+    @Test func failedNoteStatusDoesNotClearExistingNotePathWithSections() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
-        try saveMacInboxRecording(id: "long-note-failure", store: store)
+        try await saveMacInboxRecording(id: "long-note-failure", store: store)
         try store.updateNoteGenerationStatus(
             recordingID: "long-note-failure",
             status: "generated",
@@ -432,16 +432,24 @@ struct LongProcessingTests {
         #expect(largeConfiguration.preferredLargeModel)
     }
 
-    @Test func streamedFileHashMatchesDataHash() throws {
+    @Test func streamedFileHashMatchesDataHash() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
         let data = Data((0..<65_536).map { UInt8($0 % 251) })
         let fileURL = scratchURL.appendingPathComponent("large-upload.bin", isDirectory: false)
         try data.write(to: fileURL)
 
-        let streamedHash = try MacSecurityUtilities.sha256Hex(fileURL: fileURL, chunkByteCount: 1_024)
+        let runtime = CanonicalChecksumRuntime()
+        let result = await runtime.checksum(
+            fileURL: fileURL,
+            logicalToken: "large-upload.bin",
+            nodeRole: .mac,
+            cacheDirectoryURL: scratchURL.appendingPathComponent("checksum-cache", isDirectory: true),
+            configuration: CanonicalInventoryRuntimeConfiguration(persistentChecksumCacheEnabled: false)
+        )
 
-        #expect(streamedHash == MacSecurityUtilities.sha256Hex(data))
+        #expect(result.sha256 == MacSecurityUtilities.sha256Hex(data))
+        #expect(result.hashComputed)
     }
 
     @Test @MainActor func verifierCanValidatePrecomputedStreamingHash() throws {
@@ -548,8 +556,8 @@ struct LongProcessingTests {
 
         #expect(!recordingUploadClient.contains("Data(contentsOf: audioURL)"))
         #expect(secureUploadClient.contains("upload(for: request, fromFile: fileURL)"))
-        #expect(secureUploadClient.contains("sha256Hex(fileURL: fileURL)"))
-        #expect(secureUploadUtilities.contains("FileHandle(forReadingFrom: fileURL)"))
+        #expect(secureUploadClient.contains("canonicalUploadChecksum("))
+        #expect(secureUploadUtilities.contains("static func sha256Hex(_ data: Data)"))
         #expect(secureServer.contains("StreamingBodyWriter"))
         #expect(secureServer.contains("temporaryAudioUploadURL"))
         #expect(requestVerifier.contains("bodySHA256 actualBodyHash"))
@@ -665,7 +673,7 @@ struct LongProcessingTests {
     }
 
     @discardableResult
-    private func saveMacInboxRecording(id: String, store: MacRecordingFileStore) throws -> URL {
+    private func saveMacInboxRecording(id: String, store: MacRecordingFileStore) async throws -> URL {
         let device = PairedDevice(
             id: "device",
             deviceName: "iPhone",
@@ -696,7 +704,7 @@ struct LongProcessingTests {
             uploadedAt: Date(timeIntervalSince1970: 1_807)
         )
         let result = try store.saveMetadata(metadata, sourceDevice: device)
-        _ = try store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: device)
+        _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: id, requestedFileName: "\(id).m4a", sourceDevice: device)
         return result.directoryURL
     }
 

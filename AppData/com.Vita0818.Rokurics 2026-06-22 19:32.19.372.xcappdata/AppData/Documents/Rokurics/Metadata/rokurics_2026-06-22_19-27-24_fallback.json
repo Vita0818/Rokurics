@@ -1,0 +1,23 @@
+{
+  "bitrate" : 128000,
+  "channels" : 1,
+  "codec" : "AAC",
+  "createdAt" : "2026-06-22T11:27:25Z",
+  "duration" : 4.684013605442177,
+  "endedAt" : "2026-06-22T11:27:29Z",
+  "fileName" : "rokurics_2026-06-22_19-27-24_fallback.m4a",
+  "fileSize" : 119862,
+  "format" : "m4a",
+  "id" : "rokurics_2026-06-22_19-27-24_fallback",
+  "isDeleted" : false,
+  "noteStatus" : "notStarted",
+  "relativeAudioPath" : "Recordings\/rokurics_2026-06-22_19-27-24_fallback.m4a",
+  "relativeMetadataPath" : "Metadata\/rokurics_2026-06-22_19-27-24_fallback.json",
+  "sampleRate" : 44100,
+  "tags" : [
+
+  ],
+  "title" : "录音 2026-06-22 19:27",
+  "transcriptionStatus" : "notStarted",
+  "uploadStatus" : "uploaded"
+}

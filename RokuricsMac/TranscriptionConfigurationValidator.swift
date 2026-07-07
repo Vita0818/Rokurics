@@ -33,7 +33,7 @@ struct TranscriptionConfigurationValidator {
                 runtimeResolver: runtimeResolver
             )
             try await provider.validateConfiguration()
-            return ValidationResult(status: .valid, message: "配置有效")
+            return ValidationResult(status: .valid, message: RokuricsCopy.text("配置有效", "Valid"))
         } catch {
             let status = status(for: error)
             return ValidationResult(status: status, message: error.localizedDescription)

@@ -44,7 +44,7 @@ final class RecordingManager: ObservableObject {
     @Published private(set) var recordings: [RecordingMetadata] = []
     @Published private(set) var trashedRecordings: [RecordingMetadata] = []
     @Published private(set) var latestRecordingMetadata: RecordingMetadata?
-    @Published private(set) var statusMessage = "录音默认仅保存在本地"
+    @Published private(set) var statusMessage = RokuricsCopy.text("录音默认仅保存在本地", "Recordings stay local by default")
     @Published private(set) var debugMessage: String?
     @Published private(set) var pendingDefaultTitle: String?
     @Published private(set) var pendingTitle: String?
@@ -115,7 +115,7 @@ final class RecordingManager: ObservableObject {
         lastErrorMessage = nil
         elapsedSeconds = 0
         state = .requestingPermission
-        statusMessage = "正在请求麦克风权限"
+        statusMessage = RokuricsCopy.text("正在请求麦克风权限", "Requesting microphone access")
         log("startRecording begin")
 
         Task { [weak self] in
@@ -143,7 +143,7 @@ final class RecordingManager: ObservableObject {
         stopTimer()
         elapsedSeconds = recorder.currentTime > 0 ? recorder.currentTime : elapsedSeconds
         state = .paused
-        statusMessage = "已暂停"
+        statusMessage = RokuricsCopy.text("已暂停", "Paused")
         liveActivityController.update(
             title: activeLiveActivityTitle,
             elapsedSeconds: elapsedSeconds,
@@ -165,17 +165,17 @@ final class RecordingManager: ObservableObject {
         log("isRecording: \(recorder.isRecording)")
 
         guard didResume else {
-            fail("继续录音失败：record() returned false")
+            fail(RokuricsCopy.text("继续录音失败：record() returned false", "Resume failed: record() returned false"))
             return
         }
 
         guard recorder.isRecording else {
-            fail("继续录音失败：recorder.isRecording is false")
+            fail(RokuricsCopy.text("继续录音失败：recorder.isRecording is false", "Resume failed: recorder.isRecording is false"))
             return
         }
 
         state = .recording
-        statusMessage = "正在录音"
+        statusMessage = RokuricsCopy.text("正在录音", "Recording")
         startTimer()
         liveActivityController.update(
             title: activeLiveActivityTitle,
@@ -211,6 +211,7 @@ final class RecordingManager: ObservableObject {
             try fileStore.updateMetadata(updated)
             recordings[reloadedIndex] = updated
             publishRecordingMetadataUpdate(updated)
+            publishUploadStatusSyncEvent(status, recordingID: recordingID)
             return
         }
 
@@ -218,6 +219,7 @@ final class RecordingManager: ObservableObject {
         try fileStore.updateMetadata(updated)
         recordings[index] = updated
         publishRecordingMetadataUpdate(updated)
+        publishUploadStatusSyncEvent(status, recordingID: recordingID)
     }
 
     func updateUploadProgress(
@@ -244,6 +246,7 @@ final class RecordingManager: ObservableObject {
             try fileStore.updateMetadata(updated)
             recordings[reloadedIndex] = updated
             publishRecordingMetadataUpdate(updated)
+            publishUploadProgressSyncEvent(recordingID: recordingID, phase: phase)
             return
         }
 
@@ -257,6 +260,7 @@ final class RecordingManager: ObservableObject {
         try fileStore.updateMetadata(updated)
         recordings[index] = updated
         publishRecordingMetadataUpdate(updated)
+        publishUploadProgressSyncEvent(recordingID: recordingID, phase: phase)
     }
 
     func renameRecording(recordingID: String, rawTitle: String) throws {
@@ -273,8 +277,9 @@ final class RecordingManager: ObservableObject {
             let updated = try fileStore.updateTitle(recordingID: recordingID, rawTitle: title)
             try studyLibraryStore.upsertRecordingMetadata(updated)
             replaceRecordingInMemory(updated)
+            LocalNetworkSyncEventTrigger.post(.recordingMetadataChanged, source: "RecordingManager.renameRecording", recordingID: recordingID)
             lastErrorMessage = nil
-            statusMessage = Self.recentRecordingStatusMessage(for: updated, prefix: "已重命名")
+            statusMessage = Self.recentRecordingStatusMessage(for: updated, prefix: RokuricsCopy.text("已重命名", "Renamed"))
         } catch {
             lastErrorMessage = RecordingLocalOperationCopy.renameFailure
             throw error
@@ -292,6 +297,7 @@ final class RecordingManager: ObservableObject {
             replaceTrashedRecordingInMemory(trashedMetadata)
             studyLibraryStore.refresh()
             refreshLatestRecordingAfterDeletion()
+            LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "RecordingManager.deleteRecording", recordingID: recordingID)
             lastErrorMessage = nil
             log("moved recording to trash: \(recordingID)")
         } catch {
@@ -307,8 +313,9 @@ final class RecordingManager: ObservableObject {
             try studyLibraryStore.upsertRecordingMetadata(restoredMetadata)
             replaceRecordingInMemory(restoredMetadata)
             latestRecordingMetadata = recordings.first
+            LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "RecordingManager.restoreRecording", recordingID: recordingID)
             lastErrorMessage = nil
-            statusMessage = Self.recentRecordingStatusMessage(for: restoredMetadata, prefix: "已恢复")
+            statusMessage = Self.recentRecordingStatusMessage(for: restoredMetadata, prefix: RokuricsCopy.text("已恢复", "Restored"))
             log("restored recording: \(recordingID)")
         } catch {
             lastErrorMessage = RecordingLocalOperationCopy.restoreFailure
@@ -323,6 +330,7 @@ final class RecordingManager: ObservableObject {
             trashedRecordings.removeAll { $0.id == recordingID }
             studyLibraryStore.refresh()
             refreshLatestRecordingAfterDeletion()
+            LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "RecordingManager.permanentlyDeleteRecording", recordingID: recordingID)
             lastErrorMessage = nil
             log("permanently deleted recording: \(recordingID)")
         } catch {
@@ -379,11 +387,11 @@ final class RecordingManager: ObservableObject {
         }
 
         state = .stopping
-        statusMessage = "正在停止录音"
+        statusMessage = RokuricsCopy.text("正在停止录音", "Stopping recording")
         stopTimer()
 
         guard let recorder = audioRecorder else {
-            fail("录音保存失败：audioRecorder is nil")
+            fail(RokuricsCopy.text("录音保存失败：audioRecorder is nil", "Save failed: audioRecorder is nil"))
             return
         }
 
@@ -403,7 +411,7 @@ final class RecordingManager: ObservableObject {
 
         guard let fileURL = activeRecordingURL else {
             elapsedSeconds = finalDuration
-            fail("录音保存失败：missing activeRecordingURL")
+            fail(RokuricsCopy.text("录音保存失败：missing activeRecordingURL", "Save failed: missing activeRecordingURL"))
             return
         }
 
@@ -418,7 +426,7 @@ final class RecordingManager: ObservableObject {
                 fileExists: false,
                 safeErrorMessage: "active recording file missing"
             )
-            fail("录音文件不存在：\(fileURL.path)")
+            fail(RokuricsCopy.text("录音文件不存在：\(fileURL.path)", "Audio file not found: \(fileURL.path)"))
             return
         }
 
@@ -436,7 +444,7 @@ final class RecordingManager: ObservableObject {
         lastRecordingURL = fileURL
         lastErrorMessage = nil
         state = .filing
-        statusMessage = "等待归档"
+        statusMessage = RokuricsCopy.text("等待归档", "Waiting for filing")
         log("recording stopped for filing: \(fileURL.path)")
         print("[RokuricsStorage] audio file exists: \(fileStore.fileExists(at: fileURL))")
         UploadFlightRecorder.record(
@@ -462,7 +470,7 @@ final class RecordingManager: ObservableObject {
         }
 
         state = .saving
-        statusMessage = "正在保存录音"
+        statusMessage = RokuricsCopy.text("正在保存录音", "Saving recording")
 
         let resolvedFiling = studyFiling?.isEmpty == true ? nil : studyFiling
         let resolvedTitle = RecordingSaveTitleResolver.title(
@@ -544,14 +552,15 @@ final class RecordingManager: ObservableObject {
             lastRecordingURL = pendingRecordingSave.fileURL
             lastErrorMessage = nil
             state = .saved
-            statusMessage = Self.recentRecordingStatusMessage(for: metadata, prefix: "已保存")
+            statusMessage = Self.recentRecordingStatusMessage(for: metadata, prefix: RokuricsCopy.text("已保存", "Saved"))
+            LocalNetworkSyncEventTrigger.post(.recordingCreated, source: "RecordingManager.finalizeRecording", recordingID: metadata.id)
             log("saved recording: \(pendingRecordingSave.fileURL.path)")
             print("[RokuricsStorage] audio file size: \(metadata.fileSize)")
             print("[RokuricsStorage] saved metadata: \(metadata.relativeMetadataPath)")
         } catch {
             elapsedSeconds = pendingRecordingSave.duration
             lastRecordingURL = pendingRecordingSave.fileURL
-            fail("录音已保存，但 metadata 写入失败：\(error.localizedDescription)", error: error)
+            fail(RokuricsCopy.text("录音已保存，但 metadata 写入失败：\(error.localizedDescription)", "Audio saved, but metadata write failed: \(error.localizedDescription)"), error: error)
         }
     }
 
@@ -568,6 +577,7 @@ final class RecordingManager: ObservableObject {
         try fileStore.updateMetadata(updated)
         try studyLibraryStore.updateFiling(for: recordingID, studyFiling: studyFiling)
         replaceRecordingInMemory(updated)
+        LocalNetworkSyncEventTrigger.post(.recordingMetadataChanged, source: "RecordingManager.updateStudyFiling", recordingID: recordingID)
     }
 
     private func requestPermissionIfNeeded() async -> Bool {
@@ -599,7 +609,7 @@ final class RecordingManager: ObservableObject {
 
     private func startRecorderAfterPermission() {
         state = .configuringSession
-        statusMessage = "正在配置录音"
+        statusMessage = RokuricsCopy.text("正在配置录音", "Preparing recorder")
 
         do {
             log("configure session begin")
@@ -642,12 +652,12 @@ final class RecordingManager: ObservableObject {
             elapsedSeconds = 0
             lastErrorMessage = nil
             state = .recording
-            statusMessage = "正在录音"
+            statusMessage = RokuricsCopy.text("正在录音", "Recording")
             startTimer()
             liveActivityController.start(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
             log("recording started with \(activeSettingsName ?? "unknown") settings")
         } catch {
-            fail("录音启动失败：\(error.localizedDescription)", error: error)
+            fail(RokuricsCopy.text("录音启动失败：\(error.localizedDescription)", "Recording start failed: \(error.localizedDescription)"), error: error)
         }
     }
 
@@ -722,12 +732,12 @@ final class RecordingManager: ObservableObject {
 
             if let latestRecordingMetadata {
                 elapsedSeconds = latestRecordingMetadata.duration
-                statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: "最近录音")
+                statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: RokuricsCopy.text("最近录音", "Recent"))
                 lastRecordingURL = try? audioURL(for: latestRecordingMetadata)
             }
         } catch {
-            lastErrorMessage = "读取本地录音失败：\(error.localizedDescription)"
-            statusMessage = "读取本地录音失败"
+            lastErrorMessage = RokuricsCopy.text("读取本地录音失败：\(error.localizedDescription)", "Could not read local recordings: \(error.localizedDescription)")
+            statusMessage = RokuricsCopy.text("读取本地录音失败", "Could not read recordings")
             print("[RokuricsStorage][ERROR] load recordings failed: \(error.localizedDescription)")
         }
     }
@@ -788,14 +798,59 @@ final class RecordingManager: ObservableObject {
         studyLibraryStore.refresh()
     }
 
+    private func publishUploadStatusSyncEvent(_ status: RecordingUploadStatus, recordingID: String) {
+        if status == .uploaded {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .audioUploadFinalized,
+                source: "RecordingManager.updateUploadStatus",
+                recordingID: recordingID
+            )
+        } else if status == .failed {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .retryStateChanged,
+                source: "RecordingManager.updateUploadStatus",
+                recordingID: recordingID
+            )
+        } else {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .syncStatusRefreshRequested,
+                source: "RecordingManager.updateUploadStatus",
+                recordingID: recordingID
+            )
+        }
+    }
+
+    private func publishUploadProgressSyncEvent(recordingID: String, phase: String?) {
+        let normalizedPhase = phase?.lowercased() ?? ""
+        if normalizedPhase.contains("final") || normalizedPhase.contains("complete") {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .audioUploadFinalized,
+                source: "RecordingManager.updateUploadProgress",
+                recordingID: recordingID
+            )
+        } else if normalizedPhase.contains("retry") || normalizedPhase.contains("fail") {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .retryStateChanged,
+                source: "RecordingManager.updateUploadProgress",
+                recordingID: recordingID
+            )
+        } else {
+            LocalNetworkSyncEventTrigger.postStatusConvergenceRefresh(
+                .syncStatusRefreshRequested,
+                source: "RecordingManager.updateUploadProgress",
+                recordingID: recordingID
+            )
+        }
+    }
+
     private func refreshLatestRecordingAfterDeletion() {
         latestRecordingMetadata = recordings.first
         if let latestRecordingMetadata {
-            statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: "最近录音")
+            statusMessage = Self.recentRecordingStatusMessage(for: latestRecordingMetadata, prefix: RokuricsCopy.text("最近录音", "Recent"))
             lastRecordingURL = try? audioURL(for: latestRecordingMetadata)
             elapsedSeconds = latestRecordingMetadata.duration
         } else {
-            statusMessage = "录音默认仅保存在本地"
+            statusMessage = RokuricsCopy.text("录音默认仅保存在本地", "Recordings stay local by default")
             lastRecordingURL = nil
             elapsedSeconds = 0
         }
@@ -895,8 +950,8 @@ final class RecordingManager: ObservableObject {
         pendingTitle = nil
         elapsedSeconds = 0
         state = .permissionDenied
-        lastErrorMessage = "麦克风权限未开启"
-        statusMessage = "麦克风权限未开启"
+        lastErrorMessage = RokuricsCopy.text("麦克风权限未开启", "Microphone access is off")
+        statusMessage = RokuricsCopy.text("麦克风权限未开启", "Microphone access is off")
         errorLog("permission denied")
     }
 
@@ -994,7 +1049,7 @@ final class RecordingManager: ObservableObject {
 
     private var activeLiveActivityTitle: String {
         let trimmedTitle = (pendingTitle ?? pendingDefaultTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedTitle.isEmpty ? "课堂录音" : trimmedTitle
+        return trimmedTitle.isEmpty ? RokuricsCopy.text("课堂录音", "Class Recording") : trimmedTitle
     }
 
     private func nextElapsedRefreshInterval() -> TimeInterval {
@@ -1048,7 +1103,7 @@ final class RecordingManager: ObservableObject {
             audioRecorder?.pause()
             stopTimer()
             state = .paused
-            statusMessage = "已暂停"
+            statusMessage = RokuricsCopy.text("已暂停", "Paused")
             liveActivityController.update(
                 title: activeLiveActivityTitle,
                 elapsedSeconds: elapsedSeconds,
@@ -1082,7 +1137,7 @@ final class RecordingManager: ObservableObject {
             return
         }
 
-        fail("录音被系统音频服务重置，请重新开始")
+        fail(RokuricsCopy.text("录音被系统音频服务重置，请重新开始", "Audio service reset. Please start again."))
     }
 
     private func log(_ message: String) {
@@ -1125,7 +1180,9 @@ final class RecordingManager: ObservableObject {
     ]
 
     private static func recentRecordingStatusMessage(for metadata: RecordingMetadata, prefix: String) -> String {
-        "\(prefix)：\(Self.shortTimeFormatter.string(from: metadata.createdAt)) · \(Self.durationText(metadata.duration))"
+        RokuricsCopy.usesChinese
+            ? "\(prefix)：\(Self.shortTimeFormatter.string(from: metadata.createdAt)) · \(Self.durationText(metadata.duration))"
+            : "\(prefix): \(Self.shortTimeFormatter.string(from: metadata.createdAt)) · \(Self.durationText(metadata.duration))"
     }
 
     private static func durationText(_ seconds: TimeInterval) -> String {
@@ -1138,7 +1195,7 @@ final class RecordingManager: ObservableObject {
 
     private static let shortTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = RokuricsCopy.displayLocale
         formatter.dateFormat = "HH:mm"
         return formatter
     }()
@@ -1194,13 +1251,13 @@ private enum RecordingManagerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .invalidFileURL(url):
-            return "录音文件 URL 无效：\(url.absoluteString)"
+            return RokuricsCopy.text("录音文件 URL 无效：\(url.absoluteString)", "Invalid recording file URL: \(url.absoluteString)")
         case let .audioSessionConfigurationFailed(error):
-            return "AudioSession 配置失败：\(error.localizedDescription)"
+            return RokuricsCopy.text("AudioSession 配置失败：\(error.localizedDescription)", "AudioSession configuration failed: \(error.localizedDescription)")
         case let .audioSessionActivationFailed(error):
-            return "AudioSession 激活失败：\(error.localizedDescription)"
+            return RokuricsCopy.text("AudioSession 激活失败：\(error.localizedDescription)", "AudioSession activation failed: \(error.localizedDescription)")
         case let .recorderInitializationFailed(label, error):
-            return "\(label) 录音器初始化失败：\(error.localizedDescription)"
+            return RokuricsCopy.text("\(label) 录音器初始化失败：\(error.localizedDescription)", "\(label) recorder initialization failed: \(error.localizedDescription)")
         case .primaryAndFallbackPrepareFailed:
             return "primary and fallback prepareToRecord failed"
         case let .recordReturnedFalse(label):

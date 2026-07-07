@@ -13,8 +13,8 @@ struct MacExportCard: View {
 
     var body: some View {
         MacDashboardCard(systemImage: "square.and.arrow.up", tint: MacTheme.coral) {
-            Text("导出")
-                .font(MacTypography.chineseHeadline(size: 17))
+            Text(RokuricsCopy.text("导出", "Export"))
+                .font(RokuricsCopy.usesChinese ? MacTypography.chineseHeadline(size: 17) : MacTypography.englishHeadline(size: 17))
         } content: {
             VStack(alignment: .leading, spacing: 14) {
                 Text(exportManager.primaryFormat)
@@ -25,8 +25,8 @@ struct MacExportCard: View {
                     Text("Kikaria / Anki")
                         .font(MacTypography.englishBody(size: 14, weight: .medium))
 
-                    Text("稍后支持")
-                        .font(MacTypography.chineseBody(size: 14, weight: .medium))
+                    Text(RokuricsCopy.text("稍后支持", "Coming Soon"))
+                        .font(RokuricsCopy.usesChinese ? MacTypography.chineseBody(size: 14, weight: .medium) : MacTypography.englishBody(size: 14, weight: .medium))
                 }
                     .foregroundStyle(MacTheme.softText(for: colorScheme))
 

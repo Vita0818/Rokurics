@@ -22,11 +22,11 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .dashboard: return "仪表盘"
-        case .audioInbox: return "音频收件箱"
-        case .studyLibrary: return "学习库"
-        case .iPhoneConnection: return "iPhone 连接"
-        case .aiChat: return "AI 对话"
+        case .dashboard: return RokuricsCopy.text("仪表盘", "Dashboard")
+        case .audioInbox: return RokuricsCopy.text("音频收件箱", "Inbox")
+        case .studyLibrary: return RokuricsCopy.text("学习库", "Library")
+        case .iPhoneConnection: return RokuricsCopy.text("iPhone 连接", "iPhone")
+        case .aiChat: return RokuricsCopy.text("AI 对话", "AI Chat")
         }
     }
 
@@ -228,9 +228,9 @@ private struct MacSidebarTitle: View {
     private var sidebarTitle: String {
         switch item {
         case .iPhoneConnection:
-            return "连接"
+            return RokuricsCopy.text("连接", "Link")
         case .aiChat:
-            return "对话"
+            return RokuricsCopy.text("对话", "Chat")
         default:
             return item.title
         }

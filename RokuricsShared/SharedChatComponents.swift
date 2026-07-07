@@ -12,12 +12,12 @@ struct ChatGreeting: Equatable {
     let periodText: String
 
     var text: String {
-        "\(userName)，\(periodText)！"
+        RokuricsCopy.usesChinese ? "\(userName)，\(periodText)！" : "\(periodText), \(userName)"
     }
 
     static func current(
         displayName: String,
-        defaultName: String = "用户",
+        defaultName: String = RokuricsCopy.text("用户", "User"),
         date: Date = Date(),
         calendar: Calendar = .current
     ) -> ChatGreeting {
@@ -27,7 +27,7 @@ struct ChatGreeting: Equatable {
         )
     }
 
-    static func make(userName: String?, defaultName: String = "用户", date: Date, calendar: Calendar) -> ChatGreeting {
+    static func make(userName: String?, defaultName: String = RokuricsCopy.text("用户", "User"), date: Date, calendar: Calendar) -> ChatGreeting {
         ChatGreeting(
             userName: normalizedUserName(userName) ?? defaultName,
             periodText: periodText(for: date, calendar: calendar)
@@ -38,11 +38,11 @@ struct ChatGreeting: Equatable {
         let hour = calendar.component(.hour, from: date)
         switch hour {
         case 5..<12:
-            return "早上好"
+            return RokuricsCopy.text("早上好", "Good morning")
         case 12..<18:
-            return "下午好"
+            return RokuricsCopy.text("下午好", "Good afternoon")
         default:
-            return "晚上好"
+            return RokuricsCopy.text("晚上好", "Good evening")
         }
     }
 
@@ -572,7 +572,7 @@ struct ChatAttachmentButton: View {
     var body: some View {
         RokuricsGlassIconButton(
             systemImage: "paperclip",
-            accessibilityTitle: "添加附件",
+            accessibilityTitle: RokuricsCopy.text("添加附件", "Add Attachment"),
             tint: nil,
             isEnabled: isEnabled,
             role: nil,
@@ -592,7 +592,7 @@ struct ChatInputBar: View {
         HStack(alignment: .bottom, spacing: 10) {
             ChatAttachmentButton(isEnabled: !isSending, action: onImportContext)
 
-            TextField("消息", text: $text, axis: .vertical)
+            TextField(RokuricsCopy.text("消息", "Message"), text: $text, axis: .vertical)
                 .font(inputFont)
                 .foregroundStyle(RokuricsSharedStyle.deepText(for: colorScheme))
                 .lineLimit(1...4)
@@ -603,7 +603,7 @@ struct ChatInputBar: View {
 
             RokuricsGlassIconButton(
                 systemImage: isSending ? "arrow.triangle.2.circlepath" : "arrow.up",
-                accessibilityTitle: "发送",
+                accessibilityTitle: RokuricsCopy.text("发送", "Send"),
                 tint: RokuricsSharedStyle.aqua,
                 isEnabled: canSend,
                 role: nil,
@@ -644,9 +644,9 @@ enum ChatTopControl: CaseIterable, Equatable {
     var accessibilityTitle: String {
         switch self {
         case .recentConversations:
-            return "最近对话"
+            return RokuricsCopy.text("最近对话", "Recent Chats")
         case .newConversation:
-            return "新建对话"
+            return RokuricsCopy.text("新建对话", "New Chat")
         }
     }
 }
@@ -743,7 +743,7 @@ struct ChatRecentConversationListView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if conversations.isEmpty {
-                RokuricsSharedText(text: "暂无对话", token: .body, size: 13, weight: .medium)
+                RokuricsSharedText(text: RokuricsCopy.text("暂无对话", "No chats"), token: .body, size: 13, weight: .medium)
                     .foregroundStyle(RokuricsSharedStyle.softText(for: colorScheme))
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -794,7 +794,7 @@ private struct ChatRecentConversationRow: View {
             #if os(iOS)
             RokuricsGlassIconButton(
                 systemImage: "trash",
-                accessibilityTitle: "删除对话",
+                accessibilityTitle: RokuricsCopy.text("删除对话", "Delete Chat"),
                 tint: RokuricsSharedStyle.coral,
                 role: .destructive,
                 action: onDelete
@@ -808,7 +808,7 @@ private struct ChatRecentConversationRow: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("删除对话")
+            .accessibilityLabel(RokuricsCopy.text("删除对话", "Delete Chat"))
             #endif
         }
         .padding(.leading, 12)
@@ -910,7 +910,7 @@ private struct ChatAttachmentChip: View {
                 #else
                 .buttonStyle(RokuricsScaleButtonStyle())
                 #endif
-                .accessibilityLabel("移除附件")
+                .accessibilityLabel(RokuricsCopy.text("移除附件", "Remove Attachment"))
             }
         }
         .padding(.horizontal, 9)
@@ -972,10 +972,10 @@ struct ChatStudyLibraryPickerView: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
-            Button("取消", action: onCancel)
+            Button(RokuricsCopy.text("取消", "Cancel"), action: onCancel)
                 .font(buttonFont)
 
-            Button("导入当前文件夹") {
+            Button(RokuricsCopy.text("导入当前文件夹", "Import Folder")) {
                 onImport(.folder(browsePath))
             }
             .font(buttonEmphasisFont)
@@ -990,7 +990,7 @@ struct ChatStudyLibraryPickerView: View {
                     ChatStudyLibraryPickerRow(
                         systemImage: "folder",
                         title: folder.title,
-                        detail: "\(folder.itemCount) 项",
+                        detail: RokuricsCopy.itemCount(folder.itemCount),
                         actionSystemImage: "chevron.right",
                         action: {
                             browsePath = folder.path
@@ -1011,7 +1011,7 @@ struct ChatStudyLibraryPickerView: View {
                 }
 
                 if browseContent.folders.isEmpty && browseContent.items.isEmpty {
-                    Text("暂无内容")
+                    Text(RokuricsCopy.text("暂无内容", "No content"))
                         .font(buttonFont)
                         .foregroundStyle(RokuricsSharedStyle.softText(for: colorScheme))
                         .padding(.vertical, 16)

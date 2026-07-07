@@ -1,0 +1,26 @@
+{
+  "childFolderIDs" : [
+
+  ],
+  "createdAt" : "2026-05-26T14:39:48Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_topic_通识_大英IV_Unit6_Class2",
+  "isTrashed" : false,
+  "itemIDs" : [
+    "item_recording_rokurics_2026-05-21_08-00-04_fallback",
+    "item_recording_rokurics_2026-05-28_08-02-38_fallback"
+  ],
+  "level" : "topic",
+  "modifiedByDeviceID" : "mac-d6c0ef1617bf4af1",
+  "name" : "Class2",
+  "parentFolderID" : "folder_chapter_通识_大英IV_Unit6",
+  "path" : {
+    "chapter" : "Unit6",
+    "subject" : "大英IV",
+    "topic" : "Class2",
+    "type" : "通识"
+  },
+  "updatedAt" : "2026-06-22T11:32:03Z"
+}

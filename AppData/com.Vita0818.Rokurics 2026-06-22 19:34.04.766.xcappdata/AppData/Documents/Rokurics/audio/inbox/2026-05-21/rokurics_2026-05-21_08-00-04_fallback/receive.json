@@ -1,0 +1,34 @@
+{
+  "audioFileName" : "audio.m4a",
+  "audioRelativePath" : "audio\/inbox\/2026-05-21\/rokurics_2026-05-21_08-00-04_fallback\/audio.m4a",
+  "checksum" : "7a74f1c87dab489fe04d017db19f8cb30705bed4a87ecb2a4066dbc6297afe6b",
+  "createdAt" : "2026-05-21T00:00:04Z",
+  "duration" : 5483.527505668934,
+  "fileSize" : 47098327,
+  "isDeleted" : false,
+  "lastUploadAttemptAt" : "2026-05-31T15:37:14Z",
+  "metadataFileName" : "metadata.json",
+  "metadataRelativePath" : "audio\/inbox\/2026-05-21\/rokurics_2026-05-21_08-00-04_fallback\/metadata.json",
+  "normalizedTitle" : "大英IV · Unit6 · Class2",
+  "noteStatus" : "notGenerated",
+  "originalAudioFileName" : "rokurics_2026-05-21_08-00-04_fallback.m4a",
+  "originalTitle" : "大英IV · Unit6 · Class2",
+  "processingStatus" : "notStarted",
+  "receivedAt" : "2026-05-31T05:56:08Z",
+  "recordingID" : "rokurics_2026-05-21_08-00-04_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-05-21_08-00-04_fallback",
+  "sourceDeviceID" : "iphone-a683dbf2-9705-4341-912e-9a28f13a3771",
+  "sourceDeviceName" : "iPhone",
+  "status" : "completed",
+  "studyFiling" : {
+    "chapter" : "Unit6",
+    "subject" : "大英IV",
+    "topic" : "Class2",
+    "type" : "通识"
+  },
+  "tags" : [
+
+  ],
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-05-31T15:37:14Z"
+}

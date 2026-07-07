@@ -1,0 +1,112 @@
+{
+  "completedAt" : "2026-05-31T05:56:32Z",
+  "language" : "auto",
+  "modelName" : "mock-local",
+  "providerID" : "mock",
+  "providerName" : "Mock Transcription",
+  "recordingID" : "rokurics_2026-05-28_08-02-38_fallback",
+  "segments" : [
+    {
+      "confidence" : 1,
+      "endTime" : 5,
+      "id" : "chunk_0_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_000-segment-1",
+      "startTime" : 0,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 9,
+      "id" : "chunk_0_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_000-segment-2",
+      "startTime" : 5,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 905,
+      "id" : "chunk_1_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_001-segment-1",
+      "startTime" : 900,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 909,
+      "id" : "chunk_1_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_001-segment-2",
+      "startTime" : 905,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 1805,
+      "id" : "chunk_2_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_002-segment-1",
+      "startTime" : 1800,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 1809,
+      "id" : "chunk_2_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_002-segment-2",
+      "startTime" : 1805,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 2705,
+      "id" : "chunk_3_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_003-segment-1",
+      "startTime" : 2700,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 2709,
+      "id" : "chunk_3_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_003-segment-2",
+      "startTime" : 2705,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 3605,
+      "id" : "chunk_4_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_004-segment-1",
+      "startTime" : 3600,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 3609,
+      "id" : "chunk_4_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_004-segment-2",
+      "startTime" : 3605,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 4505,
+      "id" : "chunk_5_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_005-segment-1",
+      "startTime" : 4500,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 4509,
+      "id" : "chunk_5_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_005-segment-2",
+      "startTime" : 4505,
+      "text" : "真实转写引擎尚未配置。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 5405,
+      "id" : "chunk_6_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_006-segment-1",
+      "startTime" : 5400,
+      "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。"
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 5409,
+      "id" : "chunk_6_002e043c-7559-4e46-8087-b2c4da5a4ce3-chunk_006-segment-2",
+      "startTime" : 5405,
+      "text" : "真实转写引擎尚未配置。"
+    }
+  ],
+  "startedAt" : "2026-05-31T05:56:28Z",
+  "status" : "transcribed",
+  "taskID" : "002e043c-7559-4e46-8087-b2c4da5a4ce3",
+  "text" : "这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。\n\n这是一段由 Rokurics MockTranscriptionProvider 生成的测试转写文本。\n真实转写引擎尚未配置。"
+}

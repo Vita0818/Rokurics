@@ -1,0 +1,28 @@
+{
+  "audioFileName" : "audio.m4a",
+  "audioRelativePath" : "audio\/inbox\/2026-05-09\/rokurics_2026-05-10_00-14-31_fallback\/audio.m4a",
+  "checksum" : "8d9ad8c1d789aca4e83756787cf61442c4aaa2d305008a05a6b56ca612041e5a",
+  "createdAt" : "2026-05-09T16:14:31Z",
+  "duration" : 12.555283446712018,
+  "fileSize" : 254559,
+  "isDeleted" : false,
+  "lastUploadAttemptAt" : "2026-06-01T08:34:17Z",
+  "metadataFileName" : "metadata.json",
+  "metadataRelativePath" : "audio\/inbox\/2026-05-09\/rokurics_2026-05-10_00-14-31_fallback\/metadata.json",
+  "normalizedTitle" : "录音 2026-05-10 00:14",
+  "noteStatus" : "notGenerated",
+  "originalAudioFileName" : "rokurics_2026-05-10_00-14-31_fallback.m4a",
+  "originalTitle" : "录音 2026-05-10 00:14",
+  "processingStatus" : "notStarted",
+  "receivedAt" : "2026-05-31T05:56:26Z",
+  "recordingID" : "rokurics_2026-05-10_00-14-31_fallback",
+  "sanitizedRecordingID" : "rokurics_2026-05-10_00-14-31_fallback",
+  "sourceDeviceID" : "iphone-66aa9b56-5893-4b85-86ee-04ead52efb90",
+  "sourceDeviceName" : "iPhone",
+  "status" : "completed",
+  "tags" : [
+
+  ],
+  "transcriptionStatus" : "notStarted",
+  "updatedAt" : "2026-06-01T08:34:17Z"
+}

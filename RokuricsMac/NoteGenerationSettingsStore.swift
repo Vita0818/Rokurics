@@ -190,14 +190,17 @@ final class NoteGenerationSettingsStore: ObservableObject {
             guard !modelIDs.isEmpty else {
                 return NoteGenerationModelRefreshResult(
                     isSuccess: false,
-                    message: "未读取到模型",
+                    message: RokuricsCopy.text("未读取到模型", "No models found"),
                     modelIDs: []
                 )
             }
 
             return NoteGenerationModelRefreshResult(
                 isSuccess: true,
-                message: "刷新成功：\(modelIDs.count) 个模型",
+                message: RokuricsCopy.text(
+                    "刷新成功：\(modelIDs.count) 个模型",
+                    "Refreshed \(modelIDs.count) models"
+                ),
                 modelIDs: modelIDs
             )
         } catch {
@@ -219,14 +222,17 @@ final class NoteGenerationSettingsStore: ObservableObject {
             guard !modelIDs.isEmpty else {
                 return NoteGenerationModelRefreshResult(
                     isSuccess: false,
-                    message: "未读取到 Claude 模型",
+                    message: RokuricsCopy.text("未读取到 Claude 模型", "No Claude models found"),
                     modelIDs: []
                 )
             }
 
             return NoteGenerationModelRefreshResult(
                 isSuccess: true,
-                message: "刷新成功：\(modelIDs.count) 个 Claude 模型",
+                message: RokuricsCopy.text(
+                    "刷新成功：\(modelIDs.count) 个 Claude 模型",
+                    "Refreshed \(modelIDs.count) Claude models"
+                ),
                 modelIDs: modelIDs
             )
         } catch {
@@ -247,7 +253,10 @@ final class NoteGenerationSettingsStore: ObservableObject {
             let firstModel = models.first?.id ?? "unknown"
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "连接成功：\(models.count) 个模型，首个 \(firstModel)"
+                message: RokuricsCopy.text(
+                    "连接成功：\(models.count) 个模型，首个 \(firstModel)",
+                    "Connected: \(models.count) models, first \(firstModel)"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)
@@ -263,7 +272,10 @@ final class NoteGenerationSettingsStore: ObservableObject {
             let firstModel = models.first?.id ?? "unknown"
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "连接成功：\(models.count) 个 Claude 模型，首个 \(firstModel)"
+                message: RokuricsCopy.text(
+                    "连接成功：\(models.count) 个 Claude 模型，首个 \(firstModel)",
+                    "Connected: \(models.count) Claude models, first \(firstModel)"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)
@@ -277,24 +289,38 @@ final class NoteGenerationSettingsStore: ObservableObject {
                 messages: [
                     OpenAICompatibleMessage(
                         role: "system",
-                        content: "你是一个本地连接测试助手。只输出最终答案，不要输出思考过程、草稿、推理步骤或解释。"
+                        content: RokuricsCopy.text(
+                            "你是一个本地连接测试助手。只输出最终答案，不要输出思考过程、草稿、推理步骤或解释。",
+                            "You are a local connection test assistant. Output only the final answer."
+                        )
                     ),
                     OpenAICompatibleMessage(
                         role: "user",
-                        content: """
+                        content: RokuricsCopy.text(
+                            """
                         请只输出下面这一行，不要添加任何其他内容：
                         Rokurics AI OK
+                        """,
+                            """
+                        Output exactly this line and nothing else:
+                        Rokurics AI OK
                         """
+                        )
                     )
                 ],
                 timeout: 30,
                 maxTokens: Self.testModelMaxTokens,
                 temperature: 0.1
             )
-            let truncationHint = result.isLengthLimited ? "，可能被长度截断" : ""
+            let truncationHint = result.isLengthLimited
+                ? RokuricsCopy.text("，可能被长度截断", ", may be truncated")
+                : ""
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "模型测试成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 80))"
+                message: RokuricsCopy.text(
+                    "模型测试成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 80))",
+                    "Model OK\(truncationHint): \(Self.preview(result.content, maxCharacters: 80))"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)
@@ -305,19 +331,33 @@ final class NoteGenerationSettingsStore: ObservableObject {
         do {
             let result = try await anthropicClient.message(
                 configuration: sanitized(configuration: configuration),
-                system: "你是一个本地连接测试助手。只输出最终答案，不要输出思考过程、草稿、推理步骤或解释。",
-                userContent: """
+                system: RokuricsCopy.text(
+                    "你是一个本地连接测试助手。只输出最终答案，不要输出思考过程、草稿、推理步骤或解释。",
+                    "You are a local connection test assistant. Output only the final answer."
+                ),
+                userContent: RokuricsCopy.text(
+                    """
                 请只输出下面这一行，不要添加任何其他内容：
                 Rokurics Claude OK
                 """,
+                    """
+                Output exactly this line and nothing else:
+                Rokurics Claude OK
+                """
+                ),
                 timeout: 30,
                 maxTokens: Self.testAnthropicModelMaxTokens,
                 temperature: 0.1
             )
-            let truncationHint = result.isLengthLimited ? "，可能被长度截断" : ""
+            let truncationHint = result.isLengthLimited
+                ? RokuricsCopy.text("，可能被长度截断", ", may be truncated")
+                : ""
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "模型测试成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 80))"
+                message: RokuricsCopy.text(
+                    "模型测试成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 80))",
+                    "Model OK\(truncationHint): \(Self.preview(result.content, maxCharacters: 80))"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)
@@ -331,24 +371,39 @@ final class NoteGenerationSettingsStore: ObservableObject {
                 messages: [
                     OpenAICompatibleMessage(
                         role: "system",
-                        content: "你是 Rokurics 的中文课堂笔记整理助手。只输出最终 Markdown，不要输出思考过程、草稿、推理步骤、分析过程或 JSON。"
+                        content: RokuricsCopy.text(
+                            "你是 Rokurics 的中文课堂笔记整理助手。只输出最终 Markdown，不要输出思考过程、草稿、推理步骤、分析过程或 JSON。",
+                            "You are Rokurics' class note assistant. Output only final Markdown."
+                        )
                     ),
                     OpenAICompatibleMessage(
                         role: "user",
-                        content: """
+                        content: RokuricsCopy.text(
+                            """
                         请根据以下转写生成简短中文 Markdown 笔记：
 
                         高斯公式、格林公式、斯托克斯公式都和向量场积分有关。
+                        """,
+                            """
+                        Generate brief English Markdown notes from this transcript:
+
+                        Gauss, Green, and Stokes formulas are all related to vector field integrals.
                         """
+                        )
                     )
                 ],
                 timeout: 60,
                 maxTokens: 1_200
             )
-            let truncationHint = result.isLengthLimited ? "，可能被长度截断" : ""
+            let truncationHint = result.isLengthLimited
+                ? RokuricsCopy.text("，可能被长度截断", ", may be truncated")
+                : ""
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "生成成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 120))"
+                message: RokuricsCopy.text(
+                    "生成成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 120))",
+                    "Generated\(truncationHint): \(Self.preview(result.content, maxCharacters: 120))"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)
@@ -359,19 +414,34 @@ final class NoteGenerationSettingsStore: ObservableObject {
         do {
             let result = try await anthropicClient.message(
                 configuration: sanitized(configuration: configuration),
-                system: "你是 Rokurics 的中文课堂笔记整理助手。只输出最终 Markdown，不要输出思考过程、草稿、推理步骤、分析过程或 JSON。",
-                userContent: """
+                system: RokuricsCopy.text(
+                    "你是 Rokurics 的中文课堂笔记整理助手。只输出最终 Markdown，不要输出思考过程、草稿、推理步骤、分析过程或 JSON。",
+                    "You are Rokurics' class note assistant. Output only final Markdown."
+                ),
+                userContent: RokuricsCopy.text(
+                    """
                 请根据以下转写生成简短中文 Markdown 笔记：
 
                 高斯公式、格林公式、斯托克斯公式都和向量场积分有关。
                 """,
+                    """
+                Generate brief English Markdown notes from this transcript:
+
+                Gauss, Green, and Stokes formulas are all related to vector field integrals.
+                """
+                ),
                 timeout: 60,
                 maxTokens: 1_200
             )
-            let truncationHint = result.isLengthLimited ? "，可能被长度截断" : ""
+            let truncationHint = result.isLengthLimited
+                ? RokuricsCopy.text("，可能被长度截断", ", may be truncated")
+                : ""
             return NoteGenerationDiagnosticResult(
                 isSuccess: true,
-                message: "生成成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 120))"
+                message: RokuricsCopy.text(
+                    "生成成功\(truncationHint)：\(Self.preview(result.content, maxCharacters: 120))",
+                    "Generated\(truncationHint): \(Self.preview(result.content, maxCharacters: 120))"
+                )
             )
         } catch {
             return NoteGenerationDiagnosticResult(isSuccess: false, message: error.localizedDescription)

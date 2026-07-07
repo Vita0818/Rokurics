@@ -1,0 +1,24 @@
+{
+  "childFolderIDs" : [
+
+  ],
+  "createdAt" : "2026-06-07T07:00:02Z",
+  "customProperties" : {
+
+  },
+  "folderID" : "folder_subject_通识_线性代数",
+  "isTrashed" : false,
+  "itemIDs" : [
+
+  ],
+  "level" : "subject",
+  "modifiedByDeviceID" : "mac-d6c0ef1617bf4af1",
+  "name" : "线性代数",
+  "parentFolderID" : "folder_type_通识",
+  "path" : {
+    "subject" : "线性代数",
+    "type" : "通识"
+  },
+  "syncConflictStatus" : "conflict_preserved_local",
+  "updatedAt" : "2026-06-07T07:00:02Z"
+}
