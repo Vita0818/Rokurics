@@ -8,6 +8,7 @@
 import SwiftUI
 
 enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
+    case home
     case dashboard
     case audioInbox
     case studyLibrary
@@ -15,13 +16,14 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
     case aiChat
 
     static var allCases: [MacSidebarItem] {
-        [.studyLibrary, .aiChat, .iPhoneConnection]
+        [.home, .studyLibrary, .aiChat, .iPhoneConnection]
     }
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .home: return RokuricsCopy.text("首页", "Home")
         case .dashboard: return RokuricsCopy.text("仪表盘", "Dashboard")
         case .audioInbox: return RokuricsCopy.text("音频收件箱", "Inbox")
         case .studyLibrary: return RokuricsCopy.text("学习库", "Library")
@@ -32,6 +34,7 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
 
     var systemImage: String {
         switch self {
+        case .home: return "plus.circle"
         case .dashboard: return "rectangle.3.group"
         case .audioInbox: return "tray.and.arrow.down"
         case .studyLibrary: return "books.vertical"
@@ -42,6 +45,7 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
 
     var accessibilityIdentifier: String {
         switch self {
+        case .home: return "mac-sidebar-home"
         case .dashboard: return "mac-sidebar-dashboard"
         case .audioInbox: return "mac-sidebar-audio-inbox"
         case .studyLibrary: return "mac-sidebar-study-library"

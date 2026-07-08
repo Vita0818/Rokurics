@@ -1,5 +1,13 @@
 # SYNC_STATE_AUDIT
 
+## 2026-07-08 Rokurics v10.0 / Mac 本地录音对同步状态机影响审计
+
+审计结论：当前保留的 v10.0 改动不改变同步状态机、上传状态机或 Mac receiver route。Mac 首页只新增本地录音入口；`MacRecordingManager` 只写 Mac 本机 inbox 和 transcript store，不创建 iPhone upload job，不修改 heartbeat、manual sync ack、retry drainer、inventory response、metadata/artifact apply、TLS/HMAC/pinning/nonce/body hash、`RequestVerifier`、Keychain 或 pairing。
+
+Mac 本地录音保存路径继续复用现有 inbox 语义：metadata 先写入 `MacRecordingFileStore.saveMetadata`，audio 经 `temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload`、`saveAudio(temporaryFileURL:)` 落入受约束的 audio inbox。保存后的 receive record/transcription status 可被现有 Mac 学习库、转写、笔记和聊天链路读取，但它不是 peer audio proof，也不代表 iPhone 已同步。
+
+iPhone 侧实时转写显示只属于录音界面 UI。共享模拟 session 不写 `RecordingMetadata`、不写 transcript artifact、不写 sync proof、不触发 upload/sync/apply/read runtime。此前 no-legacy fallback / canonical runtime 行为收窄已恢复到 v9.24，不属于当前同步状态机事实。
+
 ## 2026-06-18 Canonical v9.17 / Real Path State Fix 审计结论
 
 审计结论：本轮只修 objectID/display cache/pending UI 三个真实路径断点。未新增 route，未修改 upload route schema，未绕过 `RequestVerifier`、TLS/HMAC/pinning/nonce/body hash，未新增 Mac -> iPhone 反向连接，未新增 CanonicalFourDomain/Evidence/Gate/Scorecard/RuntimeHarness/Fake 脚手架，未做 legacy retirement。

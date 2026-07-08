@@ -239,6 +239,38 @@ enum RokuricsSharedStyle {
         #endif
     }
 
+    static var skyCyan: Color {
+        #if os(macOS)
+        MacTheme.paleCyan
+        #else
+        RokuricsColors.skyCyan
+        #endif
+    }
+
+    static func glassSurface(for colorScheme: ColorScheme) -> Color {
+        #if os(macOS)
+        MacTheme.glassSurface(for: colorScheme)
+        #else
+        RokuricsColors.glassSurface
+        #endif
+    }
+
+    static func glassStroke(for colorScheme: ColorScheme) -> Color {
+        #if os(macOS)
+        MacTheme.glassStroke(for: colorScheme)
+        #else
+        RokuricsColors.glassStroke
+        #endif
+    }
+
+    static func shadow(for colorScheme: ColorScheme) -> Color {
+        #if os(macOS)
+        MacTheme.shadow(for: colorScheme)
+        #else
+        RokuricsColors.shadow
+        #endif
+    }
+
     static var actionGradient: LinearGradient {
         #if os(macOS)
         MacTheme.accentGradient

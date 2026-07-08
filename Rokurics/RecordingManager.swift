@@ -48,6 +48,8 @@ final class RecordingManager: ObservableObject {
     @Published private(set) var debugMessage: String?
     @Published private(set) var pendingDefaultTitle: String?
     @Published private(set) var pendingTitle: String?
+    @Published private(set) var liveTranscriptText = ""
+    @Published private(set) var liveTranscriptSnapshot = RokuricsLiveTranscriptionSnapshot.empty()
 
     private let fileStore: AudioFileStore
     let studyLibraryStore: StudyLibraryStore
@@ -59,6 +61,7 @@ final class RecordingManager: ObservableObject {
     private var activeSettingsName: String?
     private var pendingRecordingSave: PendingRecordingSave?
     private let liveActivityController = RecordingLiveActivityController()
+    private let liveTranscriptionSession = RokuricsSimulatedLiveTranscriptionSession()
     private var elapsedRefreshCadence: ElapsedRefreshCadence = .normal
     private var shouldResumeAfterInterruption = false
     private var audioSessionInterruptionObserver: NSObjectProtocol?
@@ -112,6 +115,7 @@ final class RecordingManager: ObservableObject {
 
         studyLibraryStore.refresh()
         cleanupRecorderOnly()
+        resetLiveTranscriptionState()
         lastErrorMessage = nil
         elapsedSeconds = 0
         state = .requestingPermission
@@ -140,6 +144,7 @@ final class RecordingManager: ObservableObject {
         }
 
         recorder.pause()
+        liveTranscriptionSession.pause()
         stopTimer()
         elapsedSeconds = recorder.currentTime > 0 ? recorder.currentTime : elapsedSeconds
         state = .paused
@@ -176,6 +181,7 @@ final class RecordingManager: ObservableObject {
 
         state = .recording
         statusMessage = RokuricsCopy.text("正在录音", "Recording")
+        liveTranscriptionSession.resume()
         startTimer()
         liveActivityController.update(
             title: activeLiveActivityTitle,
@@ -407,6 +413,7 @@ final class RecordingManager: ObservableObject {
             elapsedSeconds: finalDuration,
             isSavingLocally: true
         )
+        publishLiveTranscription(liveTranscriptionSession.stop(elapsedSeconds: finalDuration))
         deactivateAudioSession()
 
         guard let fileURL = activeRecordingURL else {
@@ -648,13 +655,15 @@ final class RecordingManager: ObservableObject {
                 }
             }
 
-            recordingStartedAt = Date()
+            let startedAt = Date()
+            recordingStartedAt = startedAt
             elapsedSeconds = 0
             lastErrorMessage = nil
             state = .recording
             statusMessage = RokuricsCopy.text("正在录音", "Recording")
             startTimer()
             liveActivityController.start(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
+            startLiveTranscription(title: RecordingMetadata.defaultTitle(createdAt: startedAt))
             log("recording started with \(activeSettingsName ?? "unknown") settings")
         } catch {
             fail(RokuricsCopy.text("录音启动失败：\(error.localizedDescription)", "Recording start failed: \(error.localizedDescription)"), error: error)
@@ -944,6 +953,7 @@ final class RecordingManager: ObservableObject {
 
     private func permissionDenied() {
         cleanupRecorderOnly()
+        resetLiveTranscriptionState()
         liveActivityController.end(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
         pendingRecordingSave = nil
         pendingDefaultTitle = nil
@@ -958,6 +968,7 @@ final class RecordingManager: ObservableObject {
     private func fail(_ message: String, error: Error? = nil) {
         liveActivityController.end(title: activeLiveActivityTitle, elapsedSeconds: elapsedSeconds)
         cleanupRecorderOnly()
+        resetLiveTranscriptionState()
         deactivateAudioSession()
         state = .failed
         lastErrorMessage = message
@@ -972,6 +983,7 @@ final class RecordingManager: ObservableObject {
 
     private func cleanupRecorderOnly() {
         stopTimer()
+        liveTranscriptionSession.cancel()
         if let recorder = audioRecorder, recorder.isRecording {
             recorder.stop()
         }
@@ -1039,6 +1051,23 @@ final class RecordingManager: ObservableObject {
         )
     }
 
+    private func startLiveTranscription(title: String) {
+        liveTranscriptionSession.start(recordingTitle: title, deviceName: "iPhone") { [weak self] snapshot in
+            self?.publishLiveTranscription(snapshot)
+        }
+    }
+
+    private func publishLiveTranscription(_ snapshot: RokuricsLiveTranscriptionSnapshot) {
+        liveTranscriptSnapshot = snapshot
+        liveTranscriptText = snapshot.text
+    }
+
+    private func resetLiveTranscriptionState() {
+        liveTranscriptionSession.cancel()
+        liveTranscriptText = ""
+        liveTranscriptSnapshot = RokuricsLiveTranscriptionSnapshot.empty()
+    }
+
     private func secondsSinceRecordingStarted() -> TimeInterval {
         guard let recordingStartedAt else {
             return elapsedSeconds
@@ -1101,6 +1130,7 @@ final class RecordingManager: ObservableObject {
             let recorderTime = audioRecorder?.currentTime ?? 0
             elapsedSeconds = recorderTime > 0 ? recorderTime : max(elapsedSeconds, secondsSinceRecordingStarted())
             audioRecorder?.pause()
+            liveTranscriptionSession.pause()
             stopTimer()
             state = .paused
             statusMessage = RokuricsCopy.text("已暂停", "Paused")

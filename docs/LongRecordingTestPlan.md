@@ -4,6 +4,12 @@
 
 This plan is for local, user-driven validation of long recordings. It does not require API keys, shared secrets, or private transcript contents to be written into reports.
 
+## 2026-07-08 v10.0 Mac Local Recording Note
+
+The current v10.0 worktree keeps Mac local recording and simulated live transcript UI only. It does not change the long-recording sync gates below, does not add upload/sync routes, and does not replace legacy fallback behavior.
+
+When testing long Mac local recordings, treat `shared-live-simulated-asr` / `simulated-live-asr` as UI-chain evidence only. It is not real OpenAI, FunASR, whisper.cpp, or paired-device transcription evidence.
+
 ## Canonical v8.73 Final App-State Readiness Checks
 
 Purpose:

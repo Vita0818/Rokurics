@@ -6,6 +6,16 @@
 - 若用户要求提交，只提交当前 Git root 中与本任务相关的文件；不得递归进入、暂存、提交或推送子仓库、submodule、nested Git repo 或依赖 checkout。
 - 不执行破坏性 Git 操作，不强制 push，不删除用户未提交文件。
 
+## Rokurics v10.0 / Mac 首页与共享录音实时转写禁区
+
+- v10.0 当前只保留 Mac 首页、本地录音、共享录音界面和模拟实时转写改动；不得把该范围扩大成 canonical runtime、fallback、旧内核删除、设置页开关删除或同步/上传/apply/read 行为变更。
+- `MacRecordingManager` 保存音频必须继续走 `MacRecordingFileStore` 既有 metadata-first inbox path：`saveMetadata`、`temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload`、`saveAudio(temporaryFileURL:)`。不得绕过 receive record、checksum/fileSize 更新或 inbox 根目录约束。
+- Mac 本地录音只能作为 Mac 本机 inbox 来源。不得新增 Mac -> iPhone 反向连接、反向上传、反向同步、heartbeat carrier、upload route、artifact route 或 sync route。
+- 实时转写当前必须标记为模拟 provider：`shared-live-simulated-asr` / `simulated-live-asr`。不得把模拟文本标成真实 OpenAI、FunASR、whisper.cpp 或用户音频的可信 ASR 输出。
+- iPhone 录音页可以显示共享模拟实时转写文本，但不得新增 `RecordingMetadata` 字段、不得写 transcript artifact、不得创建 upload job、不得改变上传队列、学习库 schema、同步 proof 或 Mac 接收 route。
+- 共享录音 UI 应继续复用 `RokuricsSharedRecordingSessionSurface`；Mac wrapper 只处理生命周期，iPhone wrapper 保留 iPhone 专属 filing/低电量 overlay。不要在 Mac 首页重写第二套录音 session 控制面板。
+- 未来接入 OpenAI Realtime、FunASR streaming 或其他实时 ASR 时，必须单独设计 provider/settings/secret storage/redaction，不得把 API key、完整 provider response、raw audio、完整转写文本、完整 hash 或绝对路径写入文档/诊断。
+
 ## Canonical v9.12 / R6 Connection/Transfer Owner + R7 Final Gate 禁区
 
 - v9.12 只做 post-v9.10 audit closure B：R6 Connection/Transfer owner wiring 复核与 R7 four-domain gate/harness 收口。不得执行 legacy retirement，不得启用 release/default canonical，不得新增 route，不得修改 `/device/status`、`/connection/heartbeat` 或 upload start/status/chunk/finalize route schema。

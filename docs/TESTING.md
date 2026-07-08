@@ -1,6 +1,29 @@
 # TESTING
 
-最近自查日期：2026-06-18
+最近自查日期：2026-07-08
+
+## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写验证
+
+本轮验证重点：
+
+- 工作区只保留 v10.0 A 范围：Mac 首页、Mac 本地录音、共享录音 surface、共享模拟实时转写、Mac 麦克风权限和 Mac inbox checksum helper。
+- 已恢复 no-legacy fallback / canonical runtime / 设置页 Debug Sync Kernel 删除 / 测试 source regression 到 v9.24；后续验证不得再使用这些已撤回改动作为当前证据。
+- Mac 首页默认入口应为 `MacHomeView`，侧边栏包含首页，点击录音 orb 进入 `MacRecordingSessionView`。
+- Mac 录音保存应复用 `MacRecordingFileStore` 的 metadata-first inbox path，不新增 route 或反向连接。
+- iPhone/Mac 录音界面应复用 `RokuricsSharedRecordingSessionSurface`，实时转写文本来自 `RokuricsSimulatedLiveTranscriptionSession`，不是实际 ASR provider。
+
+建议验证命令：
+
+```sh
+xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug -destination 'platform=macOS' -parallel-testing-enabled NO -derivedDataPath /tmp/RokuricsDerivedData-v100-A-mac build
+xcodebuild -project Rokurics.xcodeproj -scheme Rokurics -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/RokuricsDerivedData-v100-A-ios build
+git diff --check
+git status --short
+```
+
+本轮实际验证结果：`git diff --check` 通过；Mac `RokuricsMac` Debug build 通过；iPhone `Rokurics` generic iOS Simulator Debug build 通过。两个 build 仍输出既有 Swift 6 actor isolation / deprecation warnings，未发现 v10 A 引入的编译错误。
+
+验证结论必须区分：build 通过只能证明本地编译兼容；未进行真机 Mac 麦克风录音、未接入真实 OpenAI/FunASR streaming provider、未做 paired-device 同步验证时，不得声明真实 ASR 或真机同步链路通过。
 
 ## 2026-06-18 Canonical v9.17 / Real Path State Fix 验证
 

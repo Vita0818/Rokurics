@@ -1,6 +1,18 @@
 # ARCHITECTURE
 
-最近自查日期：2026-06-16
+最近自查日期：2026-07-08
+
+## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写架构
+
+v10.0 当前保留的是 UI/本地录音层改动，不改变同步、上传、安全或 canonical runtime 架构。Mac `MacRootView` 默认进入 `MacHomeView`；`MacSidebarItem.home` 只是本地导航项。点击首页的共享录音 orb 会进入 `MacRecordingSessionView`，由 `MacRecordingManager` 在本机请求麦克风权限并使用 `AVAudioRecorder` 录制 m4a。
+
+录音 session UI 由 `RokuricsSharedRecordingSessionSurface` 统一承载。iPhone `RecordingSessionView` 和 Mac `MacRecordingSessionView` 都只注入 elapsed time、暂停/停止状态、错误文本、实时转写文本和平台动作。共享 surface 显示计时卡片、实时转写滚动框、暂停/继续、停止和禁用上传按钮；它不拥有上传、同步、归档或 provider 配置。
+
+Mac 本地录音保存复用现有 inbox 存储语义：`IncomingRecordingMetadata` 先写入 `MacRecordingFileStore.saveMetadata`，音频进入 `temporaryAudioUploadURL`，通过 `checksumForTemporaryAudioUpload(...)` 计算 checksum 后再调用 `saveAudio(temporaryFileURL:)`。该链路写 Mac 本地 inbox 和 transcript，不调用 iPhone upload client，不新增 Mac -> iPhone 连接，不改 `/sync/*`、upload route、`RequestVerifier`、TLS/HMAC/pinning/nonce/body hash、Keychain 或 pairing。
+
+实时转写目前是 provider-shaped 的模拟实现。`RokuricsSimulatedLiveTranscriptionSession` 在录音期间定时发布 `RokuricsLiveTranscriptionSnapshot`，用于验证共享 UI 滚动文本和 Mac transcript 持久化链路。Mac 保存时把 snapshot 转成 `TranscriptionResult` 写入 `TranscriptStore` 并更新 receive record 的 transcription status。iPhone 只显示模拟文本，不写 transcript artifact、不改 `RecordingMetadata`、不改上传队列或同步 proof。真实 OpenAI Realtime、FunASR streaming 或 whisper streaming 接入仍是后续独立任务。
+
+此前 no-legacy fallback / canonical runtime / 设置页切换删除方向的改动已恢复到 v9.24，不属于当前 v10.0 架构事实。当前旧内核、fallback、同步/上传/apply/read runtime 的行为以 v9.24 源码为准。
 
 ## 2026-06-16 Canonical v9.13 / post-audit real-wiring architecture status
 

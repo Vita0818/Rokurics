@@ -1,8 +1,24 @@
 # PROJECT_MAP
 
-最近自查日期：2026-07-04
+最近自查日期：2026-07-08
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-07-08 新增/更新 v10.0 / Mac 首页与共享录音实时转写文件
+
+- `RokuricsMac/MacHomeView.swift`：新增 Mac 首页，显示 Rokurics 标题、共享录音 orb，以及学习库、AI 对话、iPhone 连接三个入口。
+- `RokuricsMac/MacRootView.swift`、`RokuricsMac/MacSidebarView.swift`：默认选择首页，并在侧边栏加入 `home` 项；不改变 Mac receiver、同步或连接拓扑。
+- `RokuricsMac/MacRecordingManager.swift`：Mac 本地录音 owner。负责麦克风权限、`AVAudioRecorder` 录制、暂停/继续/停止、模拟实时转写、保存 inbox audio/metadata 和 transcript。
+- `RokuricsMac/MacRecordingSessionView.swift`：Mac 录音 session wrapper，进入页面时启动录音，复用共享录音 surface，保存完成后返回首页。
+- `RokuricsShared/SharedRecordingOrb.swift`：共享录音按钮、录音 phase 和时间格式；当前用于 Mac 首页录音入口。
+- `RokuricsShared/SharedRecordingSessionSurface.swift`：双端共享录音界面，包含返回、计时、实时转写文本框、暂停/继续、停止和禁用上传按钮。
+- `RokuricsShared/SharedLiveTranscriptionModels.swift`：模拟实时转写 snapshot、segment 和 session；provider id 为 `shared-live-simulated-asr`。
+- `RokuricsShared/SharedRokuricsUI.swift`：补充共享录音 UI 所需颜色、glass surface/stroke/shadow helper。
+- `Rokurics/RecordingManager.swift`、`Rokurics/RecordingSessionView.swift`：iPhone 录音页复用共享 session surface，并在录音期间显示同一个模拟实时转写 session；不持久化模拟 transcript，不改变上传/同步 schema。
+- `RokuricsMac/MacRecordingFileStore.swift`：新增 `checksumForTemporaryAudioUpload(...)`，供 Mac 本地录音保存到既有 inbox audio path 前校验使用。
+- `RokuricsMac/RokuricsMac.entitlements`、`Rokurics.xcodeproj/project.pbxproj`：开启 Mac audio input entitlement/resource access，并生成麦克风用途说明。
+
+说明：v10.0 当前保留范围不包含 canonical runtime/fallback 行为改动、不包含设置页 Debug Sync Kernel 删除、不包含测试 source regression。那些文件已恢复到 v9.24。
 
 ## 2026-07-04 新增/更新 v9.24 / 双端英文显示文案文件
 

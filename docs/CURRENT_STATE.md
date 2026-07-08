@@ -1,6 +1,14 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-07-04
+最近一次自查日期：2026-07-08
+
+## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写保留范围
+
+当前工作区以 `4a940f6 v9.24` 为基线，只保留 v10.0 的 Mac 首页、本地录音、共享录音界面和模拟实时转写改动。此前临时出现的 no-legacy fallback / canonical runtime / 设置页切换删除 / 测试 source regression 改动已按文件级恢复到 v9.24，不再是当前源码事实。
+
+保留的 v10.0 行为是：Mac 默认进入 `MacHomeView`，侧边栏新增首页入口，点击共享录音 orb 打开 `MacRecordingSessionView` 并启动 `MacRecordingManager` 本地录音。Mac 录音使用 `AVAudioRecorder` 生成 m4a，新增麦克风 entitlement 与 `NSMicrophoneUsageDescription`，保存时复用 `MacRecordingFileStore.saveMetadata`、`temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload` 和 `saveAudio(temporaryFileURL:)`，不新增 route、反向连接、上传协议或收件箱 schema。
+
+实时转写当前仍是模拟 provider：`RokuricsShared/SharedLiveTranscriptionModels.swift` 提供 `RokuricsSimulatedLiveTranscriptionSession`，录音期间发布增量文本给共享录音界面。Mac 保存时把模拟 snapshot 写入 `TranscriptStore` 并更新 transcription status；iPhone `RecordingManager` 也复用同一模拟 session 只用于录音界面显示，不改 `RecordingMetadata`、上传队列、同步 proof 或学习库 schema。该状态不代表真实 OpenAI Realtime、FunASR 或 whisper streaming 已接入。
 
 ## 2026-07-04 Rokurics v9.24 / 双端中英显示文案
 

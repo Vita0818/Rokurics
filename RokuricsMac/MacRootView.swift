@@ -8,12 +8,13 @@
 import SwiftUI
 
 struct MacRootView: View {
-    @State private var selection: MacSidebarItem? = .studyLibrary
+    @State private var selection: MacSidebarItem? = .home
     @State private var isSettingsSelected = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var didRecordAppLaunch = false
     @ObservedObject private var secureReceiverService: SecureReceiverService
     @StateObject private var audioInboxStore = AudioInboxStore()
+    @StateObject private var recordingManager = MacRecordingManager()
     @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
     @StateObject private var noteGenerationCoordinator = NoteGenerationCoordinator()
@@ -46,7 +47,7 @@ struct MacRootView: View {
                     userProfileStore: userProfileStore
                 )
             } else {
-                detailView(for: selection ?? .studyLibrary)
+                detailView(for: selection ?? .home)
             }
         }
         .navigationTitle("")
@@ -73,6 +74,22 @@ struct MacRootView: View {
     @ViewBuilder
     private func detailView(for item: MacSidebarItem) -> some View {
         switch item {
+        case .home:
+            MacHomeView(
+                recordingManager: recordingManager,
+                onOpenStudyLibrary: {
+                    isSettingsSelected = false
+                    selection = .studyLibrary
+                },
+                onOpenAIChat: {
+                    isSettingsSelected = false
+                    selection = .aiChat
+                },
+                onOpenIPhoneConnection: {
+                    isSettingsSelected = false
+                    selection = .iPhoneConnection
+                }
+            )
         case .dashboard:
             MacDashboardView(
                 secureReceiverService: secureReceiverService,

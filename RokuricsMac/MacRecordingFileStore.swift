@@ -729,6 +729,21 @@ final class MacRecordingFileStore {
         try? fileManager.removeItem(at: url)
     }
 
+    func checksumForTemporaryAudioUpload(at temporaryURL: URL, recordingID: String) async throws -> String {
+        try ensureLibraryDirectories()
+        let tempURL = temporaryURL.standardizedFileURL
+        guard isInsideAudioInboxDirectory(tempURL),
+              fileManager.fileExists(atPath: tempURL.path) else {
+            throw MacRecordingFileStoreError.audioMissing
+        }
+
+        return try await canonicalAudioChecksum(
+            fileURL: tempURL,
+            logicalToken: "mac-local-recording-audio:\(recordingID)",
+            persistentCacheEnabled: false
+        )
+    }
+
     func saveAudio(
         temporaryFileURL: URL,
         recordingID: String,
