@@ -500,6 +500,16 @@ struct MacConnectionView: View {
                 return
             }
 
+            try await uploadClient.confirmPairing(
+                host: normalizedHost(connectionStore.macHost),
+                port: connectionStore.macPort,
+                macFingerprint: normalizedFingerprint,
+                result: result
+            )
+            // Persist only after the Mac has committed (or cryptographically
+            // proven) the prepared credential. Otherwise a failed confirm
+            // leaves the iPhone looking paired with a credential the Mac has
+            // never accepted, and every later sync/upload fails at HMAC.
             try connectionStore.savePairing(
                 result: result,
                 host: connectionStore.macHost,
@@ -693,14 +703,7 @@ struct MacConnectionView: View {
     }
 
     private func normalizedHost(_ value: String) -> String {
-        value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-            .split(separator: "/")
-            .first
-            .flatMap { $0.split(separator: ":").first }
-            .map(String.init) ?? ""
+        SecureMacHostNormalizer.normalize(value)
     }
 
     @MainActor

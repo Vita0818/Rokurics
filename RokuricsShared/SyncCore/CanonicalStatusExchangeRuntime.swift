@@ -82,31 +82,47 @@ nonisolated struct CanonicalStatusExchangeDiagnosticRecord: Codable, Equatable, 
 }
 
 actor CanonicalStatusExchangeRuntime {
+    private struct PendingOutgoingEnvelope {
+        var envelope: CanonicalStatusExchangeEnvelope
+        var factSignatures: [String]
+        var ackID: String?
+        var requestID: String?
+    }
+
     private let nodeID: CanonicalNodeID
     private let truthRuntime: CanonicalStatusTruthRuntime
     private let nowProvider: @Sendable () -> CanonicalTimestamp
     private let maxEnvelopeAgeSeconds: TimeInterval
     private let maxDiagnosticRecords: Int
+    private let maxFactsPerEnvelope: Int
+    private let maxFactPayloadBytes: Int
+    private var incarnationID: String
     private var nextSequence = CanonicalSequence(1)
-    private var lastSequenceBySender: [CanonicalNodeID: CanonicalSequence] = [:]
+    private var lastSequenceBySender: [String: CanonicalSequence] = [:]
     private var seenDeltaIDs: Set<String> = []
     private var sentFactSignatures: Set<String> = []
     private var pendingAcks: [CanonicalStatusAck] = []
     private var pendingRequests: [CanonicalStatusRequest] = []
     private var diagnostics: [CanonicalStatusExchangeDiagnosticRecord] = []
+    private var pendingOutgoingEnvelope: PendingOutgoingEnvelope?
 
     init(
         nodeID: CanonicalNodeID,
         truthRuntime: CanonicalStatusTruthRuntime,
         nowProvider: @escaping @Sendable () -> CanonicalTimestamp = { CanonicalTimestamp(Date()) },
         maxEnvelopeAgeSeconds: TimeInterval = 120,
-        maxDiagnosticRecords: Int = 128
+        maxDiagnosticRecords: Int = 128,
+        maxFactsPerEnvelope: Int = 16,
+        maxFactPayloadBytes: Int = 6 * 1024
     ) {
         self.nodeID = nodeID
         self.truthRuntime = truthRuntime
         self.nowProvider = nowProvider
         self.maxEnvelopeAgeSeconds = max(1, maxEnvelopeAgeSeconds)
         self.maxDiagnosticRecords = max(1, maxDiagnosticRecords)
+        self.maxFactsPerEnvelope = max(1, maxFactsPerEnvelope)
+        self.maxFactPayloadBytes = max(512, maxFactPayloadBytes)
+        self.incarnationID = UUID().uuidString.lowercased()
     }
 
     func enqueueRequest(
@@ -116,7 +132,7 @@ actor CanonicalStatusExchangeRuntime {
     ) {
         pendingRequests.append(
             CanonicalStatusRequest(
-                requestID: "\(nodeID.rawValue)-request-\(nextSequence.rawValue)-\(kind.rawValue)",
+                requestID: "\(nodeID.rawValue)-\(incarnationID)-request-\(nextSequence.rawValue)-\(pendingRequests.count)-\(kind.rawValue)",
                 kind: kind,
                 objectIDs: objectIDs,
                 requestedDomains: requestedDomains
@@ -129,10 +145,21 @@ actor CanonicalStatusExchangeRuntime {
         carrier: CanonicalStatusExchangeCarrier
     ) async -> CanonicalStatusExchangeEnvelope? {
         let now = nowProvider()
+        if let pending = pendingOutgoingEnvelope {
+            if pending.envelope.expiresAt.map({ $0 > now }) ?? true {
+                return pending.envelope
+            }
+            pendingOutgoingEnvelope = nil
+        }
         let facts = await truthRuntime.allFactsSnapshot()
-        let unsentFacts = CanonicalStatusFactStore.deterministicOrder(facts).filter { fact in
+        let allUnsentFacts = CanonicalStatusFactStore.deterministicOrder(facts).filter { fact in
             !sentFactSignatures.contains(Self.factSignature(fact))
         }
+        let unsentFacts = Self.boundedFacts(
+            allUnsentFacts,
+            maximumCount: maxFactsPerEnvelope,
+            maximumEncodedBytes: maxFactPayloadBytes
+        )
 
         let sequence = nextSequence
         let logicalTime = CanonicalLogicalTime(counter: sequence.rawValue, nodeID: nodeID)
@@ -143,17 +170,17 @@ actor CanonicalStatusExchangeRuntime {
 
         if !unsentFacts.isEmpty {
             delta = CanonicalStatusDelta(
-                deltaID: "\(nodeID.rawValue)-delta-\(sequence.rawValue)",
+                deltaID: "\(nodeID.rawValue)-\(incarnationID)-delta-\(sequence.rawValue)",
                 facts: unsentFacts
             )
             kind = .delta
         }
         if !pendingAcks.isEmpty {
-            ack = pendingAcks.removeFirst()
+            ack = pendingAcks.first
             kind = kind ?? .ack
         }
         if !pendingRequests.isEmpty {
-            request = pendingRequests.removeFirst()
+            request = pendingRequests.first
             kind = kind ?? .request
         }
 
@@ -161,15 +188,11 @@ actor CanonicalStatusExchangeRuntime {
             return nil
         }
 
-        nextSequence = sequence.next
-        for fact in unsentFacts {
-            sentFactSignatures.insert(Self.factSignature(fact))
-        }
-
         let envelope = CanonicalStatusExchangeEnvelope(
-            envelopeID: "\(nodeID.rawValue)-envelope-\(sequence.rawValue)",
+            envelopeID: "\(nodeID.rawValue)-\(incarnationID)-envelope-\(sequence.rawValue)",
             kind: kind,
             sourceNodeID: nodeID,
+            sourceIncarnationID: incarnationID,
             destinationNodeID: destinationNodeID,
             sequence: sequence,
             logicalTime: logicalTime,
@@ -179,6 +202,23 @@ actor CanonicalStatusExchangeRuntime {
             ack: ack,
             request: request
         )
+        let isPureAck = delta == nil && request == nil && ack != nil
+        if isPureAck {
+            // A pure ACK is deliberately best-effort: if it is lost, the peer
+            // retransmits the original delta/request and we regenerate the ACK.
+            // Requiring ACK-of-ACK would create an endless acknowledgement loop.
+            if let ackID = ack?.ackID {
+                pendingAcks.removeAll { $0.ackID == ackID }
+            }
+            nextSequence = sequence.next
+        } else {
+            pendingOutgoingEnvelope = PendingOutgoingEnvelope(
+                envelope: envelope,
+                factSignatures: unsentFacts.map(Self.factSignature),
+                ackID: ack?.ackID,
+                requestID: request?.requestID
+            )
+        }
 
         if delta != nil {
             appendDiagnostic(
@@ -248,7 +288,8 @@ actor CanonicalStatusExchangeRuntime {
         if now.date.timeIntervalSince(envelope.sentAt.date) > maxEnvelopeAgeSeconds {
             return reject(envelope, reason: "staleEnvelope", carrier: carrier)
         }
-        if let last = lastSequenceBySender[envelope.sourceNodeID] {
+        let senderSequenceKey = Self.senderSequenceKey(envelope)
+        if let last = lastSequenceBySender[senderSequenceKey] {
             if envelope.sequence < last {
                 return reject(envelope, reason: "olderSequence", carrier: carrier)
             }
@@ -268,7 +309,7 @@ actor CanonicalStatusExchangeRuntime {
                 return reject(envelope, reason: "nonMonotonicSequence", carrier: carrier)
             }
         }
-        lastSequenceBySender[envelope.sourceNodeID] = envelope.sequence
+        lastSequenceBySender[senderSequenceKey] = envelope.sequence
 
         var incorporatedCount = 0
         var rejectedCount = 0
@@ -316,6 +357,7 @@ actor CanonicalStatusExchangeRuntime {
         }
 
         if let incomingAck = envelope.ack {
+            acknowledgePendingOutgoingEnvelope(with: incomingAck)
             appendDiagnostic(
                 CanonicalStatusExchangeDiagnosticRecord(
                     event: .statusAckReceived,
@@ -367,6 +409,16 @@ actor CanonicalStatusExchangeRuntime {
             }
         }
 
+        if envelope.delta == nil, envelope.request == nil, envelope.ack != nil {
+            return CanonicalStatusExchangeReceiveResult(
+                accepted: true,
+                incorporatedFactCount: incorporatedCount,
+                rejectedFactCount: rejectedCount,
+                requestedActions: actions,
+                reason: "ackObserved"
+            )
+        }
+
         let ack = makeAck(for: envelope, disposition: disposition, stale: false, reason: reason)
         pendingAcks.append(ack)
         return CanonicalStatusExchangeReceiveResult(
@@ -384,13 +436,25 @@ actor CanonicalStatusExchangeRuntime {
     }
 
     func reset() {
+        incarnationID = UUID().uuidString.lowercased()
         nextSequence = CanonicalSequence(1)
         lastSequenceBySender.removeAll()
         seenDeltaIDs.removeAll()
         sentFactSignatures.removeAll()
         pendingAcks.removeAll()
         pendingRequests.removeAll()
+        pendingOutgoingEnvelope = nil
         diagnostics.removeAll()
+    }
+
+    /// A transport failure does not consume facts, ACKs, requests, or sequence.
+    /// Clearing only the cached wire image lets the next carrier rebuild it with
+    /// a fresh expiry while preserving delivery semantics.
+    func markOutgoingEnvelopeTransportFailed(envelopeID: String) {
+        guard pendingOutgoingEnvelope?.envelope.envelopeID == envelopeID else {
+            return
+        }
+        pendingOutgoingEnvelope = nil
     }
 
     private func reject(
@@ -439,6 +503,51 @@ actor CanonicalStatusExchangeRuntime {
         if diagnostics.count > maxDiagnosticRecords {
             diagnostics.removeFirst(diagnostics.count - maxDiagnosticRecords)
         }
+    }
+
+    private func acknowledgePendingOutgoingEnvelope(with ack: CanonicalStatusAck) {
+        guard let pending = pendingOutgoingEnvelope,
+              pending.envelope.sequence == ack.acknowledgedSequence else {
+            return
+        }
+
+        if ack.accepted && ack.disposition != .rejected {
+            sentFactSignatures.formUnion(pending.factSignatures)
+            if let ackID = pending.ackID {
+                pendingAcks.removeAll { $0.ackID == ackID }
+            }
+            if let requestID = pending.requestID {
+                pendingRequests.removeAll { $0.requestID == requestID }
+            }
+        }
+        // A rejected envelope must use a new sequence when retried because the
+        // receiver has already consumed the previous sequence. Its facts remain
+        // unsent so they are eligible for the next bounded envelope.
+        nextSequence = pending.envelope.sequence.next
+        pendingOutgoingEnvelope = nil
+    }
+
+    private nonisolated static func senderSequenceKey(_ envelope: CanonicalStatusExchangeEnvelope) -> String {
+        "\(envelope.sourceNodeID.rawValue)#\(envelope.sourceIncarnationID ?? "legacy")"
+    }
+
+    private nonisolated static func boundedFacts(
+        _ facts: [CanonicalStatusFact],
+        maximumCount: Int,
+        maximumEncodedBytes: Int
+    ) -> [CanonicalStatusFact] {
+        var result: [CanonicalStatusFact] = []
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        for fact in facts.prefix(maximumCount) {
+            let candidate = result + [fact]
+            let encodedSize = (try? encoder.encode(candidate).count) ?? Int.max
+            guard encodedSize <= maximumEncodedBytes else {
+                break
+            }
+            result = candidate
+        }
+        return result
     }
 
     private nonisolated static func factSignature(_ fact: CanonicalStatusFact) -> String {

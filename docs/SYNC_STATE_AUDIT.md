@@ -1364,3 +1364,79 @@ generated artifact no-op 规则必须落在同一 `objectID`/kind 的 canonical 
 - 不把 canonical tombstone 变成 audio/transcript/note/summary 物理删除、permanent delete 或 tombstone GC。
 - 不绕过 TLS pinning、HMAC、nonce、Keychain、安全范围书签。
 - 不在文档或诊断中写入完整密钥、完整 fingerprint、完整 API 响应、完整转写文本或本机隐私路径。
+
+## 2026-07-10 完成语义与恢复不变量
+
+- `syncRunCompleted` / `lastSuccessfulSyncAt` 只能在 metadata、artifact、recording audio 全部执行完、remaining transfer 为空、无 conflict/partial failure 后写入。
+- `conflictActions` 必须终止本轮；Mac apply response 的 `failedChanges`、`conflictCount`、`rejectedChanges` 或 existence blocked/conflict/rollback failure 任一非零都不得返回成功。
+- 缺少执行某项 plan action 所需的 manifest/payload 时必须失败，不得 silent continue 后清零 pending。
+- Mac sync-start signal 只能由匹配 `deviceID + syncRunID` ACK 删除；heartbeat/probe response 本身不是消费点。iPhone 收到 signal 后必须先保证本地 sync 已排队，再 best-effort ACK。
+- status fact/request 只能在 peer ACK 后从 outgoing pending 中移除；每个 envelope 必须受 fact count/encoded byte budget 约束。sequence 判重范围必须包含 sender incarnation。
+- upload job/session/transfer ledger 只能作为其 `targetDeviceID == currentPeerDeviceID` 的证据；重配后旧目标成功状态不得抑制 metadata/audio 上传。
+- artifact temp 必须绑定 checksum/size 内容合同；checksum failure 删除完整错误 temp；offset 到达 size 不等于 peer applied。
+- audio session 的 checksum/size/chunk contract 变化、server session missing/conflict 或 part mismatch 必须触发 expire/restart；自动 retry 达到上限后停留为可见失败，不能无限后台重试。
+- fallback StudyItem 的业务时间必须来自持久 recording/inbox 事实，不能在 inventory build 时使用 `Date()`，否则同内容会产生漂移 hash。
+- 冲突诊断只记录 object/hash prefix 和必要业务时间，不记录包含完整 hash 的 artifact ID，避免整条诊断被 redaction reject。
+
+当前仍需真机证据：稳定 hostname 在网络切换/IPv6-only/VPN 下的解析、首次 Local Network 授权、后台挂起恢复、长文件弱网续传、24 小时 heartbeat 和完整 UI 状态收敛。
+
+### Listener 端口占用不变量
+
+- 只有明确的 `EADDRINUSE`/POSIX 48 可以推进候选端口；TLS identity、fingerprint、证书或一般 server failure 不得改变端口。
+- 每次失败只推进一个端口，不在已占用端口上重复绑定，也不一次扫描多个端口。
+- 推进后的端口必须持久化，保证 Mac 重启后与 iPhone paired snapshot 中的端口一致。
+- pairing code/payload 只能在新端口 listener ready 后生成；失败端口不得出现在可复制 payload 中。
+- iPhone 必须使用 Mac pairing 文本里的 `Port:`；默认 8787 不能覆盖已粘贴的动态端口。
+
+## 2026-07-11 业务等价、隔离执行与运行代际审计
+
+### 同步事实分层
+
+| 事实 | 唯一职责 | 不能替代 |
+| --- | --- | --- |
+| `ln-business-v2:` signature | 判断 recording、study item、folder 的跨设备业务等价 | 不能决定更新方向，不能证明音频字节存在 |
+| 持久 `updatedAt` / canonical `modifiedAt` | 决定业务版本先后与 apply 方向 | 不能使用 receive/processing/当前时刻临时生成 |
+| canonical manifest hash | 证明本次规范化 manifest 内容 | 不能在 ISO8601 round-trip 后因小数秒丢失而变化 |
+| tombstone | 证明业务对象删除并阻止 resurrection | 不能被 receive/index/ledger 覆盖 |
+| hash+byte-size / finalize proof | 证明 peer 持有指定音频内容 | 不能由 metadata-only、study item、completed ledger 或 UI 状态替代 |
+| syncRunID + phase | 标识一次同步运行及其单调进度 | 旧 run 终态不能覆盖当前 run |
+| heartbeat presence | 证明近期可鉴权通信，并承载 run status | 不等于 metadata/content 已全部成功 |
+
+V2 projection 只包含稳定业务字段；文本、tag 和集合做确定性归一化。时间戳、本机路径、处理/上传/冲突状态以及派生 membership 被排除。custom property 仅允许明确白名单 key；当前白名单为空。V2 等价后不因 runtime 差异反复互传；V2 不同则再用独立业务时钟决定 apply/conflict。canonical timestamp 必须在构造与 decode 时统一 floor 到整秒，保证 wire round-trip hash 稳定。
+
+### 一轮同步的审计顺序
+
+1. inventory 交换 V2 business signature、独立业务时钟、tombstone 和有限的 existence/audio proof。
+2. planner 计算 same/apply/send/conflict/deferred；peer unknown 不降级为 peer missing。
+3. 冲突隔离器阻塞冲突对象及其依赖对象，但保留无关安全动作。
+4. 执行器为剩余 action 构造 action-scoped manifest；只带直接相关及 item↔recording 扩展后的对象和 facts。所需 payload 缺失即失败。
+5. metadata、artifact、audio 通过既有安全 route 执行；parent tombstone 必须先于 ledger/existence 判断，禁止删除对象被历史记录复活。
+6. peer 只有提供匹配 hash+byte-size 或协议 finalize proof 后，才可将音频归为 same/complete；本地 metadata-only 或完成 ledger 不得抑制上传。
+7. 安全动作结束后重新审计 remaining transfer、partial failure 和原始 conflict。仍有任一项时本轮失败，不写 success timestamp。
+8. iPhone 将当前 run status 放入 heartbeat；Mac 只让当前、可单调推进的 run 更新状态。被新轮 supersede 的 run 后到进度/终态必须记录为 rejected/stale，不能收敛成成功。
+
+### 依赖隔离边界
+
+- artifact conflict 阻塞 artifact owner recording。
+- study item conflict 阻塞关联 recording。
+- recording conflict 阻塞其关联 study items。
+- folder conflict 阻塞 folder member items/recordings。
+- 无依赖关系的对象允许继续执行，但其成功不能清除原始 conflict，也不能把整轮标记为 completed。
+
+### 诊断优先级与最小证据
+
+- 带 `errorCode` 的诊断，以及 sync run/tick、upload/finalize、metadata apply 的 completed/failed 终态为 critical。
+- 队列满时 critical 先驱逐 normal；后续 normal 不得驱逐已有 critical，critical 的接受顺序必须保留。
+- priority 只影响背压保留策略，不绕过 redaction、字段白名单或 bounded summary。
+- 审计连接层在线但同步失败时，优先串联 `syncRunID`、phase、error code、conflict/blocked/remaining count、proof kind 和 hash prefix；不得记录完整 hash、路径、manifest、正文或密钥。
+
+当前仍缺 paired 真机闭环：同一真实库在双端生成完全相同 V2 签名、旧版/V2 混跑时的一次性 diff 行为、冲突对象隔离后无关文件成功、metadata-only→audio upload→peer content proof→下一轮 no-op，以及终态响应丢失后 heartbeat 按当前 runID 收敛。
+
+## 2026-07-11 最终状态机审计补充
+
+- Mac sync-start signal 只有在 iPhone durable queue 原子接管成功后才能 ACK；持久化失败保持 Mac pending，重启后 pending/in-flight 保守重放，completed/lifetime dedupe 阻止重复执行。
+- metadata apply 是 active run 的受保护区间。run-scoped lease 存续期间 watchdog 不超时；apply 后刷新 heartbeat/activity 再恢复监督。terminal first-write-wins，任何 superseded/非 active run 的迟到 terminal 都不得污染当前状态。
+- receiver-local `syncedMetadataOnly` 不参与 business signature，也不从 peer 导入。业务相等 merge 仍可持久保存本机 receipt；真实音频出现后清理并在下一轮 inventory 收敛。
+- Recording action 的 manifest coverage 必须命中 recording 本体或有效 deletion tombstone；item/pending 关系不足以授权 recording apply。未知 artifact owner 的 conflict 必须 fail closed。
+- 上传状态机在 peer/content contract 改变时重建 session；损坏 ledger 可恢复；final success 仍要求服务端 finalize/apply ACK 与最终 hash/size，不接受 offset、UI 状态或旧 completed ledger 代替。
+- scoped 自动化与双端 Debug 构建已通过，因此当前没有已知的正常路径代码级阻碍。剩余审计项仅是 paired 真机：同版本首轮迁移、第二轮零动作、双向文件、首次权限/防火墙、后台/锁屏、弱网重启和长时间 soak。

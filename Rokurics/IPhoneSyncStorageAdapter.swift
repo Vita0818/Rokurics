@@ -42,7 +42,7 @@ struct IPhoneSyncStorageAdapter: SyncStorageAdapter {
                     colorToken: folder.colorToken?.rawValue,
                     updatedAt: folder.updatedAt,
                     tombstone: folder.isTrashed,
-                    revisionHash: LocalNetworkSyncMetadataHash.hash(folder)
+                    revisionHash: folder.localNetworkFolderBusinessSignatureV2
                 )
             }
     }

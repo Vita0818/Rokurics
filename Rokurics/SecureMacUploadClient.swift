@@ -27,6 +27,7 @@ struct SecurePairingResult {
     let pairedAt: String
     var macName: String = ""
     var macModel: String = ""
+    var confirmationToken: String = ""
 
     var deviceIDPrefix: String {
         String(deviceID.prefix(12))
@@ -129,11 +130,24 @@ final class SecureMacUploadClient: ObservableObject {
         let ok: Bool
         let deviceID: String?
         let sharedSecret: String?
+        let confirmationToken: String?
         let pairedAt: String?
         let macName: String?
         let macModel: String?
         let macDisplayName: String?
         let macDeviceModel: String?
+        let error: String?
+    }
+
+    private struct PairConfirmationRequest: Encodable {
+        let deviceID: String
+        let confirmationToken: String
+    }
+
+    private struct PairConfirmationResponse: Decodable {
+        let ok: Bool
+        let deviceID: String?
+        let disposition: String?
         let error: String?
     }
 
@@ -239,7 +253,12 @@ final class SecureMacUploadClient: ObservableObject {
             print("[RokuricsPairing] response status code: \(statusCode)")
 
             let pairResponse = try JSONDecoder().decode(PairResponse.self, from: data)
-            guard pairResponse.ok, let deviceID = pairResponse.deviceID, let sharedSecret = pairResponse.sharedSecret, let pairedAt = pairResponse.pairedAt else {
+            guard pairResponse.ok,
+                  let deviceID = pairResponse.deviceID,
+                  let sharedSecret = pairResponse.sharedSecret,
+                  let pairedAt = pairResponse.pairedAt,
+                  let confirmationToken = pairResponse.confirmationToken,
+                  !confirmationToken.isEmpty else {
                 throw SecureMacUploadError.serverRejected(pairResponse.error ?? "pairing_failed")
             }
 
@@ -248,7 +267,8 @@ final class SecureMacUploadClient: ObservableObject {
                 sharedSecretBase64URL: sharedSecret,
                 pairedAt: pairedAt,
                 macName: pairResponse.macName ?? pairResponse.macDisplayName ?? "",
-                macModel: pairResponse.macModel ?? pairResponse.macDeviceModel ?? ""
+                macModel: pairResponse.macModel ?? pairResponse.macDeviceModel ?? "",
+                confirmationToken: confirmationToken
             )
             print("[RokuricsPairing] pairing success: deviceIDPrefix=\(result.deviceIDPrefix)")
             return result
@@ -259,6 +279,83 @@ final class SecureMacUploadClient: ObservableObject {
             print("[RokuricsPairing] pairing error: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    func confirmPairing(
+        host: String,
+        port: Int,
+        macFingerprint: String,
+        result: SecurePairingResult
+    ) async throws {
+        let expectedFingerprint = try normalizedExpectedFingerprint(macFingerprint)
+        let url = try secureURL(host: host, port: port, path: "/pair/confirm")
+        let body = try JSONEncoder().encode(
+            PairConfirmationRequest(
+                deviceID: result.deviceID,
+                confirmationToken: result.confirmationToken
+            )
+        )
+        var lastError: Error?
+        for _ in 0..<3 {
+            let pinnedSession = makePinnedSession(expectedFingerprint: expectedFingerprint, diagnostics: nil)
+            defer { pinnedSession.session.invalidateAndCancel() }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            do {
+                let (data, response) = try await pinnedSession.session.upload(for: request, from: body)
+                if let pinningError = pinnedSession.context.currentPinningError {
+                    throw pinningError
+                }
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                let confirmation = try JSONDecoder().decode(PairConfirmationResponse.self, from: data)
+                guard statusCode == 200,
+                      confirmation.ok,
+                      confirmation.deviceID == result.deviceID else {
+                    throw SecureMacUploadError.serverRejected(confirmation.error ?? "pairing_confirmation_failed")
+                }
+                return
+            } catch {
+                lastError = pinnedSession.context.currentPinningError ?? error
+            }
+        }
+
+        // The confirm response may be lost after the Mac committed, or the
+        // confirm request itself may be lost while the prepared credential is
+        // still pending. A valid pinned + HMAC heartbeat proves possession of
+        // the returned secret and lets RequestVerifier commit either state.
+        do {
+            let proofSettings = SecureMacConnectionSnapshot(
+                macHost: host,
+                macPort: port,
+                macFingerprint: expectedFingerprint,
+                macName: result.macName,
+                macModel: result.macModel,
+                deviceID: result.deviceID,
+                sharedSecretBase64URL: result.sharedSecretBase64URL,
+                pairedAt: result.pairedAt
+            )
+            let proofResponse = try await sendConnectionHeartbeat(
+                settings: proofSettings,
+                request: ConnectionHeartbeatRequest(
+                    deviceID: result.deviceID,
+                    deviceName: UIDevice.current.name,
+                    platform: .iPhone,
+                    appInstanceID: nil,
+                    sequenceNumber: 1,
+                    sentAt: Date(),
+                    lastKnownPeerStatusRevision: nil
+                ),
+                requestTimeout: 3
+            )
+            guard proofResponse.ok else {
+                throw SecureMacUploadError.serverRejected(proofResponse.error ?? "pairing_credential_proof_failed")
+            }
+            return
+        } catch {
+            lastError = error
+        }
+        throw lastError ?? SecureMacUploadError.serverRejected("pairing_confirmation_failed")
     }
 
     func prepareSignedTestUpload(settings: SecureMacConnectionSnapshot, now: Date = Date()) throws -> SecureUploadPreparedRequest {
@@ -414,12 +511,13 @@ final class SecureMacUploadClient: ObservableObject {
 
     func applyStudyLibraryManifest(
         settings: SecureMacConnectionSnapshot,
-        manifest: StudyLibrarySyncManifest
+        manifest: StudyLibrarySyncManifest,
+        syncRunID: String? = nil
     ) async throws -> StudyLibrarySyncManifestResponse {
         try await postSignedJSON(
             settings: settings,
             path: "/sync/apply",
-            body: StudyLibrarySyncManifestRequest(manifest: manifest),
+            body: StudyLibrarySyncManifestRequest(manifest: manifest, syncRunID: syncRunID),
             requestTimeout: 15,
             resourceTimeout: 30
         )
@@ -489,10 +587,18 @@ final class SecureMacUploadClient: ObservableObject {
         settings: SecureMacConnectionSnapshot,
         manifest: StudyLibrarySyncManifest
     ) async throws -> StudyLibrarySyncManifestResponse {
+        try await applyLocalNetworkSyncMetadata(settings: settings, manifest: manifest, syncRunID: nil)
+    }
+
+    func applyLocalNetworkSyncMetadata(
+        settings: SecureMacConnectionSnapshot,
+        manifest: StudyLibrarySyncManifest,
+        syncRunID: String?
+    ) async throws -> StudyLibrarySyncManifestResponse {
         try await postSignedJSON(
             settings: settings,
             path: "/sync/apply-metadata",
-            body: StudyLibrarySyncManifestRequest(manifest: manifest),
+            body: StudyLibrarySyncManifestRequest(manifest: manifest, syncRunID: syncRunID),
             requestTimeout: 15,
             resourceTimeout: 30
         )

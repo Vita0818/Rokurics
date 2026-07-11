@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Network
 import Security
 import Testing
 @testable import RokuricsMac
@@ -18,6 +19,19 @@ struct RokuricsMacTests {
         #expect(MacIPhoneConnectionCardLayout.isCentered(isSidebarCollapsed: false))
         #expect(MacIPhoneConnectionCardLayout.isCentered(isSidebarCollapsed: true))
         #expect(MacIPhoneConnectionCardLayout.disablesWidthAnimation)
+    }
+
+    @Test func receiverPortPersistenceKeepsDynamicPairingPortAcrossLaunches() throws {
+        let suiteName = "RokuricsMacTests.ReceiverPort.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(MacAppStorageProfile.persistedReceiverPort(userDefaults: defaults) == nil)
+        MacAppStorageProfile.persistReceiverPort(8_788, userDefaults: defaults)
+        #expect(MacAppStorageProfile.persistedReceiverPort(userDefaults: defaults) == 8_788)
+
+        MacAppStorageProfile.persistReceiverPort(0, userDefaults: defaults)
+        #expect(MacAppStorageProfile.persistedReceiverPort(userDefaults: defaults) == 8_788)
     }
 
     @MainActor
@@ -85,7 +99,15 @@ struct RokuricsMacTests {
             at: requestedAt.addingTimeInterval(2.2)
         )
         #expect(observed.lastSyncStatus == "iPhone 已开始同步")
-        #expect(store.pendingSyncRequestCountForDiagnostics == 0)
+        #expect(store.pendingSyncRequestCountForDiagnostics == 1)
+        #expect(store.pendingSyncStartSignal(deviceID: deviceID)?.syncRunID == "sync-2")
+        let reloadedStore = DeviceConnectionStatusStore(
+            rootURL: rootURL,
+            pendingSyncRequestTimeout: 1
+        )
+        #expect(reloadedStore.pendingSyncStartSignal(deviceID: deviceID)?.syncRunID == "sync-2")
+        #expect(reloadedStore.acknowledgePendingSyncStartSignal(deviceID: deviceID, syncRunID: "sync-2"))
+        #expect(reloadedStore.pendingSyncRequestCountForDiagnostics == 0)
 
         _ = store.recordPendingSyncRequest(
             deviceID: deviceID,
@@ -102,71 +124,91 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func macSyncControlPlaneIgnoresStaleRegressionsAndExpiresEarlyStages() throws {
+    @Test func macSyncControlPlaneSupersedesFreshRunsAndRejectsStaleUpdates() throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("rokurics-control-plane-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let store = StudyLibrarySyncStateStore(
             rootURL: rootURL,
-            controlPlaneInactivityTimeout: 10
+            controlPlaneInactivityTimeout: 30
         )
         let startedAt = Date(timeIntervalSince1970: 2_000)
 
-        store.recordControlPlane(
+        #expect(store.recordControlPlane(
             deviceID: "iphone-control-plane",
-            syncRunID: "sync-1",
+            syncRunID: "old-run",
             state: .inventoryExchanging,
             at: startedAt
-        )
-        store.recordControlPlane(
+        ))
+        #expect(!store.recordControlPlane(
             deviceID: "iphone-control-plane",
-            syncRunID: "sync-1",
+            syncRunID: "old-run",
             state: .syncStartSignalSent,
             at: startedAt.addingTimeInterval(1)
-        )
-        #expect(store.state.activeSyncRunID == "sync-1")
+        ))
+        #expect(store.state.activeSyncRunID == "old-run")
         #expect(store.state.syncControlPlaneState == .inventoryExchanging)
 
-        store.recordControlPlane(
+        #expect(store.recordControlPlane(
             deviceID: "iphone-control-plane",
-            syncRunID: "sync-2",
+            syncRunID: "new-start-run",
             state: .syncStartSignalSent,
             at: startedAt.addingTimeInterval(2)
-        )
-        #expect(store.state.activeSyncRunID == "sync-1")
-        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
-
-        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(11)))
-        #expect(store.state.syncControlPlaneState == .failed)
-        #expect(store.state.lastError == "sync_control_plane_timeout")
-
-        store.recordControlPlane(
-            deviceID: "iphone-control-plane",
-            syncRunID: "sync-1",
-            state: .inventoryExchanging,
-            at: startedAt.addingTimeInterval(12)
-        )
-        #expect(store.state.activeSyncRunID == "sync-1")
-        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
-
-        store.recordControlPlane(
-            deviceID: "iphone-control-plane",
-            syncRunID: "sync-2",
-            state: .syncStartSignalSent,
-            at: startedAt.addingTimeInterval(13)
-        )
-        #expect(store.state.activeSyncRunID == "sync-1")
-        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
-
-        #expect(store.expireStaleControlPlaneIfNeeded(now: startedAt.addingTimeInterval(23)))
-        store.recordControlPlane(
-            deviceID: "iphone-control-plane",
-            syncRunID: "sync-2",
-            state: .syncStartSignalSent,
-            at: startedAt.addingTimeInterval(24)
-        )
-        #expect(store.state.activeSyncRunID == "sync-2")
+        ))
+        #expect(store.state.activeSyncRunID == "new-start-run")
         #expect(store.state.syncControlPlaneState == .syncStartSignalSent)
+
+        #expect(store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "new-inventory-run",
+            state: .inventoryExchanging,
+            at: startedAt.addingTimeInterval(3)
+        ))
+        #expect(store.state.activeSyncRunID == "new-inventory-run")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "new-inventory-run",
+            state: .syncStartAcked,
+            at: startedAt.addingTimeInterval(4)
+        ))
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "old-run",
+            state: .planningTransfers,
+            at: startedAt.addingTimeInterval(5)
+        ))
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "old-run",
+            state: .completed,
+            at: startedAt.addingTimeInterval(6)
+        ))
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-control-plane",
+            syncRunID: "new-start-run",
+            state: .failed,
+            at: startedAt.addingTimeInterval(7)
+        ))
+        #expect(!store.recordPush(
+            deviceID: "iphone-control-plane",
+            remoteManifestHash: "stale-hash",
+            remoteCommitID: "stale-commit",
+            syncRunID: "old-run",
+            at: startedAt.addingTimeInterval(8)
+        ))
+        #expect(!store.recordFailure(
+            deviceID: "iphone-control-plane",
+            error: "unrelated failure",
+            syncRunID: "never-active-run"
+        ))
+
+        #expect(store.state.activeSyncRunID == "new-inventory-run")
+        #expect(store.state.syncControlPlaneState == .inventoryExchanging)
+        #expect(store.state.lastSuccessfulSyncAt == nil)
+        #expect(store.state.lastRemoteManifestHash == nil)
+        #expect(store.state.lastError == nil)
     }
 
     @MainActor
@@ -194,6 +236,447 @@ struct RokuricsMacTests {
         #expect(store.state.activeSyncRunID == "sync-start-ack")
         #expect(store.state.syncControlPlaneState == .failed)
         #expect(store.state.lastError == "sync_control_plane_timeout")
+    }
+
+    @MainActor
+    @Test func metadataApplyLeaseBlocksSupersessionUntilPostconditionCheck() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-apply-lease-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(rootURL: rootURL)
+
+        #expect(store.recordControlPlane(
+            deviceID: "iphone-apply-lease",
+            syncRunID: "apply-run",
+            state: .inventoryExchanging
+        ))
+        let lease = try #require(store.beginMetadataApplyLease(
+            deviceID: "iphone-apply-lease",
+            syncRunID: "apply-run"
+        ))
+
+        #expect(store.state.activeSyncRunID == "apply-run")
+        #expect(store.state.syncControlPlaneState == .transferring)
+        #expect(store.isMetadataApplyLeaseValid(lease, syncRunID: "apply-run"))
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-apply-lease",
+            syncRunID: "superseding-run",
+            state: .inventoryExchanging
+        ))
+        #expect(!store.recordPush(
+            deviceID: "iphone-apply-lease",
+            remoteManifestHash: "premature-terminal",
+            syncRunID: "apply-run"
+        ))
+
+        store.endMetadataApplyLease(lease)
+        #expect(store.recordControlPlane(
+            deviceID: "iphone-apply-lease",
+            syncRunID: "superseding-run",
+            state: .inventoryExchanging
+        ))
+        #expect(!store.isMetadataApplyLeaseValid(lease, syncRunID: "apply-run"))
+
+        let supersedingLease = try #require(store.beginMetadataApplyLease(
+            deviceID: "iphone-apply-lease",
+            syncRunID: "superseding-run"
+        ))
+        store.replace(StudyLibrarySyncState(
+            deviceID: "iphone-apply-lease",
+            activeSyncRunID: "externally-replaced-run",
+            syncControlPlaneState: .inventoryExchanging,
+            syncControlPlaneUpdatedAt: Date()
+        ))
+        #expect(!store.isMetadataApplyLeaseValid(
+            supersedingLease,
+            syncRunID: "superseding-run"
+        ))
+        store.endMetadataApplyLease(supersedingLease)
+    }
+
+    @MainActor
+    @Test func metadataApplyLeaseSuppressesWatchdogUntilApplyFinishes() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-apply-lease-watchdog-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(
+            rootURL: rootURL,
+            controlPlaneInactivityTimeout: 0.02
+        )
+
+        #expect(store.recordControlPlane(
+            deviceID: "iphone-apply-lease-watchdog",
+            syncRunID: "long-apply-run",
+            state: .inventoryExchanging
+        ))
+        let lease = try #require(store.beginMetadataApplyLease(
+            deviceID: "iphone-apply-lease-watchdog",
+            syncRunID: "long-apply-run"
+        ))
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        #expect(store.state.syncControlPlaneState == .transferring)
+        #expect(store.state.lastError == nil)
+        #expect(store.isMetadataApplyLeaseValid(lease, syncRunID: "long-apply-run"))
+
+        store.endMetadataApplyLease(lease)
+        #expect(store.state.syncControlPlaneState == .transferring)
+        #expect(store.recordPush(
+            deviceID: "iphone-apply-lease-watchdog",
+            remoteManifestHash: "long-apply-hash",
+            syncRunID: "long-apply-run"
+        ))
+        #expect(store.state.syncControlPlaneState == .completed)
+    }
+
+    @MainActor
+    @Test func syncControlPlaneKeepsFirstTerminalStateForCorrelatedRun() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-first-terminal-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let completedAt = Date(timeIntervalSince1970: 2_050)
+
+        #expect(store.recordControlPlane(
+            deviceID: "iphone-first-terminal",
+            syncRunID: "terminal-run",
+            state: .transferring
+        ))
+        #expect(store.recordPush(
+            deviceID: "iphone-first-terminal",
+            remoteManifestHash: "terminal-hash",
+            syncRunID: "terminal-run",
+            at: completedAt
+        ))
+        #expect(!store.recordFailure(
+            deviceID: "iphone-first-terminal",
+            error: "late-failure",
+            syncRunID: "terminal-run",
+            at: completedAt.addingTimeInterval(1)
+        ))
+        #expect(!store.recordControlPlane(
+            deviceID: "iphone-first-terminal",
+            syncRunID: "terminal-run",
+            state: .cancelled,
+            at: completedAt.addingTimeInterval(2)
+        ))
+
+        #expect(store.state.activeSyncRunID == "terminal-run")
+        #expect(store.state.syncControlPlaneState == .completed)
+        #expect(store.state.lastSuccessfulSyncAt == completedAt)
+        #expect(store.state.lastError == nil)
+    }
+
+    @MainActor
+    @Test func syncRunCorrelatedRequestsCodableRoundTrip() throws {
+        let timestamp = Date(timeIntervalSince1970: 2_100)
+        let heartbeatRequest = ConnectionHeartbeatRequest(
+            deviceID: "iphone-run-roundtrip",
+            deviceName: "Run iPhone",
+            platform: .iPhone,
+            appInstanceID: "run-roundtrip-instance",
+            sequenceNumber: 9,
+            sentAt: timestamp,
+            lastKnownPeerStatusRevision: 4,
+            syncRunStatus: LocalNetworkSyncRunStatus(
+                syncRunID: "heartbeat-run-roundtrip",
+                state: .completed,
+                updatedAt: timestamp,
+                errorCode: nil
+            )
+        )
+        let manifestRequest = StudyLibrarySyncManifestRequest(
+            manifest: StudyLibrarySyncManifest.make(
+                deviceID: heartbeatRequest.deviceID,
+                generatedAt: timestamp,
+                items: [],
+                folders: []
+            ),
+            syncRunID: "manifest-run-roundtrip"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let decodedHeartbeat = try decoder.decode(
+            ConnectionHeartbeatRequest.self,
+            from: encoder.encode(heartbeatRequest)
+        )
+        let decodedManifest = try decoder.decode(
+            StudyLibrarySyncManifestRequest.self,
+            from: encoder.encode(manifestRequest)
+        )
+
+        #expect(decodedHeartbeat == heartbeatRequest)
+        #expect(decodedHeartbeat.syncRunStatus?.syncRunID == "heartbeat-run-roundtrip")
+        #expect(decodedHeartbeat.syncRunStatus?.state == .completed)
+        #expect(decodedManifest == manifestRequest)
+        #expect(decodedManifest.syncRunID == "manifest-run-roundtrip")
+    }
+
+    @MainActor
+    @Test func macServerHeartbeatAcceptsMatchingTerminalRunAndRejectsSupersededRun() async throws {
+        let fileManager = FileManager.default
+        let rootURL = try makeScratchDirectory()
+        defer { try? fileManager.removeItem(at: rootURL) }
+        let securityURL = rootURL.appendingPathComponent("Security", isDirectory: true)
+        let identityManager = MacIdentityManager(
+            securityDirectoryURL: securityURL,
+            tlsKeyTagNamespace: "heartbeat-run-status-\(UUID().uuidString)"
+        )
+        identityManager.loadOrCreateIdentity()
+        let pairedDeviceStore = PairedDeviceStore(rootURL: securityURL)
+        let device = makeHeartbeatDevice()
+        pairedDeviceStore.upsert(device)
+        let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
+        let recordingFileStore = MacRecordingFileStore(
+            rootURL: rootURL.appendingPathComponent("Library", isDirectory: true)
+        )
+        let studyLibraryStore = StudyLibraryStore(
+            rootURL: recordingFileStore.libraryRootURL,
+            recordingFileStore: recordingFileStore,
+            listenForInboxChanges: false
+        )
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let readySignal = ListenerReadySignal()
+        let diagnosticRecorder = SecureConnectionDiagnosticRecorder()
+        let server = SecureLocalHTTPSServer(
+            port: 0,
+            identityManager: identityManager,
+            pairingManager: pairingManager,
+            requestVerifier: RequestVerifier(pairedDeviceStore: pairedDeviceStore),
+            receivedFileStore: ReceivedFileStore(),
+            recordingFileStore: recordingFileStore,
+            studyLibraryStore: studyLibraryStore,
+            gitBackedStudyMetadataStore: nil,
+            deviceConnectionStatusStore: DeviceConnectionStatusStore(rootURL: rootURL),
+            syncStateStore: syncStateStore,
+            onReady: { readySignal.markReady() },
+            onFailed: { readySignal.markFailed($0.message) },
+            onPairingChanged: {},
+            onUploadAccepted: { _ in },
+            onRecordingAccepted: { _, _ in },
+            onConnectionDiagnostic: { diagnosticRecorder.record($0) }
+        )
+        defer { server.stop() }
+
+        try server.start()
+        try await waitForListenerReady(readySignal)
+        let activePort = try #require(server.activePort)
+        let client = RealListenerPinnedHTTPSClient(
+            expectedFingerprint: identityManager.status.certificateFingerprint
+        )
+        defer { client.invalidate() }
+
+        let matchingRunID = "heartbeat-matching-run"
+        #expect(syncStateStore.recordControlPlane(
+            deviceID: device.id,
+            syncRunID: matchingRunID,
+            state: .transferring
+        ))
+        let applyEncoder = JSONEncoder()
+        applyEncoder.dateEncodingStrategy = .iso8601
+        applyEncoder.outputFormatting = [.sortedKeys]
+        let matchingApplyBody = try applyEncoder.encode(StudyLibrarySyncManifestRequest(
+            manifest: StudyLibrarySyncManifest.make(
+                deviceID: device.id,
+                generatedAt: Date(timeIntervalSince1970: 2_190),
+                items: [],
+                folders: []
+            ),
+            syncRunID: matchingRunID
+        ))
+        let matchingApplyResponse = try await client.postData(
+            port: activePort,
+            path: "/sync/apply-metadata",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/sync/apply-metadata",
+                body: matchingApplyBody,
+                nonce: "heartbeat-run-matching-apply"
+            ),
+            body: matchingApplyBody
+        )
+        let decodedMatchingApply = try Self.connectionJSONDecoder.decode(
+            StudyLibrarySyncManifestResponse.self,
+            from: matchingApplyResponse.body
+        )
+
+        #expect(matchingApplyResponse.statusCode == 200)
+        #expect(decodedMatchingApply.ok)
+        #expect(syncStateStore.state.activeSyncRunID == matchingRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .transferring)
+        #expect(syncStateStore.state.lastSuccessfulSyncAt == nil)
+
+        var completedHeartbeat = makeHeartbeatRequest(device: device, sequenceNumber: 1)
+        completedHeartbeat.syncRunStatus = LocalNetworkSyncRunStatus(
+            syncRunID: matchingRunID,
+            state: .completed,
+            updatedAt: Date(timeIntervalSince1970: 2_200),
+            errorCode: nil
+        )
+        let completedBody = try encodedHeartbeatRequest(completedHeartbeat)
+        let completedResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: completedBody,
+                nonce: "heartbeat-run-completed"
+            ),
+            body: completedBody
+        )
+
+        #expect(completedResponse.statusCode == 200)
+        #expect(syncStateStore.state.activeSyncRunID == matchingRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .completed)
+        let completedAt = try #require(syncStateStore.state.lastSuccessfulSyncAt)
+
+        var lateTerminalHeartbeat = makeHeartbeatRequest(device: device, sequenceNumber: 2)
+        lateTerminalHeartbeat.syncRunStatus = LocalNetworkSyncRunStatus(
+            syncRunID: matchingRunID,
+            state: .failed,
+            updatedAt: Date(timeIntervalSince1970: 2_200),
+            errorCode: "late_same_run_failure"
+        )
+        let lateTerminalBody = try encodedHeartbeatRequest(lateTerminalHeartbeat)
+        let lateTerminalResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: lateTerminalBody,
+                nonce: "heartbeat-run-late-terminal"
+            ),
+            body: lateTerminalBody
+        )
+
+        #expect(lateTerminalResponse.statusCode == 200)
+        #expect(syncStateStore.state.syncControlPlaneState == .completed)
+        #expect(syncStateStore.state.lastSuccessfulSyncAt == completedAt)
+        #expect(syncStateStore.state.lastError == nil)
+
+        let newerRunID = "heartbeat-newer-run"
+        #expect(syncStateStore.recordControlPlane(
+            deviceID: device.id,
+            syncRunID: newerRunID,
+            state: .inventoryExchanging
+        ))
+        var staleHeartbeat = makeHeartbeatRequest(device: device, sequenceNumber: 3)
+        staleHeartbeat.syncRunStatus = LocalNetworkSyncRunStatus(
+            syncRunID: matchingRunID,
+            state: .failed,
+            updatedAt: Date(timeIntervalSince1970: 2_201),
+            errorCode: "stale_peer_failure"
+        )
+        let staleBody = try encodedHeartbeatRequest(staleHeartbeat)
+        let staleResponse = try await client.postData(
+            port: activePort,
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/connection/heartbeat",
+                body: staleBody,
+                nonce: "heartbeat-run-stale"
+            ),
+            body: staleBody
+        )
+
+        #expect(staleResponse.statusCode == 200)
+        #expect(syncStateStore.state.activeSyncRunID == newerRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .inventoryExchanging)
+        #expect(syncStateStore.state.lastSuccessfulSyncAt == completedAt)
+        #expect(syncStateStore.state.lastError == nil)
+        let runEvents = diagnosticRecorder.snapshot().filter {
+            $0.phase == "peerSyncRunStatusAccepted" || $0.phase == "peerSyncRunStatusRejected"
+        }
+        #expect(runEvents.contains {
+            $0.phase == "peerSyncRunStatusAccepted" && $0.syncRunID == matchingRunID
+        })
+        #expect(runEvents.contains {
+            $0.phase == "peerSyncRunStatusRejected"
+                && $0.syncRunID == matchingRunID
+                && $0.errorCode == "stale_sync_run"
+        })
+
+        let staleRunItem = StudyItemMetadata(
+            recordingID: "stale-run-must-not-write",
+            title: "Stale run metadata",
+            createdAt: Date(timeIntervalSince1970: 2_201),
+            duration: 1,
+            updatedAt: Date(timeIntervalSince1970: 2_202),
+            modifiedByDeviceID: device.id
+        )
+        let staleApplyBody = try applyEncoder.encode(StudyLibrarySyncManifestRequest(
+            manifest: StudyLibrarySyncManifest.make(
+                deviceID: device.id,
+                generatedAt: Date(timeIntervalSince1970: 2_202),
+                items: [staleRunItem],
+                folders: []
+            ),
+            syncRunID: matchingRunID
+        ))
+        let staleApplyResponse = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            device,
+            requestBody: staleApplyBody
+        )
+
+        #expect(!staleApplyResponse.ok)
+        #expect(staleApplyResponse.error == "stale_sync_run")
+        #expect(syncStateStore.state.activeSyncRunID == newerRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .inventoryExchanging)
+        #expect(studyLibraryStore.item(recordingID: staleRunItem.recordingID ?? "") == nil)
+
+        let malformedApplyBody = Data("{}".utf8)
+        let malformedApplyResponse = try await client.postData(
+            port: activePort,
+            path: "/sync/apply-metadata",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/sync/apply-metadata",
+                body: malformedApplyBody,
+                nonce: "heartbeat-run-malformed-apply"
+            ),
+            body: malformedApplyBody
+        )
+
+        #expect(malformedApplyResponse.statusCode == 400)
+        #expect(syncStateStore.state.activeSyncRunID == newerRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .inventoryExchanging)
+        #expect(syncStateStore.state.lastError == nil)
+
+        var invalidManifest = StudyLibrarySyncManifest.make(
+            deviceID: device.id,
+            generatedAt: Date(timeIntervalSince1970: 2_203),
+            items: [],
+            folders: []
+        )
+        invalidManifest.checksum = "invalid-checksum"
+        let invalidApplyBody = try applyEncoder.encode(StudyLibrarySyncManifestRequest(
+            manifest: invalidManifest,
+            syncRunID: newerRunID
+        ))
+        let invalidApplyResponse = try await client.postData(
+            port: activePort,
+            path: "/sync/apply-metadata",
+            headers: try signedJSONHeaders(
+                device: device,
+                path: "/sync/apply-metadata",
+                body: invalidApplyBody,
+                nonce: "heartbeat-run-invalid-apply"
+            ),
+            body: invalidApplyBody
+        )
+
+        #expect(invalidApplyResponse.statusCode == 400)
+        #expect(syncStateStore.state.activeSyncRunID == newerRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .failed)
+        #expect(syncStateStore.state.lastError?.contains("sync_manifest_checksum_mismatch") == true)
     }
 
     @Test func macManualSyncViewConsumesReturnedStatusWithoutReverseClient() throws {
@@ -2536,7 +3019,8 @@ struct RokuricsMacTests {
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let inboxStore = AudioInboxStore(recordingFileStore: store)
         let waitingItem = try #require(inboxStore.recordingItems.first { $0.id == metadata.id })
-        #expect(waitingItem.localNetworkReceiveTransferProgress?.statusText == "正在接收")
+        #expect(waitingItem.localNetworkReceiveTransferProgress?.state == .transferring)
+        #expect(waitingItem.localNetworkReceiveTransferProgress?.statusText?.isEmpty == false)
 
         _ = try await store.saveAudio(body: Data("audio".utf8), recordingID: metadata.id, requestedFileName: metadata.originalFileName, sourceDevice: device)
         let deadline = Date().addingTimeInterval(0.2)
@@ -2933,8 +3417,70 @@ struct RokuricsMacTests {
         #expect(json["ok"] as? Bool == true)
         #expect(json["deviceID"] as? String != nil)
         #expect(json["sharedSecret"] as? String != nil)
+        #expect(json["confirmationToken"] as? String != nil)
+        #expect(pairingChangedCount == 0)
+        #expect(store.devices.isEmpty)
+
+        let deviceID = try #require(json["deviceID"] as? String)
+        let confirmationToken = try #require(json["confirmationToken"] as? String)
+        let confirmationBody = try JSONSerialization.data(withJSONObject: [
+            "deviceID": deviceID,
+            "confirmationToken": confirmationToken
+        ])
+        let confirmation = handler.pairingConfirmationResponse(
+            method: "POST",
+            path: "/pair/confirm",
+            headers: ["Content-Type": "application/json"],
+            body: confirmationBody,
+            now: now.addingTimeInterval(2)
+        )
+        #expect(confirmation.statusCode == 200)
         #expect(pairingChangedCount == 1)
         #expect(store.devices.count == 1)
+    }
+
+    @MainActor
+    @Test func preparedPairingCanCommitThroughSignedCredentialProofAfterConfirmLoss() throws {
+        let rootURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let store = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
+        let manager = PairingManager(pairedDeviceStore: store)
+        let now = Date()
+        manager.beginPairing(now: now)
+        let code = try #require(manager.activeChallenge?.code)
+        let prepared = try #require(manager.preparePairing(
+            deviceName: "Proof iPhone",
+            deviceType: "iPhone",
+            code: code,
+            now: now.addingTimeInterval(1)
+        ))
+        #expect(store.device(for: prepared.device.id) == nil)
+
+        let verifier = RequestVerifier(pairedDeviceStore: store, pairingManager: manager)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let handler = ConnectionHeartbeatRouteHandler(
+            requestVerifier: verifier,
+            statusStore: statusStore,
+            localPeerDeviceID: "mac-proof-test"
+        )
+        let body = try encodedHeartbeatRequest(makeHeartbeatRequest(device: prepared.device, sequenceNumber: 1))
+        let response = handler.heartbeatResponse(
+            method: "POST",
+            path: "/connection/heartbeat",
+            headers: try signedJSONHeaders(
+                device: prepared.device,
+                path: "/connection/heartbeat",
+                body: body,
+                nonce: "pairing-proof-heartbeat",
+                now: now.addingTimeInterval(2)
+            ),
+            body: body,
+            now: now.addingTimeInterval(2)
+        )
+
+        #expect(response.statusCode == 200)
+        #expect(store.device(for: prepared.device.id)?.sharedSecretBase64URL == prepared.sharedSecretBase64URL)
+        #expect(manager.state == .paired(deviceName: "Proof iPhone"))
     }
 
     @MainActor
@@ -2991,7 +3537,10 @@ struct RokuricsMacTests {
 
         let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
         let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
-        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let requestVerifier = RequestVerifier(
+            pairedDeviceStore: pairedDeviceStore,
+            pairingManager: pairingManager
+        )
         let recordingFileStore = MacRecordingFileStore(rootURL: rootURL.appendingPathComponent("Library", isDirectory: true))
         let studyLibraryStore = StudyLibraryStore(
             rootURL: rootURL.appendingPathComponent("Study", isDirectory: true),
@@ -3017,8 +3566,8 @@ struct RokuricsMacTests {
             onReady: {
                 readySignal.markReady()
             },
-            onFailed: { message in
-                readySignal.markFailed(message)
+            onFailed: { failure in
+                readySignal.markFailed(failure.message)
             },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
@@ -3129,8 +3678,14 @@ struct RokuricsMacTests {
         #expect(pairResponse.json["ok"] as? Bool == true)
         let deviceID = try #require(pairResponse.json["deviceID"] as? String)
         let sharedSecret = try #require(pairResponse.json["sharedSecret"] as? String)
-        let pairedDevice = try #require(pairedDeviceStore.device(for: deviceID))
-        #expect(pairedDevice.sharedSecretBase64URL == sharedSecret)
+        let pairedDevice = PairedDevice(
+            id: deviceID,
+            deviceName: "Deviceless iPhone",
+            sharedSecretBase64URL: sharedSecret,
+            pairedAt: Date(),
+            lastSeenAt: nil
+        )
+        #expect(pairedDeviceStore.device(for: deviceID) == nil)
 
         var lastKnownPeerStatusRevision: Int?
         var heartbeatLastSeenDates: [Date] = []
@@ -3306,8 +3861,8 @@ struct RokuricsMacTests {
             onReady: {
                 readySignal.markReady()
             },
-            onFailed: { message in
-                readySignal.markFailed(message)
+            onFailed: { failure in
+                readySignal.markFailed(failure.message)
             },
             onPairingChanged: {},
             onUploadAccepted: { _ in },
@@ -3549,6 +4104,20 @@ struct RokuricsMacTests {
         #expect(pairResponse.json["ok"] as? Bool == true)
         let deviceID = try #require(pairResponse.json["deviceID"] as? String)
         let sharedSecret = try #require(pairResponse.json["sharedSecret"] as? String)
+        let confirmationToken = try #require(pairResponse.json["confirmationToken"] as? String)
+        #expect(harness.pairedDeviceStore.device(for: deviceID) == nil)
+        let confirmationResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/pair/confirm",
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(withJSONObject: [
+                "deviceID": deviceID,
+                "confirmationToken": confirmationToken
+            ], options: [.sortedKeys])
+        )
+        #expect(confirmationResponse.statusCode == 200)
+        #expect(confirmationResponse.json["ok"] as? Bool == true)
         let pairedDevice = try #require(harness.pairedDeviceStore.device(for: deviceID))
         #expect(pairedDevice.sharedSecretBase64URL == sharedSecret)
 
@@ -3775,6 +4344,19 @@ struct RokuricsMacTests {
         )
         #expect(pairResponse.statusCode == 200)
         let deviceID = try #require(pairResponse.json["deviceID"] as? String)
+        let confirmationToken = try #require(pairResponse.json["confirmationToken"] as? String)
+        let confirmationResponse = try await client.postJSON(
+            host: payload.host,
+            port: payload.port,
+            path: "/pair/confirm",
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(withJSONObject: [
+                "deviceID": deviceID,
+                "confirmationToken": confirmationToken
+            ], options: [.sortedKeys])
+        )
+        #expect(confirmationResponse.statusCode == 200)
+        #expect(confirmationResponse.json["ok"] as? Bool == true)
         let pairedDevice = try #require(harness.pairedDeviceStore.device(for: deviceID))
 
         let heartbeatBody = try encodedHeartbeatRequest(makeHeartbeatRequest(device: pairedDevice, sequenceNumber: 1))
@@ -3923,6 +4505,61 @@ struct RokuricsMacTests {
     }
 
     @MainActor
+    @Test func occupiedPairingPortAdvancesOnceAndNextClickPublishesNewPort() async throws {
+        let blockerReady = ListenerReadySignal()
+        let blockerQueue = DispatchQueue(label: "RokuricsMacTests.OccupiedPortBlocker")
+        let blocker = try NWListener(using: .tcp, on: .any)
+        blocker.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                blockerReady.markReady()
+            case .failed(let error):
+                blockerReady.markFailed(error.localizedDescription)
+            default:
+                break
+            }
+        }
+        blocker.newConnectionHandler = { connection in
+            connection.cancel()
+        }
+        blocker.start(queue: blockerQueue)
+        defer { blocker.cancel() }
+        try await waitForListenerReady(blockerReady)
+
+        let occupiedPort = try #require(blocker.port.map { Int($0.rawValue) })
+        _ = try #require(occupiedPort < 65_535)
+        let expectedNextPort = SecureReceiverService.nextPort(afterAddressInUse: occupiedPort)
+        let harness = try makeSecureReceiverServiceHarness(port: occupiedPort)
+        defer {
+            harness.service.stopSecureReceiving()
+            try? FileManager.default.removeItem(at: harness.rootURL)
+        }
+
+        harness.service.beginPairing()
+        let failureDeadline = Date().addingTimeInterval(5)
+        while Date() < failureDeadline,
+              harness.service.connectionErrorCode != .portInUse {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        #expect(harness.service.connectionErrorCode == .portInUse)
+        #expect(harness.service.port == expectedNextPort)
+        #expect(harness.service.pairingPayload == nil)
+        #expect(harness.service.lastError?.contains("\(expectedNextPort)") == true)
+        #expect(harness.diagnosticsStore.loadEntries().contains {
+            $0.phase == "listener_port_advanced_after_address_in_use"
+                && $0.errorCode == SecureReceiverConnectionErrorCode.portInUse.rawValue
+        })
+
+        harness.service.beginPairing()
+        let payload = try await waitForPairingPayload(harness.service)
+
+        #expect(payload.port == expectedNextPort)
+        #expect(harness.service.activeHTTPSPort == expectedNextPort)
+        #expect(harness.service.port == expectedNextPort)
+    }
+
+    @MainActor
     @Test func devicelessFreshPairingHeartbeatAndSmallRecordingUploadSmoke() async throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -3950,9 +4587,23 @@ struct RokuricsMacTests {
             now: pairingNow.addingTimeInterval(1)
         )
         let pairJSON = try routeResponseJSON(pairResponse)
+        let pendingDeviceID = try #require(pairJSON["deviceID"] as? String)
+        let confirmationToken = try #require(pairJSON["confirmationToken"] as? String)
+        let confirmationBody = try JSONSerialization.data(withJSONObject: [
+            "deviceID": pendingDeviceID,
+            "confirmationToken": confirmationToken
+        ])
+        let confirmationResponse = pairingHandler.pairingConfirmationResponse(
+            method: "POST",
+            path: "/pair/confirm",
+            headers: ["Content-Type": "application/json"],
+            body: confirmationBody,
+            now: pairingNow.addingTimeInterval(2)
+        )
         let pairedDevice = try #require(pairedDeviceStore.devices.first)
 
         #expect(pairResponse.statusCode == 200)
+        #expect(confirmationResponse.statusCode == 200)
         #expect(pairJSON["ok"] as? Bool == true)
         #expect(pairJSON["deviceID"] as? String == pairedDevice.id)
         #expect(pairJSON["sharedSecret"] as? String == pairedDevice.sharedSecretBase64URL)
@@ -4175,7 +4826,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func pendingManualSyncRequestIsReturnedOnceFromHeartbeatAndProbe() throws {
+    @Test func pendingManualSyncRequestRedeliversUntilAcknowledgedAcrossHeartbeatAndProbe() throws {
         let rootURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let pairedDeviceStore = PairedDeviceStore(rootURL: rootURL.appendingPathComponent("Security", isDirectory: true))
@@ -4215,9 +4866,10 @@ struct RokuricsMacTests {
 
         #expect(decodedHeartbeat.syncRequested == true)
         #expect(decodedHeartbeat.syncStartSignal?.syncRunID == heartbeatSyncRunID)
-        #expect(statusStore.status(for: pairedDevice.id)?.lastSyncStatus == "iPhone 已收到同步请求")
-        #expect(decodedSecondHeartbeat.syncRequested == false)
-        #expect(decodedSecondHeartbeat.syncStartSignal == nil)
+        #expect(statusStore.status(for: pairedDevice.id)?.lastSyncStatus == "同步请求已投递，等待 iPhone 确认")
+        #expect(decodedSecondHeartbeat.syncRequested == true)
+        #expect(decodedSecondHeartbeat.syncStartSignal?.syncRunID == heartbeatSyncRunID)
+        #expect(statusStore.acknowledgePendingSyncStartSignal(deviceID: pairedDevice.id, syncRunID: heartbeatSyncRunID))
 
         let probeSyncRunID = "sync-run-probe"
         _ = statusStore.recordPendingSyncRequest(
@@ -5032,7 +5684,7 @@ struct RokuricsMacTests {
         #expect((try String(contentsOf: sessionURL)).contains(device.sharedSecretBase64URL) == false)
     }
 
-    @Test func resumableConflictingStartIsRejected() async throws {
+    @Test func resumableChangedContentContractExpiresOldSessionAndStartsFresh() async throws {
         let (store, rootURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let device = makeUploadDevice()
@@ -5040,7 +5692,7 @@ struct RokuricsMacTests {
         let metadata = makeIncomingUploadMetadata(id: "resumable-start-conflict", fileSize: Int64(audio.count))
         _ = try store.saveMetadata(metadata, sourceDevice: device)
         let request = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
-        _ = try await store.startResumableAudioUpload(request, sourceDevice: device)
+        let first = try await store.startResumableAudioUpload(request, sourceDevice: device)
         let conflicting = ResumableAudioUploadStartRequest(
             recordingID: request.recordingID,
             fileName: request.fileName,
@@ -5051,14 +5703,11 @@ struct RokuricsMacTests {
             uploadJobID: nil
         )
 
-        do {
-            _ = try await store.startResumableAudioUpload(conflicting, sourceDevice: device)
-            Issue.record("Expected conflicting resumable start to be rejected")
-        } catch MacRecordingFileStoreError.sessionConflict {
-            let record = try readReceiveRecord(rootURL: rootURL, recordingID: metadata.id)
-            #expect(record.lastUploadError == "upload_session_conflict")
-            #expect(record.lastUploadError?.contains(device.sharedSecretBase64URL) == false)
-        }
+        let restarted = try await store.startResumableAudioUpload(conflicting, sourceDevice: device)
+
+        #expect(restarted.disposition == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(restarted.confirmedBytes == 0)
+        #expect(restarted.sessionID != first.sessionID)
     }
 
     @Test func resumableChunkStatusFinalizeAndRepeatedFinalizeAreIdempotent() async throws {
@@ -5327,7 +5976,7 @@ struct RokuricsMacTests {
     }
 
     @MainActor
-    @Test func resumableRouteConflictAndBadSignatureDoNotLeakSecretOrMutate() async throws {
+    @Test func resumableChangedContractRestartsAndBadSignatureDoesNotLeakOrMutate() async throws {
         let (handler, store, rootURL, device) = try makeRecordingUploadRouteHandler()
         defer { try? FileManager.default.removeItem(at: rootURL) }
         let audio = Data("abcdef".utf8)
@@ -5341,12 +5990,14 @@ struct RokuricsMacTests {
         )
         let startRequest = makeResumableStartRequest(metadata: metadata, audio: audio, chunkSize: 3)
         let startBody = try encodedResumableRequest(startRequest)
-        _ = await handler.resumableAudioStartResponse(
+        let firstStartResponse = await handler.resumableAudioStartResponse(
             method: "POST",
             path: "/upload-recording-audio-session/start",
             headers: try signedUploadHeaders(device: device, path: "/upload-recording-audio-session/start", body: startBody, contentType: "application/json", uploadType: "recording-audio-session", recordingID: metadata.id, fileName: metadata.originalFileName, nonce: "nonce-route-resumable-conflict-start"),
             body: startBody
         )
+        let firstStartJSON = try routeResponseJSON(firstStartResponse)
+        let firstSessionID = try #require(firstStartJSON["sessionID"] as? String)
         let conflictingStart = ResumableAudioUploadStartRequest(
             recordingID: metadata.id,
             fileName: metadata.originalFileName,
@@ -5381,10 +6032,12 @@ struct RokuricsMacTests {
             body: Data("abc".utf8)
         )
         let json = try routeResponseJSON(conflictResponse)
+        let restartedSessionID = try #require(json["sessionID"] as? String)
 
-        #expect(conflictResponse.statusCode == 409)
-        #expect(json["error"] as? String == "upload_session_conflict")
-        #expect(json["disposition"] as? String == RecordingUploadDisposition.rejectedConflict.rawValue)
+        #expect(conflictResponse.statusCode == 200)
+        #expect(json["error"] as? String == nil)
+        #expect(json["disposition"] as? String == RecordingUploadDisposition.acceptedNew.rawValue)
+        #expect(restartedSessionID != firstSessionID)
         #expect(String(data: conflictResponse.bodyData, encoding: .utf8)?.contains(device.sharedSecretBase64URL) == false)
         #expect(badSignatureResponse.statusCode == 400)
         #expect((try routeResponseJSON(badSignatureResponse))["error"] as? String == "signature_mismatch")
@@ -5993,7 +6646,8 @@ struct RokuricsMacTests {
 
     @MainActor
     private func makeSecureReceiverServiceHarness(
-        preferredHost: String = "127.0.0.1"
+        preferredHost: String = "127.0.0.1",
+        port: Int = 0
     ) throws -> (
         rootURL: URL,
         service: SecureReceiverService,
@@ -6018,7 +6672,7 @@ struct RokuricsMacTests {
         let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
         let service = SecureReceiverService(
             syncRuntimeConfiguration: StudyLibrarySyncRuntimeConfiguration(gitBackedSyncEnabled: false),
-            port: 0,
+            port: port,
             identityManager: identityManager,
             pairedDeviceStore: pairedDeviceStore,
             receivedFileStore: ReceivedFileStore(),
@@ -6032,6 +6686,7 @@ struct RokuricsMacTests {
             syncStateStore: syncStateStore,
             connectionDiagnosticsStore: diagnosticsStore,
             loadIdentityOnInit: false,
+            receiverPortDidChange: { _ in },
             preferredIPAddressProvider: { preferredHost }
         )
         return (rootURL, service, identityManager, pairedDeviceStore, recordingFileStore, statusStore, diagnosticsStore)
@@ -6597,6 +7252,44 @@ struct CanonicalExistenceApplyBridgeTests {
         #expect(result?.state == .audioConflict)
     }
 
+    @Test func existingAudioWithIncompleteRemoteProofNoOpsAndPreservesAudio() throws {
+        let existing = Self.existingAudioRecord()
+        let port = InMemoryExistencePort(existing: existing)
+        let bridge = CanonicalRecordingManifestApplyBridge(configuration: Self.configuration(), port: port)
+
+        let result = bridge.apply(
+            recordings: [Self.manifestRecording(audioChecksum: nil, audioSize: 10)],
+            sourceDeviceID: "iphone-01"
+        ).first
+        let preserved = try port.readRecord(objectID: existing.objectID)
+
+        #expect(result?.action == .noOp)
+        #expect(result?.state == .audioAvailable)
+        #expect(result?.reason == "existingAudioProofUnknownPreserved")
+        #expect(preserved?.audioAvailable == true)
+        #expect(preserved?.audioHash == existing.audioHash)
+        #expect(preserved?.audioByteSize == existing.audioByteSize)
+    }
+
+    @Test func tombstoneWithoutMetadataHashRemovesDerivedLedgerAndRepeatedApplyNoOps() throws {
+        let harness = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.rootURL) }
+        _ = harness.bridge.apply(recordings: [Self.manifestRecording()], sourceDeviceID: "iphone-01")
+        var tombstone = Self.manifestRecording(metadataHash: "")
+        tombstone.metadataHash = nil
+        tombstone.deleted = true
+        tombstone.tombstone = true
+
+        let first = harness.bridge.apply(recordings: [tombstone], sourceDeviceID: "iphone-01").first
+        let second = harness.bridge.apply(recordings: [tombstone], sourceDeviceID: "iphone-01").first
+
+        #expect(first?.action == .tombstoneApplied)
+        #expect(first?.state == .tombstoned)
+        #expect(second?.action == .noOp)
+        #expect(second?.state == .tombstoned)
+        #expect(try harness.port.readRecord(objectID: tombstone.recordingID) == nil)
+    }
+
     @Test func rollbackRestoresPreviousAbsence() throws {
         let harness = try Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.rootURL) }
@@ -6636,6 +7329,51 @@ struct CanonicalExistenceApplyBridgeTests {
         #expect(recording?.audioChecksum == nil)
         #expect(recording?.audioSize == nil)
         #expect(recording?.audioLogicalPathToken == nil)
+    }
+
+    @Test func inventoryMergerNeverLetsLedgerOverrideBaseTombstone() {
+        let ledger = CanonicalRecordingMetadataOnlyReceiveRecord(
+            objectID: "recording-existence",
+            sourceDeviceID: "iphone-01",
+            title: "Stale active title",
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            metadataHash: "stale-ledger-hash"
+        )
+        var base = Self.manifestRecording(metadataHash: "current-tombstone-hash")
+        base.deleted = true
+        base.tombstone = true
+        base.title = "Current tombstone"
+
+        let merge = MacCanonicalRecordingExistenceInventoryMerger.merge(records: [ledger], into: [base])
+        let recording = merge.recordings.first
+
+        #expect(recording?.deleted == true)
+        #expect(recording?.tombstone == true)
+        #expect(recording?.title == "Current tombstone")
+        #expect(recording?.metadataHash == "current-tombstone-hash")
+    }
+
+    @Test func inventoryMergerAggregatesUnknownAudioProofWithoutConflict() {
+        let ledger = CanonicalRecordingMetadataOnlyReceiveRecord(
+            objectID: "recording-existence",
+            sourceDeviceID: "iphone-01",
+            title: "Metadata",
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            metadataHash: "metadata-hash",
+            declaredAudioHash: nil,
+            declaredAudioByteSize: 10
+        )
+        var base = Self.manifestRecording(audioChecksum: String(repeating: "b", count: 64), audioSize: 20)
+        base.audioAvailable = true
+
+        let merge = MacCanonicalRecordingExistenceInventoryMerger.merge(records: [ledger], into: [base])
+
+        #expect(merge.recordings.first?.audioChecksum == String(repeating: "b", count: 64))
+        #expect(merge.recordings.first?.audioSize == 20)
+        #expect(!merge.diagnostics.contains { $0.kind == .canonicalExistenceAudioConflict || $0.kind == .canonicalRecordingExistenceInventoryConflict })
+        #expect(merge.diagnostics.contains { $0.kind == .canonicalExistencePeerUnknownDeferred && $0.count == 1 })
     }
 
     @Test func receiveJSONBehaviorUsesCanonicalLedgerNotInboxReadPath() throws {
@@ -6705,6 +7443,21 @@ struct CanonicalExistenceApplyBridgeTests {
         CanonicalExistenceApplyRuntimeConfiguration(mode: .testRootApply)
     }
 
+    private static func existingAudioRecord() -> CanonicalRecordingMetadataOnlyReceiveRecord {
+        var record = CanonicalRecordingMetadataOnlyReceiveRecord(
+            objectID: "recording-existence",
+            sourceDeviceID: "mac-01",
+            title: "Existing",
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            metadataHash: "metadata-hash"
+        )
+        record.audioAvailable = true
+        record.audioHash = String(repeating: "b", count: 64)
+        record.audioByteSize = 20
+        return record
+    }
+
     private static func manifestRecording(
         metadataHash: String = "metadata-hash",
         audioChecksum: String? = nil,
@@ -6756,6 +7509,10 @@ struct CanonicalExistenceApplyBridgeTests {
 
         func writeRecord(_ record: CanonicalRecordingMetadataOnlyReceiveRecord) throws {
             records[record.objectID] = record
+        }
+
+        func deleteRecord(objectID: String) throws {
+            records.removeValue(forKey: objectID)
         }
 
         func rollback(_ checkpoint: CanonicalRecordingExistenceRollbackCheckpoint) throws {}

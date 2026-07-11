@@ -14,6 +14,21 @@ enum MacLocalNetworkAddressProvider {
         let address: String
     }
 
+    /// Prefer the Mac's mDNS hostname. Unlike a numeric DHCP address it remains
+    /// valid across Wi-Fi/ethernet changes and resolves to IPv4 or IPv6 as the
+    /// current LAN requires.
+    static func preferredConnectionHost(logPrefix: String = "[RokuricsSecurity]") -> String? {
+        let rawHost = ProcessInfo.processInfo.hostName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if !rawHost.isEmpty, rawHost.lowercased() != "localhost" {
+            let host = rawHost.contains(".") ? rawHost : "\(rawHost).local"
+            print("\(logPrefix) stable local host: \(host)")
+            return host
+        }
+        return preferredIPv4Address(logPrefix: logPrefix)
+    }
+
     static func preferredIPv4Address(logPrefix: String = "[RokuricsSecurity]") -> String? {
         let addresses = localIPv4Addresses()
         let addressText = addresses.map { "\($0.interfaceName)=\($0.address)" }.joined(separator: ", ")
@@ -49,6 +64,7 @@ enum MacLocalNetworkAddressProvider {
             let flags = Int32(interface.ifa_flags)
             guard
                 flags & IFF_UP == IFF_UP,
+                flags & IFF_RUNNING == IFF_RUNNING,
                 flags & IFF_LOOPBACK == 0,
                 let addressPointer = interface.ifa_addr,
                 addressPointer.pointee.sa_family == UInt8(AF_INET)

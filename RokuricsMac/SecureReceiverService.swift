@@ -33,6 +33,7 @@ enum SecureReceiverPairingFlowState: String, Equatable {
 
 enum SecureReceiverConnectionErrorCode: String, Equatable {
     case listenerNotReady
+    case portInUse
     case serverUnreachable
     case tlsHandshakeFailed
     case fingerprintMismatch
@@ -102,7 +103,8 @@ final class ConnectionDiagnosticsStore {
     private let maxEntries: Int
     private let diagnosticsWriter: CanonicalAsyncDiagnosticsWriter
     private var recentEntries: [ConnectionDiagnosticEntry] = []
-    private var pendingEnqueueTasks: [Task<Void, Never>] = []
+    private var pendingEnqueueTail: Task<Void, Never>?
+    private var pendingEnqueueGeneration = 0
     private var runtimeCounterStateByKey: [String: (pending: Int, total: Int, lastLoggedAt: Date)] = [:]
 
     init(
@@ -199,7 +201,10 @@ final class ConnectionDiagnosticsStore {
         )
 
         appendRecentEntry(entry)
-        enqueueEntryForAsyncWrite(entry)
+        enqueueEntryForAsyncWrite(
+            entry,
+            priority: Self.diagnosticsPriority(phase: entry.phase, errorCode: entry.errorCode)
+        )
     }
 
     func recordPerfLog(_ record: CanonicalPerfLog.Record) {
@@ -269,10 +274,8 @@ final class ConnectionDiagnosticsStore {
     }
 
     func flushForTests() async {
-        let tasks = pendingEnqueueTasks
-        pendingEnqueueTasks.removeAll(keepingCapacity: true)
-        for task in tasks {
-            await task.value
+        while let pendingEnqueueTail {
+            await pendingEnqueueTail.value
         }
         await diagnosticsWriter.flushForTests()
         recentEntries.removeAll(keepingCapacity: true)
@@ -293,20 +296,51 @@ final class ConnectionDiagnosticsStore {
         }
     }
 
-    private func enqueueEntryForAsyncWrite(_ entry: ConnectionDiagnosticEntry) {
+    private func enqueueEntryForAsyncWrite(
+        _ entry: ConnectionDiagnosticEntry,
+        priority: CanonicalAsyncDiagnosticsPriority
+    ) {
         let data = Self.encodedJSONLData(for: entry)
             ?? Self.encodedJSONLData(for: Self.redactionRejectedEntry(timestamp: entry.timestamp))
         guard let data else {
             return
         }
         let writer = diagnosticsWriter
-        let task = Task {
-            _ = await writer.enqueueJSONLLine(data)
+        let previousTask = pendingEnqueueTail
+        pendingEnqueueGeneration += 1
+        let generation = pendingEnqueueGeneration
+        pendingEnqueueTail = Task { [weak self] in
+            if let previousTask {
+                await previousTask.value
+            }
+            _ = await writer.enqueueJSONLLine(data, priority: priority)
+            guard let self, self.pendingEnqueueGeneration == generation else {
+                return
+            }
+            self.pendingEnqueueTail = nil
         }
-        pendingEnqueueTasks.append(task)
-        if pendingEnqueueTasks.count > 2_048 {
-            pendingEnqueueTasks.removeFirst(pendingEnqueueTasks.count - 1_024)
+    }
+
+    private nonisolated static func diagnosticsPriority(
+        phase: String,
+        errorCode: String?
+    ) -> CanonicalAsyncDiagnosticsPriority {
+        if errorCode?.isEmpty == false {
+            return .critical
         }
+        let normalizedPhase = phase.lowercased()
+        let isTerminalResult = normalizedPhase.hasSuffix("completed")
+            || normalizedPhase.hasSuffix("failed")
+            || normalizedPhase.hasSuffix("failure")
+        if isTerminalResult,
+           normalizedPhase.contains("syncrun") || normalizedPhase.contains("synctick") {
+            return .critical
+        }
+        if isTerminalResult,
+           normalizedPhase.contains("upload") || normalizedPhase.contains("apply") {
+            return .critical
+        }
+        return .normal
     }
 
     private nonisolated static func encodedJSONLData(for entry: ConnectionDiagnosticEntry) -> Data? {
@@ -450,6 +484,7 @@ final class SecureReceiverService: ObservableObject {
     private let macSyncEventStormWindow: TimeInterval = 5
     private let macSyncEventMaxEventsPerWindow = 40
     private let preferredIPAddressProvider: () -> String?
+    private let receiverPortDidChange: (Int) -> Void
     private let expiryFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
@@ -486,14 +521,20 @@ final class SecureReceiverService: ObservableObject {
         canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
         canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
         loadIdentityOnInit: Bool = true,
+        receiverPortDidChange: @escaping (Int) -> Void = { port in
+            MacAppStorageProfile.persistReceiverPort(port)
+        },
         preferredIPAddressProvider: @escaping () -> String? = {
-            MacLocalNetworkAddressProvider.preferredIPv4Address(logPrefix: "[RokuricsSecurity]")
+            MacLocalNetworkAddressProvider.preferredConnectionHost(logPrefix: "[RokuricsSecurity]")
         }
     ) {
         let identityManager = injectedIdentityManager ?? MacIdentityManager()
         let pairedDeviceStore = injectedPairedDeviceStore ?? PairedDeviceStore()
         let pairingManager = PairingManager(pairedDeviceStore: pairedDeviceStore)
-        let requestVerifier = RequestVerifier(pairedDeviceStore: pairedDeviceStore)
+        let requestVerifier = RequestVerifier(
+            pairedDeviceStore: pairedDeviceStore,
+            pairingManager: pairingManager
+        )
         let receivedFileStore = injectedReceivedFileStore ?? ReceivedFileStore()
         let recordingFileStore = injectedRecordingFileStore ?? MacRecordingFileStore()
         let resolvedStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
@@ -601,6 +642,7 @@ final class SecureReceiverService: ObservableObject {
         self.canonicalStatusExchangeRuntime = resolvedStatusExchangeRuntime
         self.canonicalConnectionRuntime = resolvedConnectionRuntime
         self.preferredIPAddressProvider = preferredIPAddressProvider
+        self.receiverPortDidChange = receiverPortDidChange
         self.port = port
 
         if loadIdentityOnInit {
@@ -850,22 +892,32 @@ final class SecureReceiverService: ObservableObject {
                     self.completePendingPairingIfPossible(trigger: "listener_ready")
                 }
             },
-            onFailed: { [weak self] message in
+            onFailed: { [weak self] failure in
                 Task { @MainActor [weak self] in
-                    self?.httpsServer = nil
-                    self?.isHTTPSRunning = false
-                    self?.pendingPairingStartAfterHTTPSReady = false
-                    self?.pairingFlowState = .failed
-                    self?.pairingPayload = nil
-                    self?.httpsStatusText = "HTTPS 启动失败"
-                    self?.lastError = message
-                    self?.connectionErrorCode = .serverUnreachable
-                    self?.recordConnectionDiagnostic(
-                        phase: "listener_failed",
-                        listenerState: "failed",
-                        errorCode: SecureReceiverConnectionErrorCode.serverUnreachable.rawValue,
-                        errorMessage: message
-                    )
+                    guard let self else {
+                        return
+                    }
+                    if failure.kind == .addressInUse {
+                        self.handleListenerAddressInUse(
+                            failedPort: failure.port,
+                            underlyingMessage: failure.message
+                        )
+                    } else {
+                        self.httpsServer = nil
+                        self.isHTTPSRunning = false
+                        self.pendingPairingStartAfterHTTPSReady = false
+                        self.pairingFlowState = .failed
+                        self.pairingPayload = nil
+                        self.httpsStatusText = "HTTPS 启动失败"
+                        self.lastError = failure.message
+                        self.connectionErrorCode = .serverUnreachable
+                        self.recordConnectionDiagnostic(
+                            phase: "listener_failed",
+                            listenerState: "failed",
+                            errorCode: SecureReceiverConnectionErrorCode.serverUnreachable.rawValue,
+                            errorMessage: failure.message
+                        )
+                    }
                 }
             },
             onPairingChanged: { [weak self] in
@@ -939,6 +991,8 @@ final class SecureReceiverService: ObservableObject {
                 applyHTTPSReadyState(activePort: server.activePort, listenerState: "ready_after_start")
                 completePendingPairingIfPossible(trigger: "ready_after_start")
             }
+        } catch SecureHTTPSServerError.addressInUse(let failedPort, let message) {
+            handleListenerAddressInUse(failedPort: failedPort, underlyingMessage: message)
         } catch {
             httpsServer = nil
             isHTTPSRunning = false
@@ -1533,6 +1587,37 @@ final class SecureReceiverService: ObservableObject {
             listenerState: listenerState,
             activePort: activePort ?? httpsServer?.activePort
         )
+    }
+
+    private func handleListenerAddressInUse(failedPort: Int, underlyingMessage: String) {
+        httpsServer?.stop()
+        httpsServer = nil
+        isHTTPSRunning = false
+        pendingPairingStartAfterHTTPSReady = false
+        pairingFlowState = .failed
+        pairingPayload = nil
+
+        let nextPort = Self.nextPort(afterAddressInUse: failedPort)
+        port = nextPort
+        receiverPortDidChange(nextPort)
+        httpsStatusText = "端口 \(failedPort) 被占用，已切换到 \(nextPort)"
+        lastError = "端口 \(failedPort) 已被占用。下次配对将使用端口 \(nextPort)，请再次点击配对。"
+        connectionErrorCode = .portInUse
+        recordConnectionDiagnostic(
+            phase: "listener_port_advanced_after_address_in_use",
+            listenerState: "failed",
+            beginPairingRequested: true,
+            codeIssued: false,
+            errorCode: SecureReceiverConnectionErrorCode.portInUse.rawValue,
+            errorMessage: "failedPort=\(failedPort),nextPort=\(nextPort),reason=\(underlyingMessage)"
+        )
+    }
+
+    nonisolated static func nextPort(afterAddressInUse failedPort: Int) -> Int {
+        guard failedPort >= 1, failedPort < 65_535 else {
+            return 8_787
+        }
+        return failedPort + 1
     }
 
     private func completePendingPairingIfPossible(trigger: String) {

@@ -21,6 +21,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
 
     private let fileManager: FileManager
     private let storeURL: URL
+    private let pendingSyncStoreURL: URL
     private let offlineThreshold: TimeInterval
     private let staleAfter: TimeInterval
     private let disconnectedAfter: TimeInterval
@@ -44,8 +45,9 @@ final class DeviceConnectionStatusStore: ObservableObject {
         self.disconnectedAfter = disconnectedAfter
         self.missedHeartbeatLimit = missedHeartbeatLimit
         self.pendingSyncRequestTimeout = pendingSyncRequestTimeout
-        storeURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
-            .appendingPathComponent("device-connection-status.json", isDirectory: false)
+        let syncDirectoryURL = Self.syncDirectoryURL(fileManager: fileManager, rootURL: rootURL)
+        storeURL = syncDirectoryURL.appendingPathComponent("device-connection-status.json", isDirectory: false)
+        pendingSyncStoreURL = syncDirectoryURL.appendingPathComponent("pending-sync-start-signals.json", isDirectory: false)
         load()
     }
 
@@ -71,6 +73,8 @@ final class DeviceConnectionStatusStore: ObservableObject {
     func markUnpaired(displayName: String = "iPhone") -> DeviceConnectionStatus {
         let status = DeviceConnectionStatus.unpaired(displayName: displayName)
         statusesByDeviceID = [:]
+        pendingSyncRequestDeviceIDs.removeAll()
+        pendingSyncStartSignalsByDeviceID.removeAll()
         save()
         return status
     }
@@ -337,6 +341,9 @@ final class DeviceConnectionStatusStore: ObservableObject {
         consumePendingSyncStartSignal(deviceID: deviceID) != nil
     }
 
+    /// Legacy destructive accessor retained for tests/maintenance callers.
+    /// Network response paths must use `pendingSyncStartSignal` and remove only
+    /// through `acknowledgePendingSyncStartSignal`.
     func consumePendingSyncStartSignal(deviceID: String) -> LocalNetworkSyncStartSignal? {
         pendingSyncRequestDeviceIDs.remove(deviceID)
         let signal = pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
@@ -349,6 +356,39 @@ final class DeviceConnectionStatusStore: ObservableObject {
             save()
         }
         return signal
+    }
+
+    func pendingSyncStartSignal(deviceID: String) -> LocalNetworkSyncStartSignal? {
+        guard let signal = pendingSyncStartSignalsByDeviceID[deviceID] else {
+            return nil
+        }
+        if var status = statusesByDeviceID[deviceID] {
+            status.lastSyncStatus = "同步请求已投递，等待 iPhone 确认"
+            status.lastError = nil
+            status.lastErrorCode = nil
+            status.connectionStatusRevision = nextRevision(after: status)
+            statusesByDeviceID[deviceID] = status
+            save()
+        }
+        return signal
+    }
+
+    @discardableResult
+    func acknowledgePendingSyncStartSignal(deviceID: String, syncRunID: String) -> Bool {
+        guard pendingSyncStartSignalsByDeviceID[deviceID]?.syncRunID == syncRunID else {
+            return false
+        }
+        pendingSyncRequestDeviceIDs.remove(deviceID)
+        pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
+        if var status = statusesByDeviceID[deviceID] {
+            status.lastSyncStatus = "iPhone 已确认同步请求"
+            status.lastError = nil
+            status.lastErrorCode = nil
+            status.connectionStatusRevision = nextRevision(after: status)
+            statusesByDeviceID[deviceID] = status
+        }
+        save()
+        return true
     }
 
     @discardableResult
@@ -368,11 +408,6 @@ final class DeviceConnectionStatusStore: ObservableObject {
             lastSyncStatus: nil,
             lastError: nil
         )
-        pendingSyncRequestDeviceIDs.remove(deviceID)
-        if let syncRunID,
-           pendingSyncStartSignalsByDeviceID[deviceID]?.syncRunID == syncRunID {
-            pendingSyncStartSignalsByDeviceID.removeValue(forKey: deviceID)
-        }
         status.displayName = displayName
         status.state = .connected
         status.presenceState = .online
@@ -621,14 +656,21 @@ final class DeviceConnectionStatusStore: ObservableObject {
 
     private func load() {
         do {
-            guard fileManager.fileExists(atPath: storeURL.path) else {
+            if fileManager.fileExists(atPath: storeURL.path) {
+                let data = try Data(contentsOf: storeURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                statusesByDeviceID = try decoder.decode([String: DeviceConnectionStatus].self, from: data)
+            } else {
                 statusesByDeviceID = [:]
-                return
             }
-            let data = try Data(contentsOf: storeURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            statusesByDeviceID = try decoder.decode([String: DeviceConnectionStatus].self, from: data)
+            if fileManager.fileExists(atPath: pendingSyncStoreURL.path) {
+                let data = try Data(contentsOf: pendingSyncStoreURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                pendingSyncStartSignalsByDeviceID = try decoder.decode([String: LocalNetworkSyncStartSignal].self, from: data)
+                pendingSyncRequestDeviceIDs = Set(pendingSyncStartSignalsByDeviceID.keys)
+            }
         } catch {
             statusesByDeviceID = [:]
             lastError = error.localizedDescription
@@ -642,6 +684,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(statusesByDeviceID).write(to: storeURL, options: .atomic)
+            try encoder.encode(pendingSyncStartSignalsByDeviceID).write(to: pendingSyncStoreURL, options: .atomic)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -724,6 +767,16 @@ final class DeviceConnectionStatusStore: ObservableObject {
 }
 
 extension LocalNetworkSyncControlPlaneState {
+    var canBeginOrSupersedeRun: Bool {
+        switch self {
+        case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked, .inventoryExchanging:
+            return true
+        case .idle, .planningTransfers, .transferJobsCreated, .transferring,
+             .pausedDisconnected, .resuming, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
     var isSyncProgressActive: Bool {
         switch self {
         case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
@@ -731,6 +784,17 @@ extension LocalNetworkSyncControlPlaneState {
              .transferring, .pausedDisconnected, .resuming:
             return true
         case .idle, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
+    var isSyncTerminal: Bool {
+        switch self {
+        case .completed, .failed, .cancelled:
+            return true
+        case .idle, .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated,
+             .transferring, .pausedDisconnected, .resuming:
             return false
         }
     }
@@ -841,6 +905,14 @@ final class StudyLibrarySyncStateStore: ObservableObject {
     private let storeURL: URL
     private let controlPlaneInactivityTimeout: TimeInterval
     private var controlPlaneTimeoutTask: Task<Void, Never>?
+    private var supersededRunIDs: [String] = []
+    private var metadataApplyLease: MetadataApplyLease?
+
+    private struct MetadataApplyLease {
+        var token: UUID
+        var syncRunID: String?
+        var activeSyncRunIDAtAcquisition: String?
+    }
 
     init(
         fileManager: FileManager = .default,
@@ -869,7 +941,18 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         save()
     }
 
-    func recordPush(deviceID: String, remoteManifestHash: String?, remoteCommitID: String? = nil, pendingUploads: Int = 0, at date: Date = Date()) {
+    @discardableResult
+    func recordPush(
+        deviceID: String,
+        remoteManifestHash: String?,
+        remoteCommitID: String? = nil,
+        pendingUploads: Int = 0,
+        syncRunID: String? = nil,
+        at date: Date = Date()
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.deviceID = deviceID
         state.lastPushedAt = date
         state.lastRemoteManifestHash = remoteManifestHash ?? state.lastRemoteManifestHash
@@ -881,8 +964,10 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state.lastError = nil
         state.syncControlPlaneState = .completed
         state.syncControlPlaneUpdatedAt = date
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
     func recordPendingUploads(deviceID: String, pendingUploads: Int, failedChanges: Int = 0, error: String? = nil) {
@@ -893,7 +978,88 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         save()
     }
 
-    func recordFailure(deviceID: String, error: String, failedChanges: Int = 1, pendingUploads: Int? = nil) {
+    /// Serializes metadata persistence against control-plane supersession. A
+    /// correlated apply owns the active run until it has completed its final
+    /// postcondition check; legacy requests are allowed only when no correlated
+    /// run is currently in progress.
+    func beginMetadataApplyLease(
+        deviceID: String,
+        syncRunID rawSyncRunID: String?,
+        at date: Date = Date()
+    ) -> UUID? {
+        guard metadataApplyLease == nil else {
+            return nil
+        }
+        let syncRunID = normalizedSyncRunID(rawSyncRunID)
+        if let syncRunID {
+            guard recordControlPlane(
+                deviceID: deviceID,
+                syncRunID: syncRunID,
+                state: .transferring,
+                at: date
+            ) else {
+                return nil
+            }
+        } else if state.syncControlPlaneState?.isSyncProgressActive == true,
+                  state.activeSyncRunID != nil {
+            return nil
+        }
+
+        let token = UUID()
+        metadataApplyLease = MetadataApplyLease(
+            token: token,
+            syncRunID: syncRunID,
+            activeSyncRunIDAtAcquisition: state.activeSyncRunID
+        )
+        // Applying a manifest may legitimately take longer than the ordinary
+        // control-plane inactivity window. The lease itself is the liveness
+        // proof while the apply is running, so the watchdog must not turn the
+        // same run into a timeout underneath the write transaction.
+        cancelControlPlaneWatchdog()
+        return token
+    }
+
+    func isMetadataApplyLeaseValid(_ token: UUID, syncRunID rawSyncRunID: String?) -> Bool {
+        guard let lease = metadataApplyLease,
+              lease.token == token,
+              lease.syncRunID == normalizedSyncRunID(rawSyncRunID),
+              lease.activeSyncRunIDAtAcquisition == state.activeSyncRunID else {
+            return false
+        }
+        if let syncRunID = lease.syncRunID {
+            return state.activeSyncRunID == syncRunID
+                && state.syncControlPlaneState?.isSyncProgressActive == true
+        }
+        return true
+    }
+
+    func endMetadataApplyLease(_ token: UUID) {
+        guard let lease = metadataApplyLease,
+              lease.token == token else {
+            return
+        }
+        metadataApplyLease = nil
+        if lease.activeSyncRunIDAtAcquisition == state.activeSyncRunID,
+           lease.syncRunID == state.activeSyncRunID,
+           state.syncControlPlaneState?.isSyncProgressActive == true {
+            state.syncControlPlaneUpdatedAt = Date()
+            save()
+        }
+        scheduleControlPlaneWatchdogIfNeeded()
+    }
+
+    @discardableResult
+    func recordFailure(
+        deviceID: String,
+        error: String,
+        failedChanges: Int = 1,
+        pendingUploads: Int? = nil,
+        syncRunID: String? = nil,
+        at date: Date = Date()
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.deviceID = deviceID
         state.pendingLocalChanges = max(state.pendingLocalChanges, failedChanges)
         if let pendingUploads {
@@ -902,23 +1068,29 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state.failedChanges = max(state.failedChanges, failedChanges)
         state.lastError = error
         state.syncControlPlaneState = .failed
-        state.syncControlPlaneUpdatedAt = Date()
+        state.syncControlPlaneUpdatedAt = date
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
+    @discardableResult
     func recordControlPlane(
         deviceID: String,
         syncRunID: String,
         state controlPlaneState: LocalNetworkSyncControlPlaneState,
         at date: Date = Date()
-    ) {
+    ) -> Bool {
+        guard metadataApplyLease == nil else {
+            return false
+        }
         guard shouldAcceptControlPlaneUpdate(
             syncRunID: syncRunID,
             nextState: controlPlaneState,
             at: date
         ) else {
-            return
+            return false
         }
         state.deviceID = deviceID
         state.activeSyncRunID = syncRunID
@@ -932,6 +1104,7 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         }
         scheduleControlPlaneWatchdogIfNeeded()
         save()
+        return true
     }
 
     func replace(_ nextState: StudyLibrarySyncState) {
@@ -942,6 +1115,9 @@ final class StudyLibrarySyncStateStore: ObservableObject {
 
     @discardableResult
     func expireStaleControlPlaneIfNeeded(now: Date = Date()) -> Bool {
+        guard metadataApplyLease == nil else {
+            return false
+        }
         guard let controlPlaneState = state.syncControlPlaneState,
               controlPlaneState.shouldExpireWhenStale,
               let updatedAt = state.syncControlPlaneUpdatedAt,
@@ -961,12 +1137,21 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         nextState: LocalNetworkSyncControlPlaneState,
         at date: Date
     ) -> Bool {
+        if supersededRunIDs.contains(syncRunID) {
+            return false
+        }
         guard let currentRunID = state.activeSyncRunID,
               !currentRunID.isEmpty else {
             return true
         }
         let currentState = state.syncControlPlaneState
         if currentRunID == syncRunID {
+            if currentState?.isSyncTerminal == true {
+                return false
+            }
+            if currentState?.isSyncProgressActive != true, nextState.isSyncProgressActive {
+                return false
+            }
             guard let currentRank = currentState?.controlPlaneProgressRank,
                   let nextRank = nextState.controlPlaneProgressRank,
                   nextRank < currentRank,
@@ -975,14 +1160,44 @@ final class StudyLibrarySyncStateStore: ObservableObject {
             }
             return false
         }
-        guard currentState?.isSyncProgressActive == true else {
+        if nextState.canBeginOrSupersedeRun {
+            rememberSupersededRun(currentRunID)
             return true
         }
         if let updatedAt = state.syncControlPlaneUpdatedAt,
            date.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout {
+            rememberSupersededRun(currentRunID)
             return true
         }
         return false
+    }
+
+    private func canFinishRun(_ syncRunID: String?) -> Bool {
+        guard metadataApplyLease == nil else {
+            return false
+        }
+        guard let syncRunID = normalizedSyncRunID(syncRunID) else {
+            return state.activeSyncRunID == nil
+        }
+        return state.syncControlPlaneState?.isSyncTerminal != true
+            && !supersededRunIDs.contains(syncRunID)
+            && state.activeSyncRunID == syncRunID
+    }
+
+    private func normalizedSyncRunID(_ syncRunID: String?) -> String? {
+        guard let normalized = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
+    }
+
+    private func rememberSupersededRun(_ syncRunID: String) {
+        supersededRunIDs.removeAll { $0 == syncRunID }
+        supersededRunIDs.append(syncRunID)
+        if supersededRunIDs.count > 32 {
+            supersededRunIDs.removeFirst(supersededRunIDs.count - 32)
+        }
     }
 
     private func scheduleControlPlaneWatchdogIfNeeded() {

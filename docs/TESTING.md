@@ -2354,3 +2354,73 @@ xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug 
 - `git status --short`
 
 本组测试只验证 `generatedArtifacts` 作为唯一 active pilot 的 v8.22 N=0 gate evaluation、default-off seam、canary budget zero、no-execution assertion、unsupported/content/path/parent-tombstone/audio blocker、iPhone tick diagnostics-only、Mac inventory report-only 和 matrix guard。它不表示可以执行 N=1、调用 `/sync/artifact-request`、下载/apply/write/commit generated artifact、创建 upload job、自动下载 audio、新增 route、切 runtime switch、修改 UI/read path、迁移 retry drainer/Mac pending sync、suppress legacy 或删除 legacy fallback。
+
+## 2026-07-10 连接/同步/上传修复验证
+
+实际通过：
+
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme Rokurics -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/RokuricsDerivedData build-for-testing SWIFT_SUPPRESS_WARNINGS=YES`
+- iOS `test-without-building` 定向执行 25 项：dynamic pairing port parse、rename/restore、target reset、retry cap、IPv6 host、sync-start ACK failure、status ACK/batch/incarnation/pure ACK、conflict/partial apply、small/large/resume artifact、full-size unconfirmed、missing/in-flight/deduplicated/failed audio、stale session、default old kernel。
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac -destination 'platform=macOS' -derivedDataPath /tmp/RokuricsMacDerivedData build-for-testing SWIFT_SUPPRESS_WARNINGS=YES`
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme Rokurics -configuration Release -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/RokuricsReleaseDerivedData build SWIFT_SUPPRESS_WARNINGS=YES`
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Release -destination 'platform=macOS' -derivedDataPath /tmp/RokuricsMacReleaseDerivedData build SWIFT_SUPPRESS_WARNINGS=YES`
+- Mac `test-without-building` 定向执行 16 项：dynamic receiver-port persistence、真实 occupied-port increment、TLS fingerprint/pairing/heartbeat、两阶段 confirm、confirm 丢失后的 signed credential proof commit、deviceless upload、sync-start redelivery/ACK/timeout、artifact version/checksum/large upload、metadata/existence apply、malformed fact、stale audio session。
+
+Swift Testing 用 `xcodebuild -only-testing` 精确筛选函数时，函数名必须包含 `()`，例如：
+
+`'-only-testing:RokuricsTests/RokuricsTests/recordingManagerRestoreClearsStudyItemTombstone()'`
+
+省略 `()` 可能以 exit 0 结束但实际显示 `Executed 0 tests`，不能作为验证证据。
+
+本轮没有运行全量 UI test、TSan、真机测试或 24 小时 soak。定向自动化通过不能替代 `.local`/Bonjour 网络切换、首次权限、后台/锁屏和长文件弱网的真机验证。
+
+### 端口占用迁移回归
+
+- Mac：`occupiedPairingPortAdvancesOnceAndNextClickPublishesNewPort()` 真实启动一个 TCP blocker，占用随机端口，验证首次 `EADDRINUSE` 后候选端口加一、旧 payload 清除、第二次点击在新端口 ready，并且 payload/activePort/service.port 三者一致。
+- Mac：`receiverPortPersistenceKeepsDynamicPairingPortAcrossLaunches()` 验证递增后的端口可从 app profile 持久状态重新读取，非法端口不会覆盖有效值。
+- iPhone：`pairingInfoParserUsesDynamicPortCopiedByMac()` 验证粘贴文本中的 `Port: 8788` 被保存为 8788。
+- 相关连接回归同时覆盖 listener 已 ready、listener starting、TLS identity 不可用以及真实 TLS pairing/heartbeat，确保非端口错误不会被迁移逻辑掩盖。
+
+## 2026-07-11 V2 业务签名与同步收敛回归
+
+本轮文档更新期间实际执行并通过以下精确筛选；函数名包含 `()`，结果分别明确列出 3 项和 2 项 passed：
+
+- `xcodebuild -project Rokurics.xcodeproj -scheme Rokurics -destination 'platform=iOS Simulator,id=09DBE446-05F1-4F73-8130-5ECF4AF1F984' '-only-testing:RokuricsTests/RokuricsTests/localNetworkBusinessSignatureV2IsNormalizedVersionedAndCustomKeyExplicit()' '-only-testing:RokuricsTests/RokuricsTests/iphoneBusinessSignatureMappingIgnoresDeviceLocalVariants()' '-only-testing:RokuricsTests/RokuricsTests/iphoneBusinessMergeOverlaysPeerBusinessFieldsAndPreservesLocalState()' test`
+- `xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -destination 'platform=macOS' '-only-testing:RokuricsMacTests/StudyLibrarySyncTests/macBusinessSignatureMappingMatchesSharedCrossDeviceFixtureAndIgnoresLocalState()' '-only-testing:RokuricsMacTests/StudyLibrarySyncTests/macBusinessMergePreservesMacLocalFilesAndProcessingState()' test`
+
+V2 定向测试必须持续覆盖：
+
+- 版本前缀、NFC/trim、tag 大小写/去重/排序和 sorted-key 编码稳定。
+- timestamp、path、processing/upload/conflict/runtime 差异不改变 business signature。
+- iPhone 与 Mac 对同一个跨设备 fixture 产生完全相同签名。
+- peer business merge 覆盖业务字段，但保留本机路径、duration、处理状态、note/source/conflict、membership 和未列入白名单的 custom properties。
+- custom property 只有显式加入 `explicitBusinessCustomPropertyKeys` 后才参与签名/merge；当前应断言白名单为空。
+
+连接、同步和上传变更的最小回归矩阵还应包含：
+
+- `CanonicalCoreTests.canonicalManifestHashSurvivesISO8601RoundTripWithFractionalInput()`：小数秒输入经 ISO8601 round-trip 后被统一到整秒且 manifest hash 有效。
+- business clock/runtime：processing、receive、ledger 或 UI 状态变化不推进 canonical business modifiedAt；真正业务 rename/restore/delete 使用持久业务时间。
+- action-scoped manifest：局部 metadata action 不携带无关对象，item↔recording 关系按需扩展，缺 payload 必须失败。
+- conflict isolation：有冲突对象的依赖动作被阻塞，无关 metadata/artifact/audio 仍执行，最终 run 仍以 unresolved conflict 失败。
+- tombstone/existence/audio proof：tombstone 不被 ledger 覆盖；metadata-only、receive、study item、completed ledger 均不是 audio proof；只有 matching hash+size/finalize proof no-op，不同 hash/size conflict，peer unknown deferred。
+- syncRunID supersede/heartbeat：新 run 可 supersede 旧 run，旧 run 的迟到进度/终态被拒绝；heartbeat 只接受当前 run 的单调状态并可收敛 completed/failed，presence 本身不成功。
+- diagnostic priority：normal noise storm 下 critical terminal/error 仍按接受顺序落盘，后续 normal 不能驱逐 critical，所有敏感字段仍被 redaction。
+
+以上矩阵除本节明确列出的 5 项 V2 测试外，本轮文档更新未重新执行；应结合对应源码测试结果使用，不能把“测试存在”表述为“本轮已通过”。本轮也未运行全量 build、UI test、TSan 或 paired 真机测试。
+
+真机验收至少覆盖：相同真实库双端 V2 等价；旧版/V2 混跑升级；metadata-only→audio upload→peer hash/size/finalize proof→下一轮 no-op；局部冲突时无关文件继续完成且整轮不误报成功；两个重叠 syncRunID 及终态响应丢失后的 heartbeat 收敛；网络切换、首次本地网络权限、后台/锁屏、长文件弱网和诊断噪声场景。
+
+### 2026-07-11 最终修复验证补记
+
+本节取代上一节“仅重新执行 5 项 V2 测试、未运行全量 build”的阶段性说明。本轮后续实际完成：
+
+- iOS `RokuricsTests/RokuricsTests`：结果包记录 193 个测试、0 failure、3 skip。2 个 pairing/credential 用例因 Simulator Keychain entitlement 返回 `-34018` 跳过；另 1 个为与本链路无关的既有 UI expectation skip。
+- iOS 高风险定向矩阵：损坏 upload ledger、双端业务 merge/metadata-only marker、真实 itemID、scoped manifest coverage、冲突固定点与未知 owner fail-closed、durable queue FIFO/重启/写失败/ACK、live signal FIFO、critical diagnostics、artifact download、canonical ISO8601 round-trip 全部通过；`CanonicalFileKernelRuntimeTests` 12 项通过。
+- Mac `StudyLibrarySyncTests`、`CanonicalExistenceApplyBridgeTests`、`CanonicalManifestRecordingsApplyTests`：45 项通过。
+- Mac 定向矩阵：metadata apply lease/watchdog、first-terminal-wins、业务相等 marker、动态端口、canonical file kernel 通过；heartbeat run、watchdog、metadata+audio route、inbox 即时刷新、resumable contract change、unpair/旧 HMAC/重新 pairing 共 6 项以关闭并行测试后串行通过。
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme Rokurics -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/RokuricsDerivedData-syncfix-ios-build build`：退出 0。
+- `xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/RokuricsDerivedData-syncfix-mac-build build`：退出 0。
+
+Mac 单体大测试类仍包含本链路以外的 UI 源码文本断言和共享状态/并行敏感用例，因此不能声明整个 Mac test target 全绿；本报告相关失败项均已单独串行复跑通过。Debug 构建仍输出项目既有 Swift 6 actor-isolation warnings，但无编译错误。
+
+尚未执行：paired iPhone/Mac 真机端到端、Release、TSan、24 小时 soak、首次权限/防火墙、后台/锁屏和弱网系统杀进程。发布前不得把 Debug/simulator 自动化等同于这些真机证据。

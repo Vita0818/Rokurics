@@ -12,13 +12,28 @@ import SystemConfiguration
 
 enum SecureHTTPSServerError: LocalizedError {
     case tlsIdentityUnavailable(String)
+    case addressInUse(port: Int, message: String)
+    case listenerStartFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .tlsIdentityUnavailable(let reason):
             return reason
+        case .addressInUse(_, let message), .listenerStartFailed(let message):
+            return message
         }
     }
+}
+
+struct SecureLocalHTTPSServerFailure: Sendable {
+    enum Kind: String, Sendable {
+        case addressInUse
+        case serverUnreachable
+    }
+
+    let kind: Kind
+    let port: Int
+    let message: String
 }
 
 struct SecureLocalHTTPRouteResponse: Sendable {
@@ -537,7 +552,7 @@ struct ConnectionHeartbeatRouteHandler {
                     receivedAt: now,
                     latencyMilliseconds: max(0, now.timeIntervalSince(request.sentAt) * 1_000)
                 )
-                let syncStartSignal = statusStore.consumePendingSyncStartSignal(deviceID: device.id)
+                let syncStartSignal = statusStore.pendingSyncStartSignal(deviceID: device.id)
                 let syncRequested = syncStartSignal != nil
                 let response = ConnectionHeartbeatResponse(
                     ok: true,
@@ -648,7 +663,7 @@ struct ConnectionProbeRouteHandler {
                     displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
                     now: now
                 )
-                let syncStartSignal = statusStore?.consumePendingSyncStartSignal(deviceID: device.id)
+                let syncStartSignal = statusStore?.pendingSyncStartSignal(deviceID: device.id)
                 let syncRequested = syncStartSignal != nil
                 let response = ProbeResponse(
                     ok: true,
@@ -719,6 +734,7 @@ struct PairingBootstrapRouteHandler {
         let ok: Bool
         let deviceID: String
         let sharedSecret: String
+        let confirmationToken: String
         let pairedAt: String
         let macName: String
         let macModel: String?
@@ -727,6 +743,18 @@ struct PairingBootstrapRouteHandler {
     private struct PairErrorResponse: Encodable {
         let ok: Bool
         let error: String
+    }
+
+    private struct PairConfirmationRequest: Decodable {
+        let deviceID: String
+        let confirmationToken: String
+    }
+
+    private struct PairConfirmationResponse: Encodable {
+        let ok: Bool
+        let deviceID: String?
+        let disposition: String
+        let error: String?
     }
 
     let pairingManager: PairingManager
@@ -762,12 +790,11 @@ struct PairingBootstrapRouteHandler {
                 ? "iPhone"
                 : pairRequest.deviceType.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            guard let result = pairingManager.completePairing(deviceName: deviceName, deviceType: deviceType, code: code, now: now) else {
+            guard let result = pairingManager.preparePairing(deviceName: deviceName, deviceType: deviceType, code: code, now: now) else {
                 onPairingChanged()
                 return Self.errorResponse(statusCode: 400, reason: "Bad Request", error: "invalid_pairing_code")
             }
 
-            onPairingChanged()
             print("[RokuricsPairing] pairing success response prepared: deviceIDPrefix=\(result.device.idPrefix)")
             return Self.jsonResponse(
                 statusCode: 200,
@@ -776,6 +803,7 @@ struct PairingBootstrapRouteHandler {
                     ok: true,
                     deviceID: result.device.id,
                     sharedSecret: result.sharedSecretBase64URL,
+                    confirmationToken: result.confirmationToken,
                     pairedAt: ISO8601DateFormatter().string(from: result.device.pairedAt),
                     macName: macName,
                     macModel: macModel
@@ -785,6 +813,38 @@ struct PairingBootstrapRouteHandler {
             print("[RokuricsPairing] pairing failure: bad_request")
             return Self.errorResponse(statusCode: 400, reason: "Bad Request", error: "bad_request")
         }
+    }
+
+    func pairingConfirmationResponse(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data,
+        now: Date = Date()
+    ) -> SecureLocalHTTPRouteResponse {
+        guard method == "POST", path == "/pair/confirm" else {
+            return Self.errorResponse(statusCode: 404, reason: "Not Found", error: "not_found")
+        }
+        guard Self.normalizedHeaders(headers)["content-type"]?.lowercased().hasPrefix("application/json") == true,
+              let request = try? JSONDecoder().decode(PairConfirmationRequest.self, from: body),
+              pairingManager.confirmPairing(
+                deviceID: request.deviceID,
+                confirmationToken: request.confirmationToken,
+                now: now
+              ) else {
+            return Self.errorResponse(statusCode: 400, reason: "Bad Request", error: "pairing_confirmation_failed")
+        }
+        onPairingChanged()
+        return Self.jsonResponse(
+            statusCode: 200,
+            reason: "OK",
+            body: PairConfirmationResponse(
+                ok: true,
+                deviceID: request.deviceID,
+                disposition: "confirmed",
+                error: nil
+            )
+        )
     }
 
     private static func errorResponse(statusCode: Int, reason: String, error: String) -> SecureLocalHTTPRouteResponse {
@@ -997,7 +1057,10 @@ private nonisolated struct MacLocalNetworkSyncBackgroundStudyManifestBuilder {
             tombstones: tombstones,
             recordings: makeManifestRecordingEntries(
                 inboxItems: inboxItems,
-                itemsByRecordingID: storedItemsByRecordingID
+                itemsByRecordingID: Dictionary(
+                    itemsByID.values.compactMap { item in item.recordingID.map { ($0, item) } },
+                    uniquingKeysWith: { _, latest in latest }
+                )
             )
         )
     }
@@ -1058,6 +1121,9 @@ private nonisolated struct MacLocalNetworkSyncBackgroundStudyManifestBuilder {
             return false
         }
         if item.kind == .standaloneNote || item.recordingID == nil {
+            return true
+        }
+        if item.isTrashed {
             return true
         }
         if item.customProperties["syncedMetadataOnly"] == "true" {
@@ -1129,29 +1195,40 @@ private nonisolated struct MacLocalNetworkSyncBackgroundStudyManifestBuilder {
         inboxItems: [MacRecordingInboxItem],
         itemsByRecordingID: [String: StudyItemMetadata]
     ) -> [LocalNetworkSyncRecordingEntry] {
-        inboxItems.map { item in
-            let metadataHash = itemsByRecordingID[item.id].map(LocalNetworkSyncMetadataHash.hash)
+        let inboxItemsByID = Dictionary(
+            inboxItems.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let recordingIDs = Set(inboxItemsByID.keys).union(itemsByRecordingID.keys)
+
+        return recordingIDs.sorted().compactMap { recordingID in
+            let inboxItem = inboxItemsByID[recordingID]
+            guard let studyItem = itemsByRecordingID[recordingID]
+                ?? inboxItem.map({ StudyItemMetadata.defaultMetadata(for: $0) }) else {
+                return nil
+            }
+            let metadataHash = studyItem.localNetworkRecordingBusinessSignatureV2
             return LocalNetworkSyncRecordingEntry(
-                recordingID: item.id,
+                recordingID: recordingID,
                 metadataHash: metadataHash,
-                audioAvailable: item.hasAudio,
-                audioChecksum: item.hasAudio ? item.audioChecksum : nil,
-                audioSize: item.hasAudio ? item.fileSize : nil,
+                audioAvailable: inboxItem?.hasAudio == true,
+                audioChecksum: inboxItem?.hasAudio == true ? inboxItem?.audioChecksum : nil,
+                audioSize: inboxItem?.hasAudio == true ? inboxItem?.fileSize : nil,
                 uploadLedgerState: nil,
-                receiveStatus: item.receiveStatus,
-                processingStatus: item.hasAudio ? "notStarted" : "awaitingAudio",
-                updatedAt: item.deletedAt ?? item.receivedAt,
-                deleted: item.isDeleted,
-                title: item.title,
-                createdAt: item.receivedAt,
-                tombstone: item.isDeleted,
-                audioAvailability: item.hasAudio ? .local : .missing,
+                receiveStatus: inboxItem?.receiveStatus ?? (studyItem.isTrashed ? "tombstoned" : "canonicalMetadataOnly"),
+                processingStatus: inboxItem?.hasAudio == true ? "notStarted" : "awaitingAudio",
+                updatedAt: studyItem.trashedAt ?? studyItem.updatedAt,
+                deleted: studyItem.isTrashed,
+                title: studyItem.title,
+                createdAt: studyItem.createdAt,
+                tombstone: studyItem.isTrashed,
+                audioAvailability: inboxItem?.hasAudio == true ? .local : .missing,
                 uploadStatus: nil,
-                transcriptionStatus: item.transcriptionStatus,
-                noteStatus: item.noteStatus,
-                sourceDeviceID: item.sourceDeviceID ?? deviceID,
+                transcriptionStatus: inboxItem?.transcriptionStatus,
+                noteStatus: inboxItem?.noteStatus,
+                sourceDeviceID: inboxItem?.sourceDeviceID ?? studyItem.modifiedByDeviceID ?? deviceID,
                 artifactRefs: nil,
-                audioLogicalPathToken: item.hasAudio ? item.audioRelativePath : nil
+                audioLogicalPathToken: inboxItem?.hasAudio == true ? inboxItem?.audioRelativePath : nil
             )
         }
     }
@@ -1401,7 +1478,7 @@ private nonisolated struct MacInventoryRequestBuildContext {
 
 final class SecureLocalHTTPSServer {
     typealias ReadyHandler = @Sendable () -> Void
-    typealias FailedHandler = @Sendable (String) -> Void
+    typealias FailedHandler = @Sendable (SecureLocalHTTPSServerFailure) -> Void
     typealias PairingChangedHandler = @Sendable () -> Void
     typealias UploadAcceptedHandler = @Sendable (String) -> Void
     typealias RecordingAcceptedHandler = @Sendable (String, SyncTriggerReason) -> Void
@@ -1538,7 +1615,6 @@ final class SecureLocalHTTPSServer {
     private let listenerStateLock = NSLock()
     private var listenerIsReady = false
     private var listenerActivePort: Int?
-    private var listenerAddressInUseRetryAttempted = false
 
     init(
         port: Int,
@@ -1677,23 +1753,23 @@ final class SecureLocalHTTPSServer {
             throw SecureHTTPSServerError.tlsIdentityUnavailable("Invalid HTTPS port.")
         }
 
-        listenerAddressInUseRetryAttempted = false
         cancelCurrentListenerForRestart()
         do {
             try startListener(parameters: parameters, endpointPort: endpointPort)
         } catch {
-            guard isAddressInUse(error), !listenerAddressInUseRetryAttempted else {
-                throw error
-            }
-            listenerAddressInUseRetryAttempted = true
+            let failure = listenerFailure(for: error)
             emitConnectionDiagnostic(
-                phase: "listener_address_in_use_retry",
-                listenerState: "retrying",
-                errorCode: "address_in_use",
-                errorMessage: "HTTPS listener bind failed with address in use; retrying once."
+                phase: "listener_start_failed",
+                listenerState: "failed",
+                errorCode: failure.kind.rawValue,
+                errorMessage: failure.message
             )
-            cancelCurrentListenerForRestart()
-            try startListener(parameters: parameters, endpointPort: endpointPort)
+            switch failure.kind {
+            case .addressInUse:
+                throw SecureHTTPSServerError.addressInUse(port: port, message: failure.message)
+            case .serverUnreachable:
+                throw SecureHTTPSServerError.listenerStartFailed(failure.message)
+            }
         }
     }
 
@@ -1702,6 +1778,10 @@ final class SecureLocalHTTPSServer {
         print("[RokuricsHTTPS] allowLocalEndpointReuse: true")
         print("[RokuricsHTTPS] listener starting on port \(port)")
         let newListener = try NWListener(using: parameters, on: endpointPort)
+        newListener.service = NWListener.Service(
+            name: "Rokurics-\(Host.current().localizedName ?? "Mac")",
+            type: "_rokurics._tcp"
+        )
         listener = newListener
         newListener.stateUpdateHandler = { [weak self, weak newListener] state in
             guard let self else {
@@ -1720,45 +1800,15 @@ final class SecureLocalHTTPSServer {
                 self.onReady()
             case .failed(let error):
                 self.updateListenerState(isReady: false, activePort: nil)
-                let message = "HTTPS listener failed: \(error)"
-                if self.isAddressInUse(error), !self.listenerAddressInUseRetryAttempted {
-                    self.listenerAddressInUseRetryAttempted = true
-                    print("[RokuricsHTTPS][WARN] \(message); retrying listener once")
-                    self.emitConnectionDiagnostic(
-                        phase: "listener_address_in_use_retry",
-                        listenerState: "retrying",
-                        errorCode: "address_in_use",
-                        errorMessage: message
-                    )
-                    self.cancelCurrentListenerForRestart()
-                    self.queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                        guard let self else {
-                            return
-                        }
-                        do {
-                            try self.startListener(parameters: parameters, endpointPort: endpointPort)
-                        } catch {
-                            let retryMessage = "HTTPS listener retry failed: \(error)"
-                            print("[RokuricsHTTPS][ERROR] \(retryMessage)")
-                            self.emitConnectionDiagnostic(
-                                phase: "listener_retry_failed",
-                                listenerState: "failed",
-                                errorCode: self.isAddressInUse(error) ? "address_in_use" : "server_unreachable",
-                                errorMessage: retryMessage
-                            )
-                            self.onFailed(retryMessage)
-                        }
-                    }
-                    return
-                }
-                print("[RokuricsHTTPS][ERROR] \(message)")
+                let failure = self.listenerFailure(for: error)
+                print("[RokuricsHTTPS][ERROR] \(failure.message)")
                 self.emitConnectionDiagnostic(
                     phase: "listener_failed",
                     listenerState: "failed",
-                    errorCode: self.isAddressInUse(error) ? "address_in_use" : "server_unreachable",
-                    errorMessage: message
+                    errorCode: failure.kind.rawValue,
+                    errorMessage: failure.message
                 )
-                self.onFailed(message)
+                self.onFailed(failure)
             case .cancelled:
                 self.updateListenerState(isReady: false, activePort: nil)
                 print("[RokuricsHTTPS] listener state: cancelled")
@@ -1776,7 +1826,6 @@ final class SecureLocalHTTPSServer {
 
     func stop() {
         updateListenerState(isReady: false, activePort: nil)
-        listenerAddressInUseRetryAttempted = false
         listener?.cancel()
         listener = nil
         activeConnections.values.forEach { $0.cancel() }
@@ -1812,6 +1861,17 @@ final class SecureLocalHTTPSServer {
         return text.contains("address already in use")
             || text.contains("eaddrinuse")
             || text.contains("posixerrorcode 48")
+    }
+
+    private func listenerFailure(for error: Error) -> SecureLocalHTTPSServerFailure {
+        let kind: SecureLocalHTTPSServerFailure.Kind = isAddressInUse(error)
+            ? .addressInUse
+            : .serverUnreachable
+        return SecureLocalHTTPSServerFailure(
+            kind: kind,
+            port: port,
+            message: "HTTPS listener failed on port \(port): \(error)"
+        )
     }
 
     var isReady: Bool {
@@ -2330,6 +2390,10 @@ final class SecureLocalHTTPSServer {
         case ("POST", "/pair"):
             Task { @MainActor [weak self] in
                 self?.handlePairRequest(request, on: connection)
+            }
+        case ("POST", "/pair/confirm"):
+            Task { @MainActor [weak self] in
+                self?.handlePairConfirmationRequest(request, on: connection)
             }
         case ("POST", "/upload-secure-test"):
             Task { @MainActor [weak self] in
@@ -2897,7 +2961,7 @@ final class SecureLocalHTTPSServer {
                 displayName: statusRequest.displayName,
                 syncStatus: statusRequest.syncSummary?.statusText
             )
-            let syncStartSignal = deviceConnectionStatusStore.consumePendingSyncStartSignal(deviceID: device.id)
+            let syncStartSignal = deviceConnectionStatusStore.pendingSyncStartSignal(deviceID: device.id)
             let syncRequested = syncStartSignal != nil
             let manualSyncMetric = syncStartSignal.map {
                 "manualSyncRequestConsumedCount=1,pendingSyncRequestedAgeMs=\(max(0, Int(Date().timeIntervalSince($0.requestedAt) * 1_000)))"
@@ -3048,6 +3112,10 @@ final class SecureLocalHTTPSServer {
            var heartbeatResponse = decodedHeartbeatResponse {
             let heartbeatRequest = try? await Self.decodeSyncBodyOffMain(ConnectionHeartbeatRequest.self, from: request.body)
             if let heartbeatRequest {
+                consumePeerSyncRunStatus(
+                    heartbeatRequest.syncRunStatus,
+                    deviceID: heartbeatRequest.deviceID
+                )
                 _ = await canonicalConnectionRuntime.recordIncomingHeartbeat(
                     from: Self.canonicalIPhonePeerIdentity(from: heartbeatRequest),
                     sequence: CanonicalSequence(heartbeatRequest.sequenceNumber),
@@ -3212,6 +3280,70 @@ final class SecureLocalHTTPSServer {
             )
         }
         sendRouteResponse(response, on: connection)
+    }
+
+    @MainActor
+    private func consumePeerSyncRunStatus(
+        _ runStatus: LocalNetworkSyncRunStatus?,
+        deviceID: String,
+        observedAt: Date = Date()
+    ) {
+        guard let runStatus,
+              !runStatus.syncRunID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        if syncStateStore.state.activeSyncRunID == runStatus.syncRunID,
+           syncStateStore.state.syncControlPlaneState == runStatus.state,
+           !runStatus.state.isSyncProgressActive {
+            return
+        }
+
+        let accepted: Bool
+        switch runStatus.state {
+        case .completed:
+            accepted = syncStateStore.recordPush(
+                deviceID: deviceID,
+                remoteManifestHash: nil,
+                pendingUploads: syncStateStore.state.pendingUploads,
+                syncRunID: runStatus.syncRunID,
+                at: observedAt
+            )
+        case .failed:
+            accepted = syncStateStore.recordFailure(
+                deviceID: deviceID,
+                error: runStatus.errorCode ?? "peer_sync_failed",
+                failedChanges: max(1, syncStateStore.state.failedChanges),
+                pendingUploads: syncStateStore.state.pendingUploads,
+                syncRunID: runStatus.syncRunID,
+                at: observedAt
+            )
+        case .cancelled:
+            accepted = syncStateStore.recordControlPlane(
+                deviceID: deviceID,
+                syncRunID: runStatus.syncRunID,
+                state: .cancelled,
+                at: observedAt
+            )
+        case .idle:
+            accepted = false
+        case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
+             .inventoryExchanging, .planningTransfers, .transferJobsCreated,
+             .transferring, .pausedDisconnected, .resuming:
+            accepted = syncStateStore.recordControlPlane(
+                deviceID: deviceID,
+                syncRunID: runStatus.syncRunID,
+                state: runStatus.state,
+                at: observedAt
+            )
+        }
+        emitConnectionDiagnostic(
+            phase: accepted ? "peerSyncRunStatusAccepted" : "peerSyncRunStatusRejected",
+            listenerState: "ready",
+            activePort: activePort,
+            syncRunID: runStatus.syncRunID,
+            errorCode: accepted ? nil : "stale_sync_run",
+            errorCategory: "state=\(runStatus.state.rawValue)"
+        )
     }
 
     private nonisolated static func canonicalIPhonePeerIdentity(
@@ -3428,16 +3560,29 @@ final class SecureLocalHTTPSServer {
         }
 
         let syncRequest = try Self.syncJSONDecoder.decode(StudyLibrarySyncManifestRequest.self, from: requestBody)
+        guard let metadataApplyLeaseToken = syncStateStore.beginMetadataApplyLease(
+            deviceID: device.id,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        defer { syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken) }
         var applyResult = try await applyStudyLibrarySyncManifestWithoutInlineExistenceLedger(
             syncRequest.manifest,
             localDeviceID: localSyncDeviceID
         )
-        let existenceResults = applyCanonicalRecordingExistenceBridgeIfNeededSynchronously(
-            manifest: syncRequest.manifest,
-            sourceDeviceID: device.id,
-            syncRunID: nil
-        )
-        applyResult.failedChanges += existenceResults.filter { $0.action == .rollbackFailed || $0.action == .conflict }.count
+        let existenceResults: [CanonicalRecordingExistenceApplyResult] = if applyResult.failedChanges == 0, applyResult.conflictCount == 0 {
+            applyCanonicalRecordingExistenceBridgeIfNeededSynchronously(
+                manifest: syncRequest.manifest,
+                sourceDeviceID: device.id,
+                syncRunID: syncRequest.syncRunID
+            )
+        } else {
+            []
+        }
+        applyResult.failedChanges += existenceResults.filter {
+            $0.action == .blocked || $0.action == .rollbackFailed || $0.action == .conflict
+        }.count
         var manifest = makeLegacySyncManifestSynchronouslyOffMain(context: "syncApply").manifest
         let commitResult = try gitBackedStudyMetadataStore.commitManifest(
             manifest,
@@ -3447,16 +3592,21 @@ final class SecureLocalHTTPSServer {
         manifest.baseCommitID = syncRequest.manifest.baseCommitID
         manifest.commitID = commitResult.commitID
         let pendingUploadCount = syncRequest.manifest.pendingUploads.filter { $0.status != .uploaded }.count
+        guard syncStateStore.isMetadataApplyLeaseValid(
+            metadataApplyLeaseToken,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken)
         if applyResult.failedChanges == 0 {
             syncStateStore.recordPull(
                 deviceID: device.id,
                 remoteManifestHash: syncRequest.manifest.checksum,
                 remoteCommitID: syncRequest.manifest.baseCommitID
             )
-            syncStateStore.recordPush(
+            syncStateStore.recordPendingUploads(
                 deviceID: device.id,
-                remoteManifestHash: syncRequest.manifest.checksum,
-                remoteCommitID: commitResult.commitID,
                 pendingUploads: pendingUploadCount
             )
         } else {
@@ -3464,7 +3614,8 @@ final class SecureLocalHTTPSServer {
                 deviceID: device.id,
                 error: "sync_apply_partial_failure",
                 failedChanges: applyResult.failedChanges,
-                pendingUploads: pendingUploadCount
+                pendingUploads: pendingUploadCount,
+                syncRunID: syncRequest.syncRunID
             )
         }
         let statusText = pendingUploadCount > 0
@@ -3501,16 +3652,29 @@ final class SecureLocalHTTPSServer {
         }
 
         let syncRequest = try await Self.decodeSyncBodyOffMain(StudyLibrarySyncManifestRequest.self, from: requestBody)
+        guard let metadataApplyLeaseToken = syncStateStore.beginMetadataApplyLease(
+            deviceID: device.id,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        defer { syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken) }
         var applyResult = try await applyStudyLibrarySyncManifestWithoutInlineExistenceLedger(
             syncRequest.manifest,
             localDeviceID: localSyncDeviceID
         )
-        let existenceResults = await applyCanonicalRecordingExistenceBridgeIfNeeded(
-            manifest: syncRequest.manifest,
-            sourceDeviceID: device.id,
-            syncRunID: nil
-        )
-        applyResult.failedChanges += existenceResults.filter { $0.action == .rollbackFailed || $0.action == .conflict }.count
+        let existenceResults: [CanonicalRecordingExistenceApplyResult] = if applyResult.failedChanges == 0, applyResult.conflictCount == 0 {
+            await applyCanonicalRecordingExistenceBridgeIfNeeded(
+                manifest: syncRequest.manifest,
+                sourceDeviceID: device.id,
+                syncRunID: syncRequest.syncRunID
+            )
+        } else {
+            []
+        }
+        applyResult.failedChanges += existenceResults.filter {
+            $0.action == .blocked || $0.action == .rollbackFailed || $0.action == .conflict
+        }.count
         var manifest = await makeLegacySyncManifestInBackground(context: "syncApply").manifest
         let commitResult = try gitBackedStudyMetadataStore.commitManifest(
             manifest,
@@ -3520,16 +3684,21 @@ final class SecureLocalHTTPSServer {
         manifest.baseCommitID = syncRequest.manifest.baseCommitID
         manifest.commitID = commitResult.commitID
         let pendingUploadCount = syncRequest.manifest.pendingUploads.filter { $0.status != .uploaded }.count
+        guard syncStateStore.isMetadataApplyLeaseValid(
+            metadataApplyLeaseToken,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken)
         if applyResult.failedChanges == 0 {
             syncStateStore.recordPull(
                 deviceID: device.id,
                 remoteManifestHash: syncRequest.manifest.checksum,
                 remoteCommitID: syncRequest.manifest.baseCommitID
             )
-            syncStateStore.recordPush(
+            syncStateStore.recordPendingUploads(
                 deviceID: device.id,
-                remoteManifestHash: syncRequest.manifest.checksum,
-                remoteCommitID: commitResult.commitID,
                 pendingUploads: pendingUploadCount
             )
         } else {
@@ -3537,7 +3706,8 @@ final class SecureLocalHTTPSServer {
                 deviceID: device.id,
                 error: "sync_apply_partial_failure",
                 failedChanges: applyResult.failedChanges,
-                pendingUploads: pendingUploadCount
+                pendingUploads: pendingUploadCount,
+                syncRunID: syncRequest.syncRunID
             )
         }
         let statusText = pendingUploadCount > 0
@@ -3583,6 +3753,29 @@ final class SecureLocalHTTPSServer {
             remoteChanges: nil,
             rejectedChanges: nil,
             error: StudyLibrarySyncRuntimeConfiguration.disabledReason
+        )
+    }
+
+    @MainActor
+    private func rejectedSyncRunResponse(syncRunID: String?) -> StudyLibrarySyncManifestResponse {
+        emitConnectionDiagnostic(
+            phase: "syncRunUpdateRejected",
+            listenerState: "ready",
+            activePort: activePort,
+            syncRunID: syncRunID,
+            errorCode: "stale_sync_run"
+        )
+        return StudyLibrarySyncManifestResponse(
+            ok: false,
+            manifest: nil,
+            syncState: syncStateStore.state,
+            deviceStatus: nil,
+            applyResult: nil,
+            baseCommitID: nil,
+            newCommitID: nil,
+            remoteChanges: nil,
+            rejectedChanges: nil,
+            error: "stale_sync_run"
         )
     }
 
@@ -3809,11 +4002,24 @@ final class SecureLocalHTTPSServer {
     private func handleSyncApplyRequest(_ request: HTTPRequest, on connection: NWConnection) async {
         switch requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
         case .accepted(let device):
+            let requestSyncRunID = (try? Self.syncJSONDecoder.decode(
+                StudyLibrarySyncManifestRequest.self,
+                from: request.body
+            ))?.syncRunID
             do {
                 let response = try await syncApplyResponseForVerifiedDeviceInBackground(device, requestBody: request.body)
-                sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
+                sendJSON(
+                    statusCode: response.ok ? 200 : 409,
+                    reason: response.ok ? "OK" : "Conflict",
+                    body: response,
+                    on: connection
+                )
             } catch {
-                syncStateStore.recordFailure(deviceID: device.id, error: error.localizedDescription)
+                syncStateStore.recordFailure(
+                    deviceID: device.id,
+                    error: error.localizedDescription,
+                    syncRunID: requestSyncRunID
+                )
                 sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
             }
         case .rejected(let reason):
@@ -3841,7 +4047,26 @@ final class SecureLocalHTTPSServer {
                 displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
                 syncRunID: syncRunID
             )
-            syncStateStore.recordControlPlane(deviceID: device.id, syncRunID: syncRunID, state: .inventoryExchanging)
+            guard syncStateStore.recordControlPlane(
+                deviceID: device.id,
+                syncRunID: syncRunID,
+                state: .inventoryExchanging
+            ) else {
+                emitConnectionDiagnostic(
+                    phase: "syncRunUpdateRejected",
+                    listenerState: "ready",
+                    activePort: activePort,
+                    requestDeviceIDPrefix: device.idPrefix,
+                    syncRunID: syncRunID,
+                    errorCode: "stale_sync_run"
+                )
+                return LocalNetworkSyncInventoryResponse(
+                    ok: false,
+                    inventory: nil,
+                    statusExchangeEnvelope: nil,
+                    error: "stale_sync_run"
+                )
+            }
             emitConnectionDiagnostic(phase: "manualSyncRequestedInventoryObserved", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID, errorCategory: "manualSyncRequestConsumedCount=1")
             emitConnectionDiagnostic(phase: "manualSyncRequestedConsumedByPeer", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID, errorCategory: "manualSyncRequestConsumedCount=1")
             emitConnectionDiagnostic(phase: "manualSyncTickStarted", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
@@ -3870,61 +4095,82 @@ final class SecureLocalHTTPSServer {
         requestBody: Data
     ) async throws -> StudyLibrarySyncManifestResponse {
         let syncRequest = try Self.syncJSONDecoder.decode(StudyLibrarySyncManifestRequest.self, from: requestBody)
+        guard let metadataApplyLeaseToken = syncStateStore.beginMetadataApplyLease(
+            deviceID: device.id,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        defer { syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken) }
         var applyResult = try await applyStudyLibrarySyncManifestWithoutInlineExistenceLedger(
             syncRequest.manifest,
             localDeviceID: localSyncDeviceID
         )
-        let existenceResults = applyCanonicalRecordingExistenceBridgeIfNeededSynchronously(
-            manifest: syncRequest.manifest,
-            sourceDeviceID: device.id,
-            syncRunID: nil
-        )
-        applyResult.failedChanges += existenceResults.filter { $0.action == .rollbackFailed || $0.action == .conflict }.count
+        let existenceResults: [CanonicalRecordingExistenceApplyResult] = if applyResult.failedChanges == 0, applyResult.conflictCount == 0 {
+            applyCanonicalRecordingExistenceBridgeIfNeededSynchronously(
+                manifest: syncRequest.manifest,
+                sourceDeviceID: device.id,
+                syncRunID: syncRequest.syncRunID
+            )
+        } else {
+            []
+        }
+        applyResult.failedChanges += existenceResults.filter {
+            $0.action == .blocked || $0.action == .rollbackFailed || $0.action == .conflict
+        }.count
+        let applySucceeded = applyResult.failedChanges == 0 && applyResult.conflictCount == 0
+        let applyError = applySucceeded ? nil : "sync_apply_metadata_partial_failure"
         let manifest = makeLegacySyncManifestSynchronouslyOffMain(context: "syncApplyMetadata").manifest
         let pendingUploadCount = syncRequest.manifest.pendingUploads.filter { $0.status != .uploaded }.count
+        guard syncStateStore.isMetadataApplyLeaseValid(
+            metadataApplyLeaseToken,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken)
         let status = deviceConnectionStatusStore.recordSyncResult(
             deviceID: device.id,
             displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
             statusText: applyResult.summaryText,
-            error: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            error: applyError
         )
         emitConnectionDiagnostic(
-            phase: applyResult.failedChanges == 0 ? "metadataApplied" : "syncTickFailed",
+            phase: applySucceeded ? "metadataApplied" : "syncTickFailed",
             listenerState: "ready",
             activePort: activePort,
-            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            errorCode: applyError
         )
         emitConnectionDiagnostic(
-            phase: applyResult.failedChanges == 0 ? "manualSyncTickCompleted" : "manualSyncTickFailed",
+            phase: applySucceeded ? "manualSyncMetadataApplied" : "manualSyncTickFailed",
             listenerState: "ready",
             activePort: activePort,
             requestDeviceIDPrefix: device.idPrefix,
-            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            errorCode: applyError
         )
 
-        if applyResult.failedChanges == 0 {
+        if applySucceeded {
             syncStateStore.recordPull(
                 deviceID: device.id,
                 remoteManifestHash: syncRequest.manifest.checksum,
                 remoteCommitID: syncRequest.manifest.baseCommitID
             )
-            syncStateStore.recordPush(
+            syncStateStore.recordPendingUploads(
                 deviceID: device.id,
-                remoteManifestHash: syncRequest.manifest.checksum,
-                remoteCommitID: nil,
                 pendingUploads: pendingUploadCount
             )
         } else {
             syncStateStore.recordFailure(
                 deviceID: device.id,
-                error: "sync_apply_metadata_partial_failure",
-                failedChanges: applyResult.failedChanges,
-                pendingUploads: pendingUploadCount
+                error: applyError ?? "sync_apply_metadata_partial_failure",
+                failedChanges: applyResult.failedChanges + applyResult.conflictCount,
+                pendingUploads: pendingUploadCount,
+                syncRunID: syncRequest.syncRunID
             )
         }
 
         return StudyLibrarySyncManifestResponse(
-            ok: true,
+            ok: applySucceeded,
             manifest: manifest,
             syncState: syncStateStore.state,
             deviceStatus: status,
@@ -3932,72 +4178,95 @@ final class SecureLocalHTTPSServer {
             baseCommitID: syncRequest.manifest.baseCommitID,
             newCommitID: nil,
             remoteChanges: manifest.changesApproximation,
-            rejectedChanges: applyResult.failedChanges == 0 ? nil : syncRequest.manifest.changesApproximation,
-            error: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            rejectedChanges: applySucceeded ? nil : syncRequest.manifest.changesApproximation,
+            error: applyError
         )
     }
 
+    @MainActor
     func localNetworkSyncApplyMetadataResponseForVerifiedDeviceInBackground(
         _ device: PairedDevice,
         requestBody: Data
     ) async throws -> StudyLibrarySyncManifestResponse {
         let syncRequest = try await Self.decodeSyncBodyOffMain(StudyLibrarySyncManifestRequest.self, from: requestBody)
+        guard let metadataApplyLeaseToken = syncStateStore.beginMetadataApplyLease(
+            deviceID: device.id,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        defer { syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken) }
         var applyResult = try await applyStudyLibrarySyncManifestWithoutInlineExistenceLedger(
             syncRequest.manifest,
             localDeviceID: localSyncDeviceID
         )
-        scheduleCanonicalRecordingExistenceBridgeAfterMetadataResponse(
-            manifest: syncRequest.manifest,
-            sourceDeviceID: device.id,
-            syncRunID: nil
-        )
+        let existenceResults: [CanonicalRecordingExistenceApplyResult] = if applyResult.failedChanges == 0, applyResult.conflictCount == 0 {
+            await applyCanonicalRecordingExistenceBridgeIfNeeded(
+                manifest: syncRequest.manifest,
+                sourceDeviceID: device.id,
+                syncRunID: syncRequest.syncRunID
+            )
+        } else {
+            []
+        }
+        applyResult.failedChanges += existenceResults.filter {
+            $0.action == .blocked || $0.action == .rollbackFailed || $0.action == .conflict
+        }.count
+        let applySucceeded = applyResult.failedChanges == 0 && applyResult.conflictCount == 0
+        let applyError = applySucceeded ? nil : "sync_apply_metadata_partial_failure"
         let manifest = await makeLegacySyncManifestInBackground(context: "syncApplyMetadata").manifest
         let pendingUploadCount = syncRequest.manifest.pendingUploads.filter { $0.status != .uploaded }.count
-        let stateAndStatus = await MainActor.run {
+        guard syncStateStore.isMetadataApplyLeaseValid(
+            metadataApplyLeaseToken,
+            syncRunID: syncRequest.syncRunID
+        ) else {
+            return rejectedSyncRunResponse(syncRunID: syncRequest.syncRunID)
+        }
+        syncStateStore.endMetadataApplyLease(metadataApplyLeaseToken)
+        let stateAndStatus = {
             let status = deviceConnectionStatusStore.recordSyncResult(
                 deviceID: device.id,
                 displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
                 statusText: applyResult.summaryText,
-                error: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+                error: applyError
             )
-            if applyResult.failedChanges == 0 {
+            if applySucceeded {
                 syncStateStore.recordPull(
                     deviceID: device.id,
                     remoteManifestHash: syncRequest.manifest.checksum,
                     remoteCommitID: syncRequest.manifest.baseCommitID
                 )
-                syncStateStore.recordPush(
+                syncStateStore.recordPendingUploads(
                     deviceID: device.id,
-                    remoteManifestHash: syncRequest.manifest.checksum,
-                    remoteCommitID: nil,
                     pendingUploads: pendingUploadCount
                 )
             } else {
                 syncStateStore.recordFailure(
                     deviceID: device.id,
-                    error: "sync_apply_metadata_partial_failure",
-                    failedChanges: applyResult.failedChanges,
-                    pendingUploads: pendingUploadCount
+                    error: applyError ?? "sync_apply_metadata_partial_failure",
+                    failedChanges: applyResult.failedChanges + applyResult.conflictCount,
+                    pendingUploads: pendingUploadCount,
+                    syncRunID: syncRequest.syncRunID
                 )
             }
             return (state: syncStateStore.state, status: status)
-        }
+        }()
         emitConnectionDiagnostic(
-            phase: applyResult.failedChanges == 0 ? "metadataApplied" : "syncTickFailed",
+            phase: applySucceeded ? "metadataApplied" : "syncTickFailed",
             listenerState: "ready",
             activePort: activePort,
-            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            errorCode: applyError
         )
         emitConnectionDiagnostic(
-            phase: applyResult.failedChanges == 0 ? "manualSyncTickCompleted" : "manualSyncTickFailed",
+            phase: applySucceeded ? "manualSyncMetadataApplied" : "manualSyncTickFailed",
             listenerState: "ready",
             activePort: activePort,
             requestDeviceIDPrefix: device.idPrefix,
-            errorCode: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            errorCode: applyError
         )
 
         return StudyLibrarySyncManifestResponse(
-            ok: true,
+            ok: applySucceeded,
             manifest: manifest,
             syncState: stateAndStatus.state,
             deviceStatus: stateAndStatus.status,
@@ -4005,48 +4274,9 @@ final class SecureLocalHTTPSServer {
             baseCommitID: syncRequest.manifest.baseCommitID,
             newCommitID: nil,
             remoteChanges: manifest.changesApproximation,
-            rejectedChanges: applyResult.failedChanges == 0 ? nil : syncRequest.manifest.changesApproximation,
-            error: applyResult.failedChanges == 0 ? nil : "sync_apply_metadata_partial_failure"
+            rejectedChanges: applySucceeded ? nil : syncRequest.manifest.changesApproximation,
+            error: applyError
         )
-    }
-
-    private func scheduleCanonicalRecordingExistenceBridgeAfterMetadataResponse(
-        manifest: StudyLibrarySyncManifest,
-        sourceDeviceID: String,
-        syncRunID: String?
-    ) {
-        guard !manifest.recordings.isEmpty else {
-            return
-        }
-        Task(priority: .utility) { [weak self] in
-            guard let self else {
-                return
-            }
-            let results = await self.applyCanonicalRecordingExistenceBridgeIfNeeded(
-                manifest: manifest,
-                sourceDeviceID: sourceDeviceID,
-                syncRunID: syncRunID
-            )
-            let blockedCount = results.filter { $0.action == .rollbackFailed || $0.action == .conflict }.count
-            guard blockedCount > 0 else {
-                return
-            }
-            self.emitConnectionDiagnostic(
-                phase: "metadataExistenceBridgeCompletedAfterResponse",
-                listenerState: "ready",
-                activePort: self.activePort,
-                syncRunID: syncRunID,
-                errorCode: "sync_apply_metadata_existence_conflict",
-                errorMessage: "blocked=\(blockedCount)"
-            )
-            await MainActor.run {
-                self.syncStateStore.recordFailure(
-                    deviceID: sourceDeviceID,
-                    error: "sync_apply_metadata_existence_conflict",
-                    failedChanges: blockedCount
-                )
-            }
-        }
     }
 
     @MainActor
@@ -4059,11 +4289,24 @@ final class SecureLocalHTTPSServer {
             guard request.deviceID == device.id else {
                 throw NSError(domain: "RokuricsSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "device_id_mismatch"])
             }
-            syncStateStore.recordControlPlane(
+            let previousRunID = syncStateStore.state.activeSyncRunID
+            guard syncStateStore.recordControlPlane(
                 deviceID: device.id,
                 syncRunID: request.syncRunID,
                 state: .syncStartAcked
-            )
+            ) else {
+                return LocalNetworkSyncStartResponse(
+                    ok: false,
+                    syncRunID: request.syncRunID,
+                    peerDeviceID: localSyncDeviceID,
+                    ackAt: nil,
+                    disposition: "rejected_stale_run",
+                    error: "stale_sync_run"
+                )
+            }
+            let disposition = previousRunID.map { $0 != request.syncRunID } == true
+                ? "superseded_previous"
+                : "ack"
             _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "sync-start")
             emitConnectionDiagnostic(phase: "syncStartSignalReceived", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
             emitConnectionDiagnostic(phase: "syncStartAckSent", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: request.syncRunID)
@@ -4072,7 +4315,7 @@ final class SecureLocalHTTPSServer {
                 syncRunID: request.syncRunID,
                 peerDeviceID: localSyncDeviceID,
                 ackAt: Date(),
-                disposition: "ack",
+                disposition: disposition,
                 error: nil
             )
         } catch {
@@ -4097,6 +4340,10 @@ final class SecureLocalHTTPSServer {
             guard request.deviceID == device.id else {
                 throw NSError(domain: "RokuricsSync", code: 400, userInfo: [NSLocalizedDescriptionKey: "device_id_mismatch"])
             }
+            _ = deviceConnectionStatusStore.acknowledgePendingSyncStartSignal(
+                deviceID: device.id,
+                syncRunID: request.syncRunID
+            )
             syncStateStore.recordControlPlane(
                 deviceID: device.id,
                 syncRunID: request.syncRunID,
@@ -4269,17 +4516,31 @@ final class SecureLocalHTTPSServer {
                         )
                     }
                 }
-                let tempURL = try syncArtifactIncomingTempURL(artifactID: request.artifactID)
-                let tempResult = await Self.artifactFileMetadataOffMain(fileURL: tempURL)
-                let confirmedBytes = tempResult.metadata?.size ?? 0
+                let tempURL: URL?
+                if let checksum = request.checksum, let size = request.size {
+                    tempURL = try syncArtifactIncomingTempURL(
+                        artifactID: request.artifactID,
+                        checksum: checksum,
+                        size: size
+                    )
+                } else {
+                    tempURL = nil
+                }
+                let tempResult: (metadata: (size: Int64, updatedAt: Date)?, ioDurationMs: Int, mainActorLongTaskDurationMs: Int)?
+                if let tempURL {
+                    tempResult = await Self.artifactFileMetadataOffMain(fileURL: tempURL)
+                } else {
+                    tempResult = nil
+                }
+                let confirmedBytes = tempResult?.metadata?.size ?? 0
                 emitConnectionDiagnostic(
                     phase: "artifactStatusReadCompleted",
                     listenerState: "ready",
                     activePort: activePort,
                     syncRunID: request.syncRunID,
                     errorMessage: [
-                        "readHashDurationMs=\(finalResult.ioDurationMs + tempResult.ioDurationMs)",
-                        "mainActorLongTaskDurationMs=\(finalResult.mainActorLongTaskDurationMs + tempResult.mainActorLongTaskDurationMs)"
+                        "readHashDurationMs=\(finalResult.ioDurationMs + (tempResult?.ioDurationMs ?? 0))",
+                        "mainActorLongTaskDurationMs=\(finalResult.mainActorLongTaskDurationMs + (tempResult?.mainActorLongTaskDurationMs ?? 0))"
                     ].joined(separator: ",")
                 )
                 return LocalNetworkSyncArtifactStatusResponse(
@@ -4686,16 +4947,27 @@ final class SecureLocalHTTPSServer {
         return data
     }
 
-    private func syncArtifactIncomingTempURL(artifactID: String) throws -> URL {
-        try Self.syncArtifactIncomingTempURL(rootURL: recordingFileStore.libraryRootURL, artifactID: artifactID)
+    private func syncArtifactIncomingTempURL(artifactID: String, checksum: String, size: Int64) throws -> URL {
+        try Self.syncArtifactIncomingTempURL(
+            rootURL: recordingFileStore.libraryRootURL,
+            artifactID: artifactID,
+            checksum: checksum,
+            size: size
+        )
     }
 
-    private nonisolated static func syncArtifactIncomingTempURL(rootURL: URL, artifactID: String) throws -> URL {
+    private nonisolated static func syncArtifactIncomingTempURL(
+        rootURL: URL,
+        artifactID: String,
+        checksum: String,
+        size: Int64
+    ) throws -> URL {
         try LocalNetworkSyncArtifactID.validate(artifactID)
+        let version = sha256Hex(Data("\(checksum.lowercased()):\(size)".utf8)).prefix(20)
         return rootURL
             .appendingPathComponent("Sync", isDirectory: true)
             .appendingPathComponent("Incoming", isDirectory: true)
-            .appendingPathComponent("\(artifactID).part", isDirectory: false)
+            .appendingPathComponent("\(artifactID)-\(version).part", isDirectory: false)
     }
 
     private func performArtifactPutIO(
@@ -4736,7 +5008,12 @@ final class SecureLocalHTTPSServer {
             configuration: verificationConfiguration
         )
         guard tempChecksum.sha256 == request.checksum else {
-            throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
+            try? FileManager.default.removeItem(at: writeResult.tempURL)
+            throw NSError(
+                domain: "RokuricsSync",
+                code: 422,
+                userInfo: [NSLocalizedDescriptionKey: "sync_artifact_checksum_mismatch"]
+            )
         }
 
         let existingChecksum = await checksumRuntime.checksum(
@@ -4746,13 +5023,19 @@ final class SecureLocalHTTPSServer {
             cacheDirectoryURL: cacheDirectoryURL,
             configuration: configuration
         ).sha256
-        let disposition = try await Self.applySyncedArtifactOnQueue(
-            tempURL: writeResult.tempURL,
-            artifactURL: artifactURL,
-            checksum: request.checksum,
-            existingChecksum: existingChecksum,
-            writeQueue: writeQueue
-        )
+        let disposition: String
+        do {
+            disposition = try await Self.applySyncedArtifactOnQueue(
+                tempURL: writeResult.tempURL,
+                artifactURL: artifactURL,
+                checksum: request.checksum,
+                existingChecksum: existingChecksum,
+                writeQueue: writeQueue
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: writeResult.tempURL)
+            throw error
+        }
         let durationMs = max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
         return (
             disposition: disposition,
@@ -4803,7 +5086,12 @@ final class SecureLocalHTTPSServer {
             throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
         }
         let isChunked = request.offset != nil || request.chunkSize != nil || request.totalSize != nil || request.isFinalChunk != nil
-        let tempURL = try syncArtifactIncomingTempURL(rootURL: rootURL, artifactID: request.artifactID)
+        let tempURL = try syncArtifactIncomingTempURL(
+            rootURL: rootURL,
+            artifactID: request.artifactID,
+            checksum: request.checksum,
+            size: request.size
+        )
         if isChunked {
             let offset = request.offset ?? 0
             let chunkSize = request.chunkSize ?? data.count
@@ -4815,8 +5103,15 @@ final class SecureLocalHTTPSServer {
                 throw LocalNetworkSyncArtifactValidationError.unsupportedArtifactKind
             }
             try FileManager.default.createDirectory(at: tempURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if offset == 0, FileManager.default.fileExists(atPath: tempURL.path) {
-                try FileManager.default.removeItem(at: tempURL)
+            if offset == 0 {
+                try removeStaleArtifactTemps(
+                    directoryURL: tempURL.deletingLastPathComponent(),
+                    artifactID: request.artifactID,
+                    keeping: tempURL
+                )
+                if FileManager.default.fileExists(atPath: tempURL.path) {
+                    try FileManager.default.removeItem(at: tempURL)
+                }
             }
             if offset > 0 {
                 guard let tempSize = LocalNetworkSyncArtifactFileService.metadata(for: tempURL)?.size,
@@ -4855,6 +5150,20 @@ final class SecureLocalHTTPSServer {
         try FileManager.default.createDirectory(at: tempURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: tempURL, options: .atomic)
         return (tempURL: tempURL, disposition: nil, confirmedBytes: Int64(data.count), didFinalize: true)
+    }
+
+    private nonisolated static func removeStaleArtifactTemps(
+        directoryURL: URL,
+        artifactID: String,
+        keeping currentURL: URL
+    ) throws {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directoryURL.path)) ?? []
+        for name in names where name == "\(artifactID).part" || name.hasPrefix("\(artifactID)-") {
+            let candidate = directoryURL.appendingPathComponent(name, isDirectory: false)
+            if candidate.standardizedFileURL != currentURL.standardizedFileURL {
+                try? FileManager.default.removeItem(at: candidate)
+            }
+        }
     }
 
     private nonisolated static func applySyncedArtifactOnQueue(
@@ -5044,14 +5353,33 @@ final class SecureLocalHTTPSServer {
     private func handleLocalNetworkSyncApplyMetadataRequest(_ request: HTTPRequest, on connection: NWConnection) async {
         switch await requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
         case .accepted(let device):
+            let decodedSyncRequest = try? await Self.decodeSyncBodyOffMain(
+                StudyLibrarySyncManifestRequest.self,
+                from: request.body
+            )
+            let requestSyncRunID = decodedSyncRequest?.syncRunID
             do {
                 emitConnectionDiagnostic(phase: "uploadActionStarted", listenerState: "ready", activePort: activePort)
                 let response = try await localNetworkSyncApplyMetadataResponseForVerifiedDeviceInBackground(device, requestBody: request.body)
-                sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
-                emitConnectionDiagnostic(phase: "uploadActionCompleted", listenerState: "ready", activePort: activePort)
+                sendJSON(
+                    statusCode: response.ok ? 200 : 409,
+                    reason: response.ok ? "OK" : "Conflict",
+                    body: response,
+                    on: connection
+                )
+                emitConnectionDiagnostic(
+                    phase: response.ok ? "uploadActionCompleted" : "uploadActionFailed",
+                    listenerState: "ready",
+                    activePort: activePort,
+                    errorCode: response.ok ? nil : (response.error ?? "sync_apply_metadata_partial_failure")
+                )
             } catch {
                 await MainActor.run {
-                    syncStateStore.recordFailure(deviceID: device.id, error: error.localizedDescription)
+                    syncStateStore.recordFailure(
+                        deviceID: device.id,
+                        error: error.localizedDescription,
+                        syncRunID: requestSyncRunID
+                    )
                 }
                 emitConnectionDiagnostic(phase: "uploadActionFailed", listenerState: "ready", activePort: activePort, errorCode: "sync_apply_metadata_failed", errorMessage: error.localizedDescription)
                 sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
@@ -5168,6 +5496,23 @@ final class SecureLocalHTTPSServer {
             activePort: activePort,
             errorCode: response.statusCode == 200 ? nil : "pairing_code_rejected",
             errorMessage: response.statusCode == 200 ? nil : response.reason
+        )
+        sendRouteResponse(response, on: connection)
+    }
+
+    @MainActor
+    private func handlePairConfirmationRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        let response = pairingBootstrapRouteHandler.pairingConfirmationResponse(
+            method: request.method,
+            path: request.path,
+            headers: request.headers,
+            body: request.body
+        )
+        emitConnectionDiagnostic(
+            phase: response.statusCode == 200 ? "pairConfirmationReceived" : "pairConfirmationRejected",
+            listenerState: "ready",
+            activePort: activePort,
+            errorCode: response.statusCode == 200 ? nil : "pairing_confirmation_failed"
         )
         sendRouteResponse(response, on: connection)
     }
@@ -5451,13 +5796,13 @@ final class SecureLocalHTTPSServer {
             )
             let folderRevisionHashesByID = Dictionary(
                 manifest.folders.map { folder in
-                    (folder.folderID, LocalNetworkSyncMetadataHash.hash(folder))
+                    (folder.folderID, folder.localNetworkFolderBusinessSignatureV2)
                 },
                 uniquingKeysWith: { _, latest in latest }
             )
             let studyItemRevisionHashesByID = Dictionary(
                 manifest.items.map { item in
-                    (item.itemID, LocalNetworkSyncMetadataHash.hash(item))
+                    (item.itemID, item.localNetworkStudyItemBusinessSignatureV2)
                 },
                 uniquingKeysWith: { _, latest in latest }
             )
@@ -5674,8 +6019,10 @@ final class SecureLocalHTTPSServer {
             errorMessage: "count=\(input.diagnostics.mainActorManifestBuildAttemptCount)"
         )
         let cacheDirectoryURL = canonicalChecksumCacheDirectory()
-        var recordings: [LocalNetworkSyncRecordingEntry] = []
-        recordings.reserveCapacity(inboxItems.count)
+        var recordingsByID = Dictionary(
+            manifest.recordings.map { ($0.recordingID, $0) },
+            uniquingKeysWith: { _, current in current }
+        )
         for item in inboxItems {
             let metadataHash = recordingMetadataHashesByID[item.id]
             let audioURL = item.audioRelativePath.flatMap { relativePath in
@@ -5730,30 +6077,32 @@ final class SecureLocalHTTPSServer {
                     audioRelativePathSet: item.audioRelativePath != nil
                 )
             }
-            recordings.append(
-                LocalNetworkSyncRecordingEntry(
-                    recordingID: item.id,
-                    metadataHash: metadataHash,
-                    audioAvailable: item.hasAudio,
-                    audioChecksum: audioChecksum,
-                    audioSize: audioSize,
-                    uploadLedgerState: nil,
-                    receiveStatus: item.receiveStatus,
-                    processingStatus: item.hasAudio ? "notStarted" : "awaitingAudio",
-                    updatedAt: item.deletedAt ?? item.receivedAt,
-                    deleted: item.isDeleted,
-                    title: item.title,
-                    createdAt: item.receivedAt,
-                    tombstone: item.isDeleted,
-                    audioAvailability: item.hasAudio ? .local : .missing,
-                    uploadStatus: nil,
-                    transcriptionStatus: item.transcriptionStatus,
-                    noteStatus: item.noteStatus,
-                    sourceDeviceID: item.sourceDeviceID,
-                    artifactRefs: nil,
-                    audioLogicalPathToken: item.audioRelativePath
-                )
+            let metadataBase = recordingsByID[item.id]
+            recordingsByID[item.id] = LocalNetworkSyncRecordingEntry(
+                recordingID: item.id,
+                metadataHash: metadataBase?.metadataHash ?? metadataHash,
+                audioAvailable: item.hasAudio,
+                audioChecksum: audioChecksum,
+                audioSize: audioSize,
+                uploadLedgerState: metadataBase?.uploadLedgerState,
+                receiveStatus: item.receiveStatus ?? metadataBase?.receiveStatus,
+                processingStatus: item.hasAudio ? "notStarted" : (metadataBase?.processingStatus ?? "awaitingAudio"),
+                updatedAt: metadataBase?.updatedAt ?? item.deletedAt ?? item.receivedAt,
+                deleted: metadataBase?.deleted ?? item.isDeleted,
+                title: metadataBase?.title ?? item.title,
+                createdAt: metadataBase?.createdAt ?? item.receivedAt,
+                tombstone: metadataBase?.tombstone ?? item.isDeleted,
+                audioAvailability: item.hasAudio ? .local : .missing,
+                uploadStatus: metadataBase?.uploadStatus,
+                transcriptionStatus: item.transcriptionStatus ?? metadataBase?.transcriptionStatus,
+                noteStatus: item.noteStatus ?? metadataBase?.noteStatus,
+                sourceDeviceID: metadataBase?.sourceDeviceID ?? item.sourceDeviceID,
+                artifactRefs: metadataBase?.artifactRefs,
+                audioLogicalPathToken: item.hasAudio ? item.audioRelativePath : nil
             )
+        }
+        var recordings = recordingsByID.values.sorted {
+            $0.recordingID.localizedStandardCompare($1.recordingID) == .orderedAscending
         }
         mergeCanonicalRecordingExistenceRecords(input.existenceRecords, into: &recordings, syncRunID: shadowSyncRunID)
         let folders = manifest.folders.map { folder in
@@ -7365,7 +7714,7 @@ final class SecureLocalHTTPSServer {
             }
             return CanonicalShadowLegacyObjectFact(
                 objectID: recordingID,
-                legacyMetadataHash: LocalNetworkSyncMetadataHash.hash(item),
+                legacyMetadataHash: item.localNetworkRecordingBusinessSignatureV2,
                 hasStudyItem: true
             )
         }
@@ -8275,7 +8624,9 @@ final class SecureLocalHTTPSServer {
             recordCanonicalExistenceDiagnostics(result.diagnostics)
             recordCanonicalExistenceDiagnostics([
                 CanonicalSyncRuntimeDiagnostic(
-                    kind: result.action == .written || result.action == .noOp ? .canonicalApplyRuntimeActionCompleted : .canonicalApplyRuntimeActionFailed,
+                    kind: result.action == .written || result.action == .updated || result.action == .tombstoneApplied || result.action == .noOp
+                        ? .canonicalApplyRuntimeActionCompleted
+                        : .canonicalApplyRuntimeActionFailed,
                     syncRunID: syncRunID,
                     mode: canonicalApplyRuntimeConfiguration.mode.syncDiagnosticMode,
                     objectID: result.objectID,
@@ -8409,7 +8760,9 @@ final class SecureLocalHTTPSServer {
             recordCanonicalExistenceDiagnostics(result.diagnostics)
             recordCanonicalExistenceDiagnostics([
                 CanonicalSyncRuntimeDiagnostic(
-                    kind: result.action == .written || result.action == .noOp ? .canonicalApplyRuntimeActionCompleted : .canonicalApplyRuntimeActionFailed,
+                    kind: result.action == .written || result.action == .updated || result.action == .tombstoneApplied || result.action == .noOp
+                        ? .canonicalApplyRuntimeActionCompleted
+                        : .canonicalApplyRuntimeActionFailed,
                     syncRunID: syncRunID,
                     mode: canonicalApplyRuntimeConfiguration.mode.syncDiagnosticMode,
                     objectID: result.objectID,
@@ -8674,12 +9027,41 @@ final class SecureLocalHTTPSServer {
     }()
 }
 
+enum CanonicalRecordingAudioProofComparison: Equatable {
+    case same
+    case diverged
+    case unknown
+
+    static func compare(
+        localHash: String?,
+        localByteSize: Int64?,
+        remoteHash: String?,
+        remoteByteSize: Int64?
+    ) -> CanonicalRecordingAudioProofComparison {
+        guard let localHash = normalizedHash(localHash),
+              let localByteSize,
+              let remoteHash = normalizedHash(remoteHash),
+              let remoteByteSize else {
+            return .unknown
+        }
+        return localHash == remoteHash && localByteSize == remoteByteSize ? .same : .diverged
+    }
+
+    private static func normalizedHash(_ value: String?) -> String? {
+        value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .nilIfEmpty
+    }
+}
+
 enum CanonicalRecordingExistenceApplyAction: String, Codable, Equatable {
     case blocked
     case diagnosticsOnly
     case noCommit
     case written
     case updated
+    case tombstoneApplied
     case noOp
     case conflict
     case rollbackFailed
@@ -8779,6 +9161,7 @@ protocol MacCanonicalRecordingExistenceApplyPort {
     func checkpoint(for objectID: String) throws -> CanonicalRecordingExistenceRollbackCheckpoint
     func readRecord(objectID: String) throws -> CanonicalRecordingMetadataOnlyReceiveRecord?
     func writeRecord(_ record: CanonicalRecordingMetadataOnlyReceiveRecord) throws
+    func deleteRecord(objectID: String) throws
     func rollback(_ checkpoint: CanonicalRecordingExistenceRollbackCheckpoint) throws
     func loadRecords() throws -> [CanonicalRecordingMetadataOnlyReceiveRecord]
 }
@@ -8805,6 +9188,72 @@ struct CanonicalRecordingManifestApplyBridge {
         }
 
         return recordings.map { recording in
+            let objectID = recording.recordingID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !objectID.isEmpty else {
+                return result(
+                    objectID: recording.recordingID,
+                    action: .blocked,
+                    state: .unsupported,
+                    reason: "missingObjectID",
+                    metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                    byteCount: recording.audioSize,
+                    syncRunID: syncRunID
+                )
+            }
+
+            if recording.deleted || recording.tombstone == true {
+                switch configuration.mode {
+                case .disabled, .blocked:
+                    return result(
+                        objectID: objectID,
+                        action: .blocked,
+                        state: .tombstoned,
+                        reason: configuration.mode.rawValue,
+                        metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                        byteCount: recording.audioSize,
+                        syncRunID: syncRunID
+                    )
+                case .diagnosticsOnly:
+                    return result(
+                        objectID: objectID,
+                        action: .diagnosticsOnly,
+                        state: .tombstoned,
+                        reason: "wouldRemoveDerivedExistenceRecord",
+                        metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                        byteCount: recording.audioSize,
+                        syncRunID: syncRunID
+                    )
+                case .noCommit:
+                    return result(
+                        objectID: objectID,
+                        action: .noCommit,
+                        state: .tombstoned,
+                        reason: "tombstoneCommitSuppressed",
+                        metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                        byteCount: recording.audioSize,
+                        syncRunID: syncRunID
+                    )
+                case .metadataOnlyBridge, .testRootApply, .productionRootApply:
+                    guard configuration.canWriteMetadataOnlyRecord else {
+                        return result(
+                            objectID: objectID,
+                            action: .blocked,
+                            state: .tombstoned,
+                            reason: "policyBlocked",
+                            metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                            byteCount: recording.audioSize,
+                            syncRunID: syncRunID
+                        )
+                    }
+                    return applyTombstone(
+                        objectID: objectID,
+                        metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
+                        byteCount: recording.audioSize,
+                        syncRunID: syncRunID
+                    )
+                }
+            }
+
             guard let record = CanonicalRecordingMetadataOnlyReceiveRecord(
                 manifestRecording: recording,
                 sourceDeviceID: sourceDeviceID
@@ -8816,19 +9265,6 @@ struct CanonicalRecordingManifestApplyBridge {
                     reason: "missingMetadataHash",
                     metadataHashPrefix: recording.metadataHash.map { String($0.prefix(12)) },
                     byteCount: recording.audioSize,
-                    syncRunID: syncRunID
-                )
-            }
-
-            guard recording.deleted == false,
-                  recording.tombstone != true else {
-                return result(
-                    objectID: record.objectID,
-                    action: .blocked,
-                    state: .tombstoned,
-                    reason: "tombstoned",
-                    metadataHashPrefix: record.metadataHashPrefix,
-                    byteCount: record.declaredAudioByteSize,
                     syncRunID: syncRunID
                 )
             }
@@ -8889,15 +9325,19 @@ struct CanonicalRecordingManifestApplyBridge {
             let existingRecord = try port.readRecord(objectID: record.objectID)
             if let existing = existingRecord {
                 if existing.audioAvailable {
-                    let sameHash = existing.audioHash != nil
-                        && existing.audioHash == record.declaredAudioHash
-                    let sameSize = existing.audioByteSize != nil
-                        && existing.audioByteSize == record.declaredAudioByteSize
+                    let comparison = CanonicalRecordingAudioProofComparison.compare(
+                        localHash: existing.audioHash,
+                        localByteSize: existing.audioByteSize,
+                        remoteHash: record.declaredAudioHash,
+                        remoteByteSize: record.declaredAudioByteSize
+                    )
                     return result(
                         objectID: record.objectID,
-                        action: sameHash && sameSize ? .noOp : .conflict,
-                        state: sameHash && sameSize ? .audioHashSizeMatched : .audioConflict,
-                        reason: sameHash && sameSize ? "existingAudioSameHashSize" : "existingAudioConflict",
+                        action: comparison == .diverged ? .conflict : .noOp,
+                        state: comparison == .same ? .audioHashSizeMatched : (comparison == .diverged ? .audioConflict : .audioAvailable),
+                        reason: comparison == .same
+                            ? "existingAudioSameHashSize"
+                            : (comparison == .diverged ? "existingAudioConflict" : "existingAudioProofUnknownPreserved"),
                         metadataHashPrefix: record.metadataHashPrefix,
                         byteCount: record.declaredAudioByteSize,
                         syncRunID: syncRunID
@@ -8986,6 +9426,89 @@ struct CanonicalRecordingManifestApplyBridge {
         }
     }
 
+    private func applyTombstone(
+        objectID: String,
+        metadataHashPrefix: String?,
+        byteCount: Int64?,
+        syncRunID: String?
+    ) -> CanonicalRecordingExistenceApplyResult {
+        do {
+            guard try port.readRecord(objectID: objectID) != nil else {
+                return result(
+                    objectID: objectID,
+                    action: .noOp,
+                    state: .tombstoned,
+                    reason: "derivedExistenceRecordAlreadyAbsent",
+                    metadataHashPrefix: metadataHashPrefix,
+                    byteCount: byteCount,
+                    syncRunID: syncRunID
+                )
+            }
+            let checkpoint = try port.checkpoint(for: objectID)
+            do {
+                try port.deleteRecord(objectID: objectID)
+                guard try port.readRecord(objectID: objectID) == nil else {
+                    try port.rollback(checkpoint)
+                    return result(
+                        objectID: objectID,
+                        action: .blocked,
+                        state: .tombstoned,
+                        reason: "tombstonePostconditionFailedRolledBack",
+                        metadataHashPrefix: metadataHashPrefix,
+                        byteCount: byteCount,
+                        syncRunID: syncRunID,
+                        checkpoint: checkpoint
+                    )
+                }
+                return result(
+                    objectID: objectID,
+                    action: .tombstoneApplied,
+                    state: .tombstoned,
+                    reason: "derivedExistenceRecordRemoved",
+                    metadataHashPrefix: metadataHashPrefix,
+                    byteCount: byteCount,
+                    syncRunID: syncRunID,
+                    checkpoint: checkpoint
+                )
+            } catch {
+                do {
+                    try port.rollback(checkpoint)
+                    return result(
+                        objectID: objectID,
+                        action: .blocked,
+                        state: .tombstoned,
+                        reason: "tombstoneWriteFailedRolledBack",
+                        metadataHashPrefix: metadataHashPrefix,
+                        byteCount: byteCount,
+                        syncRunID: syncRunID,
+                        checkpoint: checkpoint
+                    )
+                } catch {
+                    return result(
+                        objectID: objectID,
+                        action: .rollbackFailed,
+                        state: .tombstoned,
+                        reason: "tombstoneRollbackFailed",
+                        metadataHashPrefix: metadataHashPrefix,
+                        byteCount: byteCount,
+                        syncRunID: syncRunID,
+                        checkpoint: checkpoint
+                    )
+                }
+            }
+        } catch {
+            return result(
+                objectID: objectID,
+                action: .blocked,
+                state: .tombstoned,
+                reason: "tombstonePortFailed",
+                metadataHashPrefix: metadataHashPrefix,
+                byteCount: byteCount,
+                syncRunID: syncRunID
+            )
+        }
+    }
+
     private func result(
         objectID: String,
         action: CanonicalRecordingExistenceApplyAction,
@@ -9042,6 +9565,8 @@ struct CanonicalRecordingManifestApplyBridge {
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalExistenceMetadataOnlyRecordWritten, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: reason))
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalRecordingExistenceMetadataOnlyUpdated, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: reason))
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalManifestRecordingsApplyCompleted, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: "updated"))
+        case .tombstoneApplied:
+            diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalManifestRecordingsApplyCompleted, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: reason))
         case .noOp:
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalExistenceMetadataOnlyRecordNoOp, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: reason))
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalRecordingExistenceMetadataOnlyNoOp, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: reason))
@@ -9066,7 +9591,7 @@ struct CanonicalRecordingManifestApplyBridge {
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalExistenceManifestRecordingsConsumed, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: action.rawValue))
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalManifestRecordingsApplyNoOp, syncRunID: syncRunID, mode: mode, objectID: objectID, hashPrefix: metadataHashPrefix, count: byteCount.map(Int.init), detail: action.rawValue))
         }
-        if checkpoint != nil, action == .written || action == .updated {
+        if checkpoint != nil, action == .written || action == .updated || action == .tombstoneApplied {
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalRecordingExistenceRollbackStarted, syncRunID: syncRunID, mode: mode, objectID: objectID, detail: "checkpointCreated"))
             diagnostics.append(CanonicalSyncRuntimeDiagnostic(kind: .canonicalExistenceApplyBridgeRollbackCompleted, syncRunID: syncRunID, mode: mode, objectID: objectID, detail: "checkpointCreated"))
         } else if checkpoint != nil, action == .blocked {
@@ -9143,6 +9668,16 @@ final class MacCanonicalRecordingExistenceLedgerPort: MacCanonicalRecordingExist
             throw LedgerError.unsafeDestination
         }
         try encoder.encode(record).write(to: url, options: .atomic)
+    }
+
+    func deleteRecord(objectID: String) throws {
+        let url = try recordURL(for: objectID)
+        guard isInsideRoot(url) else {
+            throw LedgerError.unsafeDestination
+        }
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
     }
 
     func rollback(_ checkpoint: CanonicalRecordingExistenceRollbackCheckpoint) throws {
@@ -9222,6 +9757,8 @@ struct MacCanonicalRecordingExistenceInventoryMergeResult {
 }
 
 enum MacCanonicalRecordingExistenceInventoryMerger {
+    private static let maximumDetailedConflictDiagnostics = 16
+
     static func merge(
         records: [CanonicalRecordingMetadataOnlyReceiveRecord],
         into recordings: [LocalNetworkSyncRecordingEntry],
@@ -9230,36 +9767,45 @@ enum MacCanonicalRecordingExistenceInventoryMerger {
         var byID = Dictionary(recordings.map { ($0.recordingID, $0) }, uniquingKeysWith: { existing, _ in existing })
         var diagnostics: [CanonicalSyncRuntimeDiagnostic] = []
         let mode = CanonicalSyncRuntimeMode.diagnosticsOnly
+        var metadataOnlyMergedCount = 0
+        var audioSameCount = 0
+        var audioUnknownCount = 0
+        var audioConflictCount = 0
 
         for record in records {
             if var existing = byID[record.objectID] {
+                // The current study manifest is authoritative for object metadata and
+                // tombstones. A stale derived existence record must never resurrect it.
+                if existing.deleted || existing.tombstone == true {
+                    continue
+                }
                 if existing.audioAvailable {
-                    let sameHash = existing.audioChecksum != nil
-                        && existing.audioChecksum == record.declaredAudioHash
-                    let sameSize = existing.audioSize != nil
-                        && existing.audioSize == record.declaredAudioByteSize
-                    diagnostics.append(
-                        CanonicalSyncRuntimeDiagnostic(
-                            kind: sameHash && sameSize ? .canonicalExistenceAudioSameNoOp : .canonicalExistenceAudioConflict,
-                            syncRunID: syncRunID,
-                            mode: mode,
-                            objectID: record.objectID,
-                            hashPrefix: record.declaredAudioHash,
-                            count: record.declaredAudioByteSize.map(Int.init),
-                            detail: sameHash && sameSize ? "existingInboxAudioWins" : "existingInboxAudioDiverged"
-                        )
-                    )
-                    diagnostics.append(
-                        CanonicalSyncRuntimeDiagnostic(
-                            kind: sameHash && sameSize ? .canonicalRecordingExistenceAudioSameNoOp : .canonicalRecordingExistenceInventoryConflict,
-                            syncRunID: syncRunID,
-                            mode: mode,
-                            objectID: record.objectID,
-                            hashPrefix: record.declaredAudioHash,
-                            count: record.declaredAudioByteSize.map(Int.init),
-                            detail: sameHash && sameSize ? "existingInboxAudioWins" : "existingInboxAudioDiverged"
-                        )
-                    )
+                    switch CanonicalRecordingAudioProofComparison.compare(
+                        localHash: existing.audioChecksum,
+                        localByteSize: existing.audioSize,
+                        remoteHash: record.declaredAudioHash,
+                        remoteByteSize: record.declaredAudioByteSize
+                    ) {
+                    case .same:
+                        audioSameCount += 1
+                    case .unknown:
+                        audioUnknownCount += 1
+                    case .diverged:
+                        audioConflictCount += 1
+                        if audioConflictCount <= maximumDetailedConflictDiagnostics {
+                            diagnostics.append(
+                                CanonicalSyncRuntimeDiagnostic(
+                                    kind: .canonicalRecordingExistenceInventoryConflict,
+                                    syncRunID: syncRunID,
+                                    mode: mode,
+                                    objectID: record.objectID,
+                                    hashPrefix: record.declaredAudioHash,
+                                    count: record.declaredAudioByteSize.map(Int.init),
+                                    detail: "existingInboxAudioDiverged"
+                                )
+                            )
+                        }
+                    }
                     continue
                 }
                 existing.metadataHash = existing.metadataHash ?? record.metadataHash
@@ -9295,24 +9841,50 @@ enum MacCanonicalRecordingExistenceInventoryMerger {
                     audioLogicalPathToken: nil
                 )
             }
-            diagnostics.append(
-                CanonicalSyncRuntimeDiagnostic(
-                    kind: .canonicalExistenceManifestRecordingsConsumed,
-                    syncRunID: syncRunID,
-                    mode: mode,
-                    objectID: record.objectID,
-                    hashPrefix: record.metadataHashPrefix,
-                    detail: "inventoryMetadataOnly"
-                )
-            )
+            metadataOnlyMergedCount += 1
+        }
+
+        if metadataOnlyMergedCount > 0 {
             diagnostics.append(
                 CanonicalSyncRuntimeDiagnostic(
                     kind: .canonicalRecordingExistenceInventoryMerged,
                     syncRunID: syncRunID,
                     mode: mode,
-                    objectID: record.objectID,
-                    hashPrefix: record.metadataHashPrefix,
-                    detail: "metadataOnlyAudioUnavailable"
+                    count: metadataOnlyMergedCount,
+                    detail: "metadataOnlyAudioUnavailableAggregate"
+                )
+            )
+        }
+        if audioSameCount > 0 {
+            diagnostics.append(
+                CanonicalSyncRuntimeDiagnostic(
+                    kind: .canonicalExistenceAudioSameNoOp,
+                    syncRunID: syncRunID,
+                    mode: mode,
+                    count: audioSameCount,
+                    detail: "existingInboxAudioWinsAggregate"
+                )
+            )
+        }
+        if audioUnknownCount > 0 {
+            diagnostics.append(
+                CanonicalSyncRuntimeDiagnostic(
+                    kind: .canonicalExistencePeerUnknownDeferred,
+                    syncRunID: syncRunID,
+                    mode: mode,
+                    count: audioUnknownCount,
+                    detail: "existingInboxAudioProofNotComparableAggregate"
+                )
+            )
+        }
+        if audioConflictCount > 0 {
+            diagnostics.append(
+                CanonicalSyncRuntimeDiagnostic(
+                    kind: .canonicalExistenceAudioConflict,
+                    syncRunID: syncRunID,
+                    mode: mode,
+                    count: audioConflictCount,
+                    detail: "existingInboxAudioDivergedAggregate,detailedCount=\(min(audioConflictCount, maximumDetailedConflictDiagnostics))"
                 )
             )
         }

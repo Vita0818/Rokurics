@@ -33,6 +33,7 @@ final class RequestVerifier {
     }
 
     private let pairedDeviceProvider: @MainActor (String) -> PairedDevice?
+    private let ensureCredentialPersisted: @MainActor (String, Date) -> Bool
     private let markDeviceSeen: @MainActor (String, Date) -> Void
     private var recentNoncesByDeviceID: [String: [String: Date]] = [:]
     private(set) var lastTrace: RequestVerificationTrace?
@@ -150,8 +151,17 @@ final class RequestVerifier {
         )
     ]
 
-    init(pairedDeviceStore: PairedDeviceStore) {
-        self.pairedDeviceProvider = { pairedDeviceStore.device(for: $0) }
+    init(pairedDeviceStore: PairedDeviceStore, pairingManager: PairingManager? = nil) {
+        self.pairedDeviceProvider = { deviceID in
+            pairedDeviceStore.device(for: deviceID)
+                ?? pairingManager?.pendingDeviceForCredentialProof(deviceID: deviceID)
+        }
+        self.ensureCredentialPersisted = { deviceID, date in
+            if pairedDeviceStore.device(for: deviceID) != nil {
+                return true
+            }
+            return pairingManager?.confirmPairingByCredentialProof(deviceID: deviceID, now: date) == true
+        }
         self.markDeviceSeen = { deviceID, date in
             pairedDeviceStore.markSeen(deviceID: deviceID, at: date)
         }
@@ -162,6 +172,7 @@ final class RequestVerifier {
         markDeviceSeen: @escaping @MainActor (String, Date) -> Void = { _, _ in }
     ) {
         self.pairedDeviceProvider = pairedDeviceProvider
+        self.ensureCredentialPersisted = { _, _ in true }
         self.markDeviceSeen = markDeviceSeen
     }
 
@@ -306,6 +317,11 @@ final class RequestVerifier {
             return reject("signature_mismatch", trace: trace)
         }
         UploadFlightRecorder.record(side: .Mac, stage: "requestVerifierHMACAccepted", traceID: traceID, recordingID: headerRecordingID, eventResult: "success", httpPath: path, verifierResult: "hmac_accepted")
+
+        guard ensureCredentialPersisted(deviceID, now) else {
+            UploadFlightRecorder.record(side: .Mac, stage: "requestVerifierDeviceRejected", traceID: traceID, recordingID: headerRecordingID, eventResult: "fail", reasonCode: "pairing_persistence_failed", httpPath: path, verifierResult: "rejected")
+            return reject("pairing_persistence_failed", trace: trace)
+        }
 
         rememberNonce(nonce, for: deviceID, now: now)
         markDeviceSeen(deviceID, now)

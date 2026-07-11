@@ -1263,3 +1263,42 @@ BODY_SHA256
 - 笔记/AI：运行 `LongProcessingTests`、`ChatFeatureTests`、note generation provider 相关测试；手动验证 provider 配置错误和成功路径。
 - 同步：运行两端 sync tests；手动验证 metadata-only sync 不删音频、artifact download 不含 audio、peer unknown deferred、retry drainer 到期恢复、Mac 手动同步 pending/ack/timeout。
 - UI：运行对应 scheme UI tests；关键 flow 仍需手动验证。
+
+## 连接/同步/内容传输新增不变量（2026-07-10）
+
+- 不得在仍有 content action、unresolved conflict、partial apply、blocked/rollback failure 时写同步成功。
+- 不得把 artifact offset 到达文件大小、旧 upload ledger completed、metadata-only receive record 或 UI uploaded 当作 peer 文件存在证明。
+- 不得复用 targetDeviceID 不匹配的 recording upload job/session/transfer ledger。
+- 不得让 pairing 在 iPhone credential 安全持久化前由 Mac 单边最终提交；proof commit 也必须先确保 Mac durable persistence 成功。
+- 不得在收到 sync-start response 时删除 Mac pending signal；只能由匹配 ACK 或明确 timeout 清理。
+- 不得在 status transport ACK 前删除 facts/request，或跨 sender incarnation 使用同一个 sequence 判重空间。
+- 不得让 fallback metadata 每轮以当前时间生成业务 `updatedAt`。
+- 不得让已取消的 progress task 在 final state 之后继续写 transfer job。
+- artifact/audio resume 必须绑定当前 checksum/size 内容合同；校验失败的 full-size temp/session 必须清理或过期重建。
+- Release 默认保持 old kernel；改变默认 runtime owner 需要独立审查、迁移证据、回滚方案和真机验证。
+- 不把所有 listener failure 都当成端口占用；只有 `EADDRINUSE` 才能把候选端口从 N 推进到 N+1。
+- 不在 listener ready 之前发布 pairing code，也不让复制文本中的端口与 `activePort` 不一致。
+- 不在 iPhone 粘贴配对信息后重新写死 8787；连接、心跳、同步和上传必须使用已保存的动态 paired port。
+- 不让 Mac 重启后丢失已复制给 iPhone 的动态 receiver port。
+
+## V2 业务签名与同步收敛不变量（2026-07-11）
+
+- 不得把 `updatedAt`/`modifiedAt`、本机路径、duration、receive/processing/upload/conflict/UI 状态或派生 membership 加入 `LocalNetworkBusinessSignatureV2`。业务等价与业务时钟必须保持两条独立判断轴。
+- 不得让任意 custom property 自动进入 V2 签名或 peer merge。新增 key 必须进入显式白名单，评估签名版本/旧端兼容，并用 iPhone/Mac 同 fixture 测试锁定。
+- 不得移除 `ln-business-v2:` 版本前缀、sorted-key 编码、Unicode/tag/集合归一化，或让双端各自维护不对称的 V2 projection。
+- 不得用 receive time、processing completion、当前 `Date()` 或 heartbeat time 推进业务 `updatedAt`/canonical `modifiedAt`。相同时钟但不同 V2 内容必须保留 conflict 语义。
+- 不得取消 canonical timestamp 的整秒 wire 归一化；任何 timestamp 变更都必须验证 ISO8601 encode/decode 后 manifest hash 不漂移。
+- 不得用完整 manifest 执行局部 action。apply/upload 必须构造 action-scoped manifest，并包含必要的 item↔recording 关系扩展；缺少要求的 manifest/payload 必须失败，不能 silent continue。
+- 不得因一个 conflict 阻断所有无关安全动作，也不得因安全动作完成而清除原始 conflict。冲突隔离必须覆盖 artifact-owner、item-recording、recording-items、folder-members 依赖，最终仍按 unresolved conflict 失败。
+- parent tombstone 必须先于 receive/index/ledger/existence 判断，并阻止 apply、upload 和 resurrection。completed ledger、metadata-only、study item、receive record 或 UI 状态不得作为 peer audio proof。
+- 只有匹配的 hash+byte-size、finalize proof 等内容级证据才能产生 audio same no-op；hash/size 不同必须 conflict，peer unknown 必须 deferred。本机真实音频不能被无内容证明的 peer 状态抑制上传。
+- 新 sync run supersede 旧 run 后，不得接受旧 run 的迟到 phase、completed 或 failed 写入。terminal state 只能写当前 active run，同一 run 的 phase 不得倒退。
+- heartbeat 可承载 `LocalNetworkSyncRunStatus` 以补齐终态收敛，但 heartbeat 在线本身不得写同步成功；peer run status 仍必须经过 syncRunID、superseded 集合和单调 phase 校验。
+- 诊断背压不得让普通高频噪声饿死 error-bearing 或 sync/upload/apply 终态。critical 优先级不得绕过 redaction，也不得改变同优先级事件的接受顺序。
+- 不得用 StudyItem、pending upload、receive/index 或其他关系条目替代 action-scoped manifest 中要求的 Recording 本体；有效 deletion tombstone 是唯一允许缺少 active recording 的覆盖。artifact conflict 无法解析 owner 时必须 fail closed。
+- `syncedMetadataOnly` 是 receiver-local marker，不得进入 business signature、peer business merge 或发送端权威字段；只有接收端发现真实音频后才能清理本机 marker。
+- pending recording upload 的 `itemID` 必须来自持久 StudyItem/recording relation，不能用 recordingID 猜测。即使当前数据常为一对一，也不得重新引入 ID 等同假设。
+- sync-start ACK 必须晚于 durable enqueue 成功。持久化失败不得 ACK；重启必须保守重放 pending/in-flight；completed/lifetime dedupe 不得只存在内存。
+- metadata apply lease 存续期间 watchdog 不得结束该 run；lease 结束后必须刷新 activity 再恢复监督。同一 run terminal first-write-wins，旧/非 active run 的 terminal 永远不得覆盖当前状态。
+- resumable session 必须绑定当前 peer、checksum 和 byte size；内容合同变化必须重建 session。offset 到达文件大小、旧 completed ledger 或完整临时文件都不能替代 final apply ACK。
+- pairing connection snapshot 只能在 confirm 或等价的已签名 credential proof 成功后持久保存；Mac durable paired-store 失败必须拒绝完成。只有明确 `EADDRINUSE` 才能递增端口，复制 payload 必须使用 ready listener 的实际端口。

@@ -281,7 +281,7 @@ final class RecordingManager: ObservableObject {
 
         do {
             let updated = try fileStore.updateTitle(recordingID: recordingID, rawTitle: title)
-            try studyLibraryStore.upsertRecordingMetadata(updated)
+            try studyLibraryStore.upsertRecordingMetadata(updated, businessMutationAt: Date())
             replaceRecordingInMemory(updated)
             LocalNetworkSyncEventTrigger.post(.recordingMetadataChanged, source: "RecordingManager.renameRecording", recordingID: recordingID)
             lastErrorMessage = nil
@@ -316,7 +316,11 @@ final class RecordingManager: ObservableObject {
         do {
             let restoredMetadata = try fileStore.restoreRecording(id: recordingID)
             trashedRecordings.removeAll { $0.id == recordingID }
-            try studyLibraryStore.upsertRecordingMetadata(restoredMetadata)
+            try studyLibraryStore.upsertRecordingMetadata(
+                restoredMetadata,
+                businessMutationAt: Date(),
+                clearsRecordingTombstone: true
+            )
             replaceRecordingInMemory(restoredMetadata)
             latestRecordingMetadata = recordings.first
             LocalNetworkSyncEventTrigger.post(.tombstoneConflictChanged, source: "RecordingManager.restoreRecording", recordingID: recordingID)

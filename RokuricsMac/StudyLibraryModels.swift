@@ -398,7 +398,11 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
     nonisolated func mergedWithCurrentInboxItem(_ item: MacRecordingInboxItem) -> StudyItemMetadata {
         let resolvedFiling = filing.isEmpty ? (item.studyFiling ?? StudyFilingPath()) : filing
         let resolvedFolderIDs = folderIDs.isEmpty ? Self.defaultFolderIDs(for: resolvedFiling) : folderIDs
-        let resolvedTitle = updatedAt > item.receivedAt ? title : item.title
+        // `receivedAt` is a Mac-local transport clock, not a business clock.
+        // Once study metadata exists, it remains authoritative for the title;
+        // otherwise every received recording whose transport time is newer
+        // than the peer edit time would oscillate back to the inbox title.
+        let resolvedTitle = title
         return StudyItemMetadata(
             itemID: itemID,
             kind: .recordingBundle,
@@ -467,7 +471,10 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
             studyFiling: item.studyFiling,
             tags: [],
             customProperties: [:],
-            updatedAt: Date(),
+            // Keep reconstructed fallback metadata stable across inventory builds.
+            // `receivedAt` is persisted, while `Date()` would manufacture a new
+            // metadata hash and a false cross-device conflict on every tick.
+            updatedAt: item.receivedAt,
             transcriptionStatus: item.transcriptionStatus,
             noteStatus: item.noteStatus
         )

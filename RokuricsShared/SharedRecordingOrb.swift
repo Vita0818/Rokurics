@@ -104,12 +104,6 @@ struct RokuricsSharedRecordingOrb: View {
                     }
                     .rotationEffect(.degrees(orbitDegrees))
 
-                    RokuricsSharedSoundRipple(size: 238 * scale, opacity: isBreathing ? 0.12 : 0.07)
-                        .scaleEffect(isBreathing ? 1.045 : 0.975)
-
-                    RokuricsSharedSoundRipple(size: 202 * scale, opacity: isBreathing ? 0.15 : 0.10)
-                        .scaleEffect(isBreathing ? 0.99 : 1.035)
-
                     if phase.isRecording {
                         RokuricsSharedSoundRipple(
                             size: 222 * scale,
@@ -128,7 +122,7 @@ struct RokuricsSharedRecordingOrb: View {
 
                     Circle()
                         .fill(RokuricsSharedStyle.actionGradient)
-                        .frame(width: 190 * scale, height: 190 * scale)
+                        .frame(width: 238 * scale, height: 238 * scale)
                         .background(.ultraThinMaterial, in: Circle())
                         .overlay {
                             Circle()
@@ -176,7 +170,7 @@ struct RokuricsSharedRecordingOrb: View {
                             .shadow(color: RokuricsSharedStyle.deepText(for: colorScheme).opacity(0.16), radius: 8 * scale, y: 4 * scale)
                             .padding(.horizontal, 22 * scale)
                     } else {
-                        RokuricsSharedPlusGlyph(size: 74 * scale, thickness: 10 * scale)
+                        RokuricsSharedPlusGlyph(size: 92 * scale, thickness: 12 * scale)
                             .foregroundStyle(.white.opacity(0.97))
                             .shadow(color: RokuricsSharedStyle.deepText(for: colorScheme).opacity(0.12), radius: 8 * scale, y: 4 * scale)
                     }

@@ -302,7 +302,23 @@ final class StudyLibraryStore: ObservableObject {
 
     func refresh(forceCanonicalReadRuntimeProjection: Bool = false) {
         let recordings = (try? audioFileStore.loadAllMetadata()) ?? []
-        let storedItems = loadAllStoredItemMetadata()
+        let recordingsWithLocalAudio = Set(recordings.compactMap { recording -> String? in
+            guard let audioURL = try? audioFileStore.audioURL(for: recording),
+                  fileManager.fileExists(atPath: audioURL.path) else {
+                return nil
+            }
+            return recording.id
+        })
+        var storedItems = loadAllStoredItemMetadata()
+        for index in storedItems.indices {
+            guard let recordingID = storedItems[index].recordingID,
+                  recordingsWithLocalAudio.contains(recordingID),
+                  storedItems[index].customProperties["syncedMetadataOnly"] == "true" else {
+                continue
+            }
+            storedItems[index].customProperties.removeValue(forKey: "syncedMetadataOnly")
+            try? writeItemMetadataPreservingFolderLinks(storedItems[index])
+        }
         let receiveItems = loadReceiveRecordDerivedItems()
         let storedItemsByRecordingID = Dictionary(
             storedItems.compactMap { item -> (String, StudyItemMetadata)? in
@@ -966,7 +982,14 @@ final class StudyLibraryStore: ObservableObject {
                 itemsByID: itemsByID,
                 targetDeviceID: deviceID
             ),
-            recordings: makeManifestRecordingEntries(recordings: recordings, deviceID: deviceID)
+            recordings: makeManifestRecordingEntries(
+                recordings: recordings,
+                itemsByRecordingID: Dictionary(
+                    itemsByID.values.compactMap { item in item.recordingID.map { ($0, item) } },
+                    uniquingKeysWith: { _, latest in latest }
+                ),
+                deviceID: deviceID
+            )
         )
     }
 
@@ -1219,7 +1242,14 @@ final class StudyLibraryStore: ObservableObject {
             folders: folders,
             tombstones: tombstones,
             pendingUploads: pendingUploads,
-            recordings: makeManifestRecordingEntries(recordings: recordings, deviceID: deviceID)
+            recordings: makeManifestRecordingEntries(
+                recordings: recordings,
+                itemsByRecordingID: Dictionary(
+                    itemsByID.values.compactMap { item in item.recordingID.map { ($0, item) } },
+                    uniquingKeysWith: { _, latest in latest }
+                ),
+                deviceID: deviceID
+            )
         )
     }
 
@@ -1681,8 +1711,14 @@ final class StudyLibraryStore: ObservableObject {
         _ item: inout StudyItemMetadata,
         rootURL: URL
     ) {
-        guard let recordingID = item.recordingID,
-              (try? AudioFileStore(fileManager: .default, rootDirectoryURL: rootURL).loadMetadata(id: recordingID)) == nil else {
+        guard let recordingID = item.recordingID else {
+            return
+        }
+        let audioStore = AudioFileStore(fileManager: .default, rootDirectoryURL: rootURL)
+        if let metadata = try? audioStore.loadMetadata(id: recordingID),
+           let audioURL = try? audioStore.audioURL(for: metadata),
+           FileManager.default.fileExists(atPath: audioURL.path) {
+            item.customProperties.removeValue(forKey: "syncedMetadataOnly")
             return
         }
         item.customProperties["syncedMetadataOnly"] = "true"
@@ -1740,19 +1776,50 @@ final class StudyLibraryStore: ObservableObject {
         incoming: inout StudyItemMetadata,
         result: inout StudyLibrarySyncApplyResult
     ) -> StudyItemMetadata? {
-        guard var existing else {
+        guard let existing else {
             return incoming
+        }
+        if let localRecordingID = existing.recordingID,
+           let remoteRecordingID = incoming.recordingID,
+           localRecordingID != remoteRecordingID {
+            result.conflictCount += 1
+            return nil
+        }
+        let existingWithLocalReceiptMarker = mergingSyncMetadataOnlyMarker(
+            into: existing,
+            from: incoming
+        )
+        if existing.hasSameLocalNetworkBusinessFieldsV2(as: incoming) {
+            return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
         }
         if incoming.updatedAt > existing.updatedAt {
-            return incoming
+            return mergingSyncMetadataOnlyMarker(
+                into: existing.mergingRemoteBusinessFieldsV2(from: incoming),
+                from: incoming
+            )
         }
-        if incoming.updatedAt == existing.updatedAt, incoming != existing {
-            existing.syncConflictStatus = "conflict_preserved_local"
+        if incoming.updatedAt == existing.updatedAt {
             result.conflictCount += 1
-            return existing
+            return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
         }
         result.skippedOlderCount += 1
-        return nil
+        return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
+    }
+
+    /// `syncedMetadataOnly` is receiver-local existence state, not peer-owned
+    /// business metadata. Keep it in step with the local audio check even when
+    /// the two business signatures are already equal or the peer clock loses.
+    private nonisolated static func mergingSyncMetadataOnlyMarker(
+        into item: StudyItemMetadata,
+        from locallyClassifiedIncoming: StudyItemMetadata
+    ) -> StudyItemMetadata {
+        var merged = item
+        if locallyClassifiedIncoming.customProperties["syncedMetadataOnly"] == "true" {
+            merged.customProperties["syncedMetadataOnly"] = "true"
+        } else {
+            merged.customProperties.removeValue(forKey: "syncedMetadataOnly")
+        }
+        return merged
     }
 
     private nonisolated static func mergedSyncFolderOffMain(
@@ -1760,20 +1827,18 @@ final class StudyLibraryStore: ObservableObject {
         incoming: inout StudyFolderMetadata,
         result: inout StudyLibrarySyncApplyResult
     ) -> StudyFolderMetadata? {
-        guard var existing else {
+        guard let existing else {
             return incoming
+        }
+        if existing.hasSameLocalNetworkBusinessFieldsV2(as: incoming) {
+            return nil
         }
         if incoming.updatedAt > existing.updatedAt {
-            incoming.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
-            incoming.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
-            return incoming
+            return existing.mergingRemoteBusinessFieldsV2(from: incoming)
         }
-        if incoming.updatedAt == existing.updatedAt, incoming != existing {
-            existing.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
-            existing.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
-            existing.syncConflictStatus = "conflict_preserved_local"
+        if incoming.updatedAt == existing.updatedAt {
             result.conflictCount += 1
-            return existing
+            return nil
         }
         result.skippedOlderCount += 1
         return nil
@@ -1902,10 +1967,21 @@ final class StudyLibraryStore: ObservableObject {
     }
 
     @discardableResult
-    func upsertRecordingMetadata(_ recording: RecordingMetadata) throws -> StudyItemMetadata {
+    func upsertRecordingMetadata(
+        _ recording: RecordingMetadata,
+        businessMutationAt: Date? = nil,
+        clearsRecordingTombstone: Bool = false
+    ) throws -> StudyItemMetadata {
         let previous = editableMetadataIfAvailable(recordingID: recording.id)
         let fallback = StudyItemMetadata.defaultMetadata(for: recording)
-        let metadata = previous?.mergedWithCurrentRecording(recording) ?? fallback
+        var metadata = previous?.mergedWithCurrentRecording(
+            recording,
+            businessMutationAt: businessMutationAt,
+            clearsRecordingTombstone: clearsRecordingTombstone
+        ) ?? fallback
+        if let businessMutationAt, previous == nil {
+            metadata.updatedAt = businessMutationAt
+        }
         try save(metadata, previousMetadata: previous)
         refresh()
         LocalNetworkSyncEventTrigger.post(.studyLibraryMetadataChanged, source: "StudyLibraryStore.upsertRecordingMetadata", recordingID: recording.id)
@@ -2283,14 +2359,27 @@ final class StudyLibraryStore: ObservableObject {
         itemsByID: [StudyItemID: StudyItemMetadata],
         targetDeviceID: String
     ) -> [PendingRecordingUpload] {
-        recordings.compactMap { recording in
+        let itemsByRecordingID = Dictionary(
+            itemsByID.values.compactMap { item in
+                item.recordingID.map { ($0, item) }
+            },
+            uniquingKeysWith: { current, candidate in
+                let fallbackItemID = candidate.recordingID.map(StudyItemMetadata.recordingBundleItemID(for:))
+                return current.itemID == fallbackItemID && candidate.itemID != fallbackItemID
+                    ? candidate
+                    : current
+            }
+        )
+        return recordings.compactMap { recording in
             guard !recording.isDeleted,
                   RecordingUploadStatus(rawMetadataValue: recording.uploadStatus) != .uploaded else {
                 return nil
             }
 
             let fallbackItemID = StudyItemMetadata.recordingBundleItemID(for: recording.id)
-            let item = itemsByID[fallbackItemID] ?? StudyItemMetadata.defaultMetadata(for: recording)
+            let item = itemsByRecordingID[recording.id]
+                ?? itemsByID[fallbackItemID]
+                ?? StudyItemMetadata.defaultMetadata(for: recording)
             return PendingRecordingUpload(
                 itemID: item.itemID,
                 recordingID: recording.id,
@@ -2305,10 +2394,17 @@ final class StudyLibraryStore: ObservableObject {
 
     private func makeManifestRecordingEntries(
         recordings: [RecordingMetadata],
+        itemsByRecordingID: [String: StudyItemMetadata],
         deviceID: String
     ) -> [LocalNetworkSyncRecordingEntry] {
-        recordings.map { recording in
-            let audioURL = try? audioFileStore.audioURL(for: recording)
+        let recordingsByID = Dictionary(recordings.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return Set(recordingsByID.keys).union(itemsByRecordingID.keys).sorted().compactMap { recordingID in
+            let recording = recordingsByID[recordingID]
+            guard let item = itemsByRecordingID[recordingID]
+                ?? recording.map(StudyItemMetadata.defaultMetadata(for:)) else {
+                return nil
+            }
+            let audioURL = recording.flatMap { try? audioFileStore.audioURL(for: $0) }
             let hasAudio = audioURL.map { fileManager.fileExists(atPath: $0.path) } ?? false
             let byteSize = hasAudio ? audioURL.flatMap { url -> Int64? in
                 guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
@@ -2318,32 +2414,32 @@ final class StudyLibraryStore: ObservableObject {
                 return size.int64Value
             } : nil
             return LocalNetworkSyncRecordingEntry(
-                recordingID: recording.id,
-                metadataHash: LocalNetworkSyncMetadataHash.hash(recording),
+                recordingID: recordingID,
+                metadataHash: item.localNetworkRecordingBusinessSignatureV2,
                 audioAvailable: hasAudio,
                 audioChecksum: nil,
                 audioSize: byteSize,
                 uploadLedgerState: nil,
                 receiveStatus: nil,
                 processingStatus: nil,
-                updatedAt: recording.deletedAt ?? recording.createdAt,
-                deleted: recording.isDeleted,
-                title: recording.title,
-                createdAt: recording.createdAt,
-                tombstone: recording.isDeleted,
+                updatedAt: item.trashedAt ?? item.updatedAt,
+                deleted: item.isTrashed,
+                title: item.title,
+                createdAt: item.createdAt,
+                tombstone: item.isTrashed,
                 audioAvailability: hasAudio ? .local : .missing,
-                uploadStatus: recording.uploadStatus,
-                transcriptionStatus: recording.transcriptionStatus,
-                noteStatus: recording.noteStatus,
+                uploadStatus: recording?.uploadStatus,
+                transcriptionStatus: recording?.transcriptionStatus,
+                noteStatus: recording?.noteStatus,
                 sourceDeviceID: deviceID,
-                artifactRefs: [
+                artifactRefs: recording.map { recording in [
                     LocalNetworkSyncArtifactID.make(
                         kind: .metadataJSON,
-                        ownerID: recording.id,
+                        ownerID: recordingID,
                         logicalPathToken: recording.relativeMetadataPath
                     )
-                ],
-                audioLogicalPathToken: recording.relativeAudioPath
+                ] },
+                audioLogicalPathToken: recording?.relativeAudioPath
             )
         }
     }
@@ -2353,22 +2449,35 @@ final class StudyLibraryStore: ObservableObject {
         incoming: inout StudyItemMetadata,
         result: inout StudyLibrarySyncApplyResult
     ) -> StudyItemMetadata? {
-        guard var existing else {
+        guard let existing else {
             return incoming
         }
-
-        if incoming.updatedAt > existing.updatedAt {
-            return incoming
-        }
-
-        if incoming.updatedAt == existing.updatedAt, incoming != existing {
-            existing.syncConflictStatus = "conflict_preserved_local"
+        if let localRecordingID = existing.recordingID,
+           let remoteRecordingID = incoming.recordingID,
+           localRecordingID != remoteRecordingID {
             result.conflictCount += 1
-            return existing
+            return nil
+        }
+        let existingWithLocalReceiptMarker = Self.mergingSyncMetadataOnlyMarker(
+            into: existing,
+            from: incoming
+        )
+        if existing.hasSameLocalNetworkBusinessFieldsV2(as: incoming) {
+            return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
+        }
+        if incoming.updatedAt > existing.updatedAt {
+            return Self.mergingSyncMetadataOnlyMarker(
+                into: existing.mergingRemoteBusinessFieldsV2(from: incoming),
+                from: incoming
+            )
+        }
+        if incoming.updatedAt == existing.updatedAt {
+            result.conflictCount += 1
+            return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
         }
 
         result.skippedOlderCount += 1
-        return nil
+        return existingWithLocalReceiptMarker == existing ? nil : existingWithLocalReceiptMarker
     }
 
     private func mergedSyncFolder(
@@ -2376,22 +2485,18 @@ final class StudyLibraryStore: ObservableObject {
         incoming: inout StudyFolderMetadata,
         result: inout StudyLibrarySyncApplyResult
     ) -> StudyFolderMetadata? {
-        guard var existing else {
+        guard let existing else {
             return incoming
         }
-
+        if existing.hasSameLocalNetworkBusinessFieldsV2(as: incoming) {
+            return nil
+        }
         if incoming.updatedAt > existing.updatedAt {
-            incoming.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
-            incoming.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
-            return incoming
+            return existing.mergingRemoteBusinessFieldsV2(from: incoming)
         }
-
-        if incoming.updatedAt == existing.updatedAt, incoming != existing {
-            existing.itemIDs = StudyItemMetadata.uniqueIDs(existing.itemIDs + incoming.itemIDs)
-            existing.childFolderIDs = StudyItemMetadata.uniqueIDs(existing.childFolderIDs + incoming.childFolderIDs)
-            existing.syncConflictStatus = "conflict_preserved_local"
+        if incoming.updatedAt == existing.updatedAt {
             result.conflictCount += 1
-            return existing
+            return nil
         }
 
         result.skippedOlderCount += 1
@@ -2469,11 +2574,15 @@ final class StudyLibraryStore: ObservableObject {
     }
 
     private func markSyncMetadataOnlyIfNeeded(_ item: inout StudyItemMetadata) {
-        guard let recordingID = item.recordingID,
-              (try? audioFileStore.loadMetadata(id: recordingID)) == nil else {
+        guard let recordingID = item.recordingID else {
             return
         }
-
+        if let metadata = try? audioFileStore.loadMetadata(id: recordingID),
+           let audioURL = try? audioFileStore.audioURL(for: metadata),
+           fileManager.fileExists(atPath: audioURL.path) {
+            item.customProperties.removeValue(forKey: "syncedMetadataOnly")
+            return
+        }
         item.customProperties["syncedMetadataOnly"] = "true"
     }
 

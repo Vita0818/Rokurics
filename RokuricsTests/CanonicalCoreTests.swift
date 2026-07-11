@@ -10,6 +10,24 @@ import Testing
 @testable import Rokurics
 
 struct CanonicalCoreTests {
+    @Test func canonicalManifestHashSurvivesISO8601RoundTripWithFractionalInput() throws {
+        let manifest = CanonicalManifest.make(
+            node: CanonicalNode(nodeID: "iphone-01", platform: "iPhone"),
+            generatedAt: Date(timeIntervalSince1970: 1_783_692_585.123_456),
+            objects: []
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let decoded = try decoder.decode(CanonicalManifest.self, from: encoder.encode(manifest))
+
+        #expect(manifest.generatedAt.date.timeIntervalSince1970 == 1_783_692_585)
+        #expect(decoded.hasValidManifestHash)
+        #expect(decoded.manifestHash == manifest.manifestHash)
+    }
+
     @Test func iphoneAdapterUsesStableObjectIDAndCanonicalMetadataHash() {
         let metadata = makeMetadata()
         let object = IPhoneCanonicalRecordingAdapter().makeObject(metadata: metadata)

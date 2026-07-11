@@ -89,6 +89,35 @@ enum SecureMacConnectionSettings {
     }
 }
 
+enum SecureMacHostNormalizer {
+    static func normalize(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        if let components = URLComponents(string: trimmed.contains("://") ? trimmed : "https://\(trimmed)"),
+           let host = components.host,
+           !host.isEmpty {
+            return host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        }
+
+        let authority = trimmed
+            .replacingOccurrences(of: "https://", with: "", options: [.caseInsensitive])
+            .replacingOccurrences(of: "http://", with: "", options: [.caseInsensitive])
+            .split(separator: "/", maxSplits: 1)
+            .first
+            .map(String.init) ?? ""
+        if authority.hasPrefix("["), let closingBracket = authority.firstIndex(of: "]") {
+            return String(authority[authority.index(after: authority.startIndex)..<closingBracket])
+        }
+        if authority.filter({ $0 == ":" }).count == 1,
+           let separator = authority.lastIndex(of: ":"),
+           authority[authority.index(after: separator)...].allSatisfy(\.isNumber) {
+            return String(authority[..<separator])
+        }
+        return authority
+    }
+}
+
 struct RokuricsPairingInfo {
     let host: String
     let portText: String
@@ -456,13 +485,6 @@ final class SecureMacConnectionStore: ObservableObject {
     }
 
     private func normalizedHost(_ value: String) -> String {
-        value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-            .split(separator: "/")
-            .first
-            .flatMap { $0.split(separator: ":").first }
-            .map(String.init) ?? ""
+        SecureMacHostNormalizer.normalize(value)
     }
 }

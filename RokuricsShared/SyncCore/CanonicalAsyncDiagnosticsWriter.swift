@@ -45,6 +45,11 @@ nonisolated enum CanonicalAsyncDiagnosticsEnqueueDisposition: String, Codable, E
     case rejectedRedaction
 }
 
+nonisolated enum CanonicalAsyncDiagnosticsPriority: Int, Codable, Equatable, Hashable, Sendable {
+    case normal
+    case critical
+}
+
 nonisolated struct CanonicalAsyncDiagnosticsWriterMetrics: Codable, Equatable, Hashable, Sendable {
     var enqueuedCount: Int = 0
     var writtenCount: Int = 0
@@ -102,9 +107,14 @@ actor CanonicalFileDiagnosticsSink: CanonicalAsyncDiagnosticsSink {
     }
 }
 
-private enum CanonicalAsyncDiagnosticsPayload: Sendable {
+private enum CanonicalAsyncDiagnosticsPayloadBody: Sendable {
     case kernelRecord(CanonicalKernelDiagnosticRecord)
     case rawJSONLLine(Data)
+}
+
+private struct CanonicalAsyncDiagnosticsPayload: Sendable {
+    var body: CanonicalAsyncDiagnosticsPayloadBody
+    var priority: CanonicalAsyncDiagnosticsPriority
 }
 
 actor CanonicalAsyncDiagnosticsWriter {
@@ -112,7 +122,7 @@ actor CanonicalAsyncDiagnosticsWriter {
     private let configuration: CanonicalAsyncDiagnosticsWriterConfiguration
     private let clock: CanonicalInventoryRuntimeClock
     private var queue: [CanonicalAsyncDiagnosticsPayload] = []
-    private var flushing = false
+    private var automaticFlushTask: Task<Void, Never>?
     private var metrics = CanonicalAsyncDiagnosticsWriterMetrics()
 
     init(
@@ -125,32 +135,50 @@ actor CanonicalAsyncDiagnosticsWriter {
         self.clock = clock
     }
 
-    func enqueue(_ record: CanonicalKernelDiagnosticRecord) -> CanonicalAsyncDiagnosticsEnqueueDisposition {
+    func enqueue(
+        _ record: CanonicalKernelDiagnosticRecord,
+        priority: CanonicalAsyncDiagnosticsPriority = .normal
+    ) -> CanonicalAsyncDiagnosticsEnqueueDisposition {
         if let detail = record.redactedDetail,
            !CanonicalKernelDiagnosticRedaction.isSafeForDiagnostics(detail) {
             metrics.rejectedCount += 1
             return .rejectedRedaction
         }
-        return enqueuePayload(.kernelRecord(record))
+        return enqueuePayload(CanonicalAsyncDiagnosticsPayload(body: .kernelRecord(record), priority: priority))
     }
 
-    func enqueueJSONLLine(_ data: Data) -> CanonicalAsyncDiagnosticsEnqueueDisposition {
+    func enqueueJSONLLine(
+        _ data: Data,
+        priority: CanonicalAsyncDiagnosticsPriority = .normal
+    ) -> CanonicalAsyncDiagnosticsEnqueueDisposition {
         guard let encoded = String(data: data, encoding: .utf8),
               CanonicalKernelDiagnosticRedaction.isSafeForDiagnostics(encoded) else {
             metrics.rejectedCount += 1
             return .rejectedRedaction
         }
-        return enqueuePayload(.rawJSONLLine(data))
+        return enqueuePayload(CanonicalAsyncDiagnosticsPayload(body: .rawJSONLLine(data), priority: priority))
     }
 
     private func enqueuePayload(_ payload: CanonicalAsyncDiagnosticsPayload) -> CanonicalAsyncDiagnosticsEnqueueDisposition {
         guard queue.count < configuration.maxQueuedEvents else {
-            metrics.droppedCount += 1
-            if configuration.dropNewestWhenFull {
+            if payload.priority == .critical {
+                let evictionIndex = queue.firstIndex { $0.priority == .normal } ?? queue.startIndex
+                queue.remove(at: evictionIndex)
+                queue.append(payload)
+                metrics.droppedCount += 1
+                metrics.enqueuedCount += 1
+                startFlushIfNeeded()
+                return .enqueued
+            }
+
+            guard configuration.dropNewestWhenFull == false,
+                  let evictionIndex = queue.firstIndex(where: { $0.priority == .normal }) else {
+                metrics.droppedCount += 1
                 return .droppedBackpressure
             }
-            queue.removeFirst()
+            queue.remove(at: evictionIndex)
             queue.append(payload)
+            metrics.droppedCount += 1
             metrics.enqueuedCount += 1
             startFlushIfNeeded()
             return .enqueued
@@ -162,15 +190,15 @@ actor CanonicalAsyncDiagnosticsWriter {
     }
 
     func drain() async {
-        await flush()
+        await flushUntilIdle()
     }
 
     func flushForTests() async {
-        await flush()
+        await flushUntilIdle()
     }
 
     func drainForTests() async {
-        await flush()
+        await flushUntilIdle()
     }
 
     func currentMetrics() -> CanonicalAsyncDiagnosticsWriterMetrics {
@@ -181,16 +209,38 @@ actor CanonicalAsyncDiagnosticsWriter {
         guard configuration.automaticallyFlush else {
             return
         }
-        guard !flushing else {
+        guard automaticFlushTask == nil else {
             return
         }
-        flushing = true
-        Task {
-            await self.flush()
+        automaticFlushTask = Task { await self.runAutomaticFlush() }
+    }
+
+    private func runAutomaticFlush() async {
+        await flushQueue()
+        automaticFlushTask = nil
+        if !queue.isEmpty {
+            startFlushIfNeeded()
         }
     }
 
-    private func flush() async {
+    /// Waits for the automatic worker that may already own an in-flight sink
+    /// write. Calling `flushQueue()` concurrently used to let this method
+    /// observe an empty queue and return while the worker's final write was
+    /// still suspended in the sink, so callers could read a truncated log.
+    private func flushUntilIdle() async {
+        while true {
+            if let task = automaticFlushTask {
+                await task.value
+                continue
+            }
+            guard !queue.isEmpty else {
+                return
+            }
+            await flushQueue()
+        }
+    }
+
+    private func flushQueue() async {
         while !queue.isEmpty {
             let payload = queue.removeFirst()
             let startedAt = clock.now()
@@ -208,11 +258,10 @@ actor CanonicalAsyncDiagnosticsWriter {
             }
             metrics.diagnosticsWriteDurationMs += max(0, Int(clock.now().timeIntervalSince(startedAt) * 1_000))
         }
-        flushing = false
     }
 
     private nonisolated static func data(for payload: CanonicalAsyncDiagnosticsPayload) throws -> Data {
-        switch payload {
+        switch payload.body {
         case .kernelRecord(let record):
             return try encodeJSONL(record)
         case .rawJSONLLine(let data):

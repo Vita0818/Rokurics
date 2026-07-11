@@ -599,7 +599,8 @@ final class ConnectionDiagnosticsStore {
     private let maxEntries: Int
     private let diagnosticsWriter: CanonicalAsyncDiagnosticsWriter
     private var recentEntries: [ConnectionDiagnosticEntry] = []
-    private var pendingEnqueueTasks: [Task<Void, Never>] = []
+    private var pendingEnqueueTail: Task<Void, Never>?
+    private var pendingEnqueueGeneration = 0
     private var runtimeCounterStateByKey: [String: (pending: Int, total: Int, lastLoggedAt: Date)] = [:]
 
     init(
@@ -674,7 +675,10 @@ final class ConnectionDiagnosticsStore {
         )
 
         appendRecentEntry(entry)
-        enqueueEntryForAsyncWrite(entry)
+        enqueueEntryForAsyncWrite(
+            entry,
+            priority: Self.diagnosticsPriority(phase: entry.phase, errorCode: entry.errorCode)
+        )
     }
 
     func recordPerfLog(
@@ -742,10 +746,8 @@ final class ConnectionDiagnosticsStore {
     }
 
     func flushForTests() async {
-        let tasks = pendingEnqueueTasks
-        pendingEnqueueTasks.removeAll(keepingCapacity: true)
-        for task in tasks {
-            await task.value
+        while let pendingEnqueueTail {
+            await pendingEnqueueTail.value
         }
         await diagnosticsWriter.flushForTests()
         recentEntries.removeAll(keepingCapacity: true)
@@ -766,20 +768,51 @@ final class ConnectionDiagnosticsStore {
         }
     }
 
-    private func enqueueEntryForAsyncWrite(_ entry: ConnectionDiagnosticEntry) {
+    private func enqueueEntryForAsyncWrite(
+        _ entry: ConnectionDiagnosticEntry,
+        priority: CanonicalAsyncDiagnosticsPriority
+    ) {
         let data = Self.encodedJSONLData(for: entry)
             ?? Self.encodedJSONLData(for: Self.redactionRejectedEntry(timestamp: entry.timestamp))
         guard let data else {
             return
         }
         let writer = diagnosticsWriter
-        let task = Task {
-            _ = await writer.enqueueJSONLLine(data)
+        let previousTask = pendingEnqueueTail
+        pendingEnqueueGeneration += 1
+        let generation = pendingEnqueueGeneration
+        pendingEnqueueTail = Task { [weak self] in
+            if let previousTask {
+                await previousTask.value
+            }
+            _ = await writer.enqueueJSONLLine(data, priority: priority)
+            guard let self, self.pendingEnqueueGeneration == generation else {
+                return
+            }
+            self.pendingEnqueueTail = nil
         }
-        pendingEnqueueTasks.append(task)
-        if pendingEnqueueTasks.count > 2_048 {
-            pendingEnqueueTasks.removeFirst(pendingEnqueueTasks.count - 1_024)
+    }
+
+    private nonisolated static func diagnosticsPriority(
+        phase: String,
+        errorCode: String?
+    ) -> CanonicalAsyncDiagnosticsPriority {
+        if errorCode?.isEmpty == false {
+            return .critical
         }
+        let normalizedPhase = phase.lowercased()
+        let isTerminalResult = normalizedPhase.hasSuffix("completed")
+            || normalizedPhase.hasSuffix("failed")
+            || normalizedPhase.hasSuffix("failure")
+        if isTerminalResult,
+           normalizedPhase.contains("syncrun") || normalizedPhase.contains("synctick") {
+            return .critical
+        }
+        if isTerminalResult,
+           normalizedPhase.contains("upload") || normalizedPhase.contains("apply") {
+            return .critical
+        }
+        return .normal
     }
 
     private nonisolated static func encodedJSONLData(for entry: ConnectionDiagnosticEntry) -> Data? {
@@ -849,6 +882,7 @@ final class LocalNetworkSyncProgressStore: ObservableObject {
 
     private let controlPlaneInactivityTimeout: TimeInterval
     private var controlPlaneTimeoutTask: Task<Void, Never>?
+    private var supersededRunIDs: [String] = []
 
     init(controlPlaneInactivityTimeout: TimeInterval = 30) {
         self.controlPlaneInactivityTimeout = controlPlaneInactivityTimeout
@@ -913,11 +947,17 @@ final class LocalNetworkSyncProgressStore: ObservableObject {
         nextState: LocalNetworkSyncControlPlaneState,
         at date: Date
     ) -> Bool {
+        if supersededRunIDs.contains(syncRunID) {
+            return false
+        }
         guard let currentRunID = self.syncRunID,
               currentRunID.isEmpty == false else {
             return true
         }
         if currentRunID == syncRunID {
+            if !controlPlaneState.isSyncProgressActive, nextState.isSyncProgressActive {
+                return false
+            }
             guard let currentRank = controlPlaneState.controlPlaneProgressRank,
                   let nextRank = nextState.controlPlaneProgressRank,
                   nextRank < currentRank,
@@ -926,14 +966,24 @@ final class LocalNetworkSyncProgressStore: ObservableObject {
             }
             return false
         }
-        guard controlPlaneState.isSyncProgressActive else {
+        if nextState.canBeginOrSupersedeRun {
+            rememberSupersededRun(currentRunID)
             return true
         }
         if let updatedAt,
            date.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout {
+            rememberSupersededRun(currentRunID)
             return true
         }
         return false
+    }
+
+    private func rememberSupersededRun(_ syncRunID: String) {
+        supersededRunIDs.removeAll { $0 == syncRunID }
+        supersededRunIDs.append(syncRunID)
+        if supersededRunIDs.count > 32 {
+            supersededRunIDs.removeFirst(supersededRunIDs.count - 32)
+        }
     }
 
     private func scheduleControlPlaneWatchdogIfNeeded() {
@@ -966,6 +1016,16 @@ final class LocalNetworkSyncProgressStore: ObservableObject {
 }
 
 extension LocalNetworkSyncControlPlaneState {
+    var canBeginOrSupersedeRun: Bool {
+        switch self {
+        case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked, .inventoryExchanging:
+            return true
+        case .idle, .planningTransfers, .transferJobsCreated, .transferring,
+             .pausedDisconnected, .resuming, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
     var isSyncProgressActive: Bool {
         switch self {
         case .syncStartSignalSent, .syncStartSignalReceived, .syncStartAcked,
@@ -1083,6 +1143,7 @@ final class StudyLibrarySyncStateStore: ObservableObject {
     private let storeURL: URL
     private let controlPlaneInactivityTimeout: TimeInterval
     private var controlPlaneTimeoutTask: Task<Void, Never>?
+    private var supersededRunIDs: [String] = []
 
     init(
         fileManager: FileManager = .default,
@@ -1111,7 +1172,18 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         save()
     }
 
-    func recordPush(deviceID: String, remoteManifestHash: String?, remoteCommitID: String? = nil, pendingUploads: Int = 0, at date: Date = Date()) {
+    @discardableResult
+    func recordPush(
+        deviceID: String,
+        remoteManifestHash: String?,
+        remoteCommitID: String? = nil,
+        pendingUploads: Int = 0,
+        syncRunID: String? = nil,
+        at date: Date = Date()
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.deviceID = deviceID
         state.lastPushedAt = date
         state.lastRemoteManifestHash = remoteManifestHash ?? state.lastRemoteManifestHash
@@ -1123,8 +1195,10 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state.lastError = nil
         state.syncControlPlaneState = .completed
         state.syncControlPlaneUpdatedAt = date
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
     func recordPendingUploads(deviceID: String, pendingUploads: Int, failedChanges: Int = 0, error: String? = nil) {
@@ -1135,7 +1209,17 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         save()
     }
 
-    func recordFailure(deviceID: String, error: String, failedChanges: Int = 1, pendingUploads: Int? = nil) {
+    @discardableResult
+    func recordFailure(
+        deviceID: String,
+        error: String,
+        failedChanges: Int = 1,
+        pendingUploads: Int? = nil,
+        syncRunID: String? = nil
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.deviceID = deviceID
         state.pendingLocalChanges = max(state.pendingLocalChanges, failedChanges)
         if let pendingUploads {
@@ -1145,22 +1229,25 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         state.lastError = error
         state.syncControlPlaneState = .failed
         state.syncControlPlaneUpdatedAt = Date()
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
+    @discardableResult
     func recordControlPlane(
         deviceID: String,
         syncRunID: String,
         state controlPlaneState: LocalNetworkSyncControlPlaneState,
         at date: Date = Date()
-    ) {
+    ) -> Bool {
         guard shouldAcceptControlPlaneUpdate(
             syncRunID: syncRunID,
             nextState: controlPlaneState,
             at: date
         ) else {
-            return
+            return false
         }
         state.deviceID = deviceID
         state.activeSyncRunID = syncRunID
@@ -1174,6 +1261,7 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         }
         scheduleControlPlaneWatchdogIfNeeded()
         save()
+        return true
     }
 
     func replace(_ nextState: StudyLibrarySyncState) {
@@ -1203,12 +1291,18 @@ final class StudyLibrarySyncStateStore: ObservableObject {
         nextState: LocalNetworkSyncControlPlaneState,
         at date: Date
     ) -> Bool {
+        if supersededRunIDs.contains(syncRunID) {
+            return false
+        }
         guard let currentRunID = state.activeSyncRunID,
               currentRunID.isEmpty == false else {
             return true
         }
         let currentState = state.syncControlPlaneState
         if currentRunID == syncRunID {
+            if currentState?.isSyncProgressActive != true, nextState.isSyncProgressActive {
+                return false
+            }
             guard let currentRank = currentState?.controlPlaneProgressRank,
                   let nextRank = nextState.controlPlaneProgressRank,
                   nextRank < currentRank,
@@ -1217,14 +1311,31 @@ final class StudyLibrarySyncStateStore: ObservableObject {
             }
             return false
         }
-        guard currentState?.isSyncProgressActive == true else {
+        if nextState.canBeginOrSupersedeRun {
+            rememberSupersededRun(currentRunID)
             return true
         }
         if let updatedAt = state.syncControlPlaneUpdatedAt,
            date.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout {
+            rememberSupersededRun(currentRunID)
             return true
         }
         return false
+    }
+
+    private func canFinishRun(_ syncRunID: String?) -> Bool {
+        guard let syncRunID else {
+            return true
+        }
+        return !supersededRunIDs.contains(syncRunID) && state.activeSyncRunID == syncRunID
+    }
+
+    private func rememberSupersededRun(_ syncRunID: String) {
+        supersededRunIDs.removeAll { $0 == syncRunID }
+        supersededRunIDs.append(syncRunID)
+        if supersededRunIDs.count > 32 {
+            supersededRunIDs.removeFirst(supersededRunIDs.count - 32)
+        }
     }
 
     private func scheduleControlPlaneWatchdogIfNeeded() {
@@ -1305,6 +1416,7 @@ final class LocalNetworkSyncStateStore: ObservableObject {
     private let storeURL: URL
     private let controlPlaneInactivityTimeout: TimeInterval
     private var controlPlaneTimeoutTask: Task<Void, Never>?
+    private var supersededRunIDs: [String] = []
 
     init(
         fileManager: FileManager = .default,
@@ -1350,6 +1462,7 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         save()
     }
 
+    @discardableResult
     func recordSuccess(
         peerDeviceID: String,
         localInventoryHash: String,
@@ -1357,8 +1470,12 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         appliedPeerRevision: String?,
         pendingUploadCount: Int,
         pendingDownloadCount: Int,
+        syncRunID: String? = nil,
         at date: Date = Date()
-    ) {
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.version = LocalNetworkSyncState.currentVersion
         state.peerDeviceID = peerDeviceID
         state.lastSyncCompletedAt = date
@@ -1379,8 +1496,10 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         }
         state.controlPlaneState = .completed
         state.lastControlPlaneUpdatedAt = date
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
     func recordActiveTransfers(_ transfers: [LocalNetworkTransferProgress]) {
@@ -1388,17 +1507,18 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         save()
     }
 
+    @discardableResult
     func recordControlPlane(
         syncRunID: String,
         state controlPlaneState: LocalNetworkSyncControlPlaneState,
         at date: Date = Date()
-    ) {
+    ) -> Bool {
         guard shouldAcceptControlPlaneUpdate(
             syncRunID: syncRunID,
             nextState: controlPlaneState,
             at: date
         ) else {
-            return
+            return false
         }
         state.activeSyncRunID = syncRunID
         state.controlPlaneState = controlPlaneState
@@ -1414,15 +1534,21 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         }
         scheduleControlPlaneWatchdogIfNeeded()
         save()
+        return true
     }
 
+    @discardableResult
     func recordFailure(
         code: String,
         message: String,
+        syncRunID: String? = nil,
         at date: Date = Date(),
         minimumBackoff: TimeInterval = 30,
         maximumBackoff: TimeInterval = 600
-    ) {
+    ) -> Bool {
+        guard canFinishRun(syncRunID) else {
+            return false
+        }
         state.version = LocalNetworkSyncState.currentVersion
         state.lastSyncCompletedAt = date
         state.lastSyncAt = date
@@ -1434,8 +1560,10 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         state.lastErrorMessage = message
         state.controlPlaneState = .failed
         state.lastControlPlaneUpdatedAt = date
+        state.activeSyncRunID = syncRunID ?? state.activeSyncRunID
         cancelControlPlaneWatchdog()
         save()
+        return true
     }
 
     func replace(_ nextState: LocalNetworkSyncState) {
@@ -1468,12 +1596,18 @@ final class LocalNetworkSyncStateStore: ObservableObject {
         nextState: LocalNetworkSyncControlPlaneState,
         at date: Date
     ) -> Bool {
+        if supersededRunIDs.contains(syncRunID) {
+            return false
+        }
         guard let currentRunID = state.activeSyncRunID,
               currentRunID.isEmpty == false else {
             return true
         }
         let currentState = state.controlPlaneState
         if currentRunID == syncRunID {
+            if currentState?.isSyncProgressActive != true, nextState.isSyncProgressActive {
+                return false
+            }
             guard let currentRank = currentState?.controlPlaneProgressRank,
                   let nextRank = nextState.controlPlaneProgressRank,
                   nextRank < currentRank,
@@ -1482,14 +1616,31 @@ final class LocalNetworkSyncStateStore: ObservableObject {
             }
             return false
         }
-        guard currentState?.isSyncProgressActive == true else {
+        if nextState.canBeginOrSupersedeRun {
+            rememberSupersededRun(currentRunID)
             return true
         }
         if let updatedAt = state.lastControlPlaneUpdatedAt,
            date.timeIntervalSince(updatedAt) >= controlPlaneInactivityTimeout {
+            rememberSupersededRun(currentRunID)
             return true
         }
         return false
+    }
+
+    private func canFinishRun(_ syncRunID: String?) -> Bool {
+        guard let syncRunID else {
+            return true
+        }
+        return !supersededRunIDs.contains(syncRunID) && state.activeSyncRunID == syncRunID
+    }
+
+    private func rememberSupersededRun(_ syncRunID: String) {
+        supersededRunIDs.removeAll { $0 == syncRunID }
+        supersededRunIDs.append(syncRunID)
+        if supersededRunIDs.count > 32 {
+            supersededRunIDs.removeFirst(supersededRunIDs.count - 32)
+        }
     }
 
     private func scheduleControlPlaneWatchdogIfNeeded() {

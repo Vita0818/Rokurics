@@ -10,20 +10,27 @@ import Foundation
 struct IPhoneCanonicalRecordingAdapter {
     func makeObject(
         metadata: RecordingMetadata,
+        studyItem: StudyItemMetadata? = nil,
         audioFact: CanonicalArtifactFact? = nil,
         artifactFacts: [CanonicalArtifact] = [],
         nodeID: String? = nil
     ) -> CanonicalRecordingObject {
+        let isDeleted = studyItem?.isTrashed ?? metadata.isDeleted
+        let deletedAt = studyItem?.trashedAt ?? metadata.deletedAt
         let canonicalMetadata = CanonicalRecordingMetadata(
             objectID: metadata.id,
-            title: metadata.title,
+            title: studyItem?.title ?? metadata.title,
             createdAt: CanonicalTimestamp(metadata.createdAt),
-            modifiedAt: CanonicalTimestamp(metadata.isDeleted ? (metadata.deletedAt ?? metadata.createdAt) : metadata.createdAt),
+            modifiedAt: CanonicalTimestamp(
+                isDeleted
+                    ? (deletedAt ?? studyItem?.updatedAt ?? metadata.createdAt)
+                    : (studyItem?.updatedAt ?? metadata.createdAt)
+            ),
             duration: metadata.duration,
-            filing: CanonicalRecordingMetadata.Filing(metadata.studyFiling),
-            tags: metadata.tags,
-            isDeleted: metadata.isDeleted,
-            deletedAt: metadata.isDeleted ? metadata.deletedAt.map(CanonicalTimestamp.init) : nil
+            filing: CanonicalRecordingMetadata.Filing(studyItem?.studyFiling ?? metadata.studyFiling),
+            tags: studyItem?.tags.map(\.displayTitle) ?? metadata.tags,
+            isDeleted: isDeleted,
+            deletedAt: isDeleted ? deletedAt.map(CanonicalTimestamp.init) : nil
         )
         var artifacts = artifactFacts.filter { $0.objectID == canonicalMetadata.objectID }
         if let audioFact {
@@ -35,7 +42,7 @@ struct IPhoneCanonicalRecordingAdapter {
             nodeID: nodeID,
             metadata: canonicalMetadata,
             artifacts: artifacts,
-            syncState: metadata.isDeleted ? .deleted : .localOnly,
+            syncState: isDeleted ? .deleted : .localOnly,
             transferState: .none,
             processingState: CanonicalProcessingState(
                 transcription: Self.processingStage(metadata.transcriptionStatus),
@@ -72,6 +79,7 @@ struct IPhoneCanonicalRecordingAdapter {
 
     func makeObjects(
         recordings: [RecordingMetadata],
+        studyItemsByRecordingID: [String: StudyItemMetadata] = [:],
         audioFactsByRecordingID: [String: CanonicalArtifactFact],
         artifactFactsByRecordingID: [String: [CanonicalArtifact]] = [:],
         nodeID: String? = nil
@@ -79,6 +87,7 @@ struct IPhoneCanonicalRecordingAdapter {
         recordings.map { metadata in
             makeObject(
                 metadata: metadata,
+                studyItem: studyItemsByRecordingID[metadata.id],
                 audioFact: audioFactsByRecordingID[metadata.id],
                 artifactFacts: artifactFactsByRecordingID[metadata.id] ?? [],
                 nodeID: nodeID

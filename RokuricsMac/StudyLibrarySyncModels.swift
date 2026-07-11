@@ -1391,6 +1391,14 @@ struct ConnectionHeartbeatRequest: Codable, Equatable {
     var sentAt: Date
     var lastKnownPeerStatusRevision: Int?
     var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
+    var syncRunStatus: LocalNetworkSyncRunStatus? = nil
+}
+
+struct LocalNetworkSyncRunStatus: Codable, Equatable {
+    var syncRunID: String
+    var state: LocalNetworkSyncControlPlaneState
+    var updatedAt: Date
+    var errorCode: String?
 }
 
 struct ConnectionHeartbeatResponse: Codable, Equatable {
@@ -1451,6 +1459,7 @@ struct LocalNetworkSyncStartAckResponse: Codable, Equatable {
 
 struct StudyLibrarySyncManifestRequest: Codable, Equatable {
     var manifest: StudyLibrarySyncManifest
+    var syncRunID: String? = nil
 }
 
 struct StudyLibrarySyncManifestResponse: Codable, Equatable {
@@ -1550,6 +1559,9 @@ nonisolated enum StudyLibrarySyncSanitizer {
                 && !normalized.contains("rawjson")
                 && !normalized.contains("raw_json")
                 && !normalized.contains("localnetworktransfer")
+                && normalized != "syncedmetadataonly"
+                && normalized != "notesummarypreview"
+                && normalized != "notekeypointspreview"
         }
     }
 }
@@ -2968,4 +2980,201 @@ nonisolated enum LocalNetworkSyncMetadataHash {
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
+}
+
+extension StudyItemMetadata {
+    nonisolated var localNetworkRecordingBusinessFieldsV2: LocalNetworkRecordingBusinessFieldsV2 {
+        localNetworkRecordingBusinessFieldsV2(
+            explicitBusinessCustomPropertyKeys: LocalNetworkBusinessSignatureV2.explicitBusinessCustomPropertyKeys
+        )
+    }
+
+    nonisolated func localNetworkRecordingBusinessFieldsV2(
+        explicitBusinessCustomPropertyKeys: Set<String>
+    ) -> LocalNetworkRecordingBusinessFieldsV2 {
+        LocalNetworkRecordingBusinessFieldsV2(
+            recordingID: recordingID ?? itemID,
+            title: title,
+            filing: localNetworkBusinessFilingV2,
+            tags: localNetworkBusinessTagsV2,
+            isDeleted: isTrashed,
+            customProperties: LocalNetworkBusinessSignatureV2.filteredBusinessCustomProperties(
+                customProperties,
+                explicitBusinessKeys: explicitBusinessCustomPropertyKeys
+            )
+        )
+    }
+
+    nonisolated var localNetworkRecordingBusinessSignatureV2: String {
+        LocalNetworkBusinessSignatureV2.recording(localNetworkRecordingBusinessFieldsV2)
+    }
+
+    nonisolated var localNetworkStudyItemBusinessFieldsV2: LocalNetworkStudyItemBusinessFieldsV2 {
+        localNetworkStudyItemBusinessFieldsV2(
+            explicitBusinessCustomPropertyKeys: LocalNetworkBusinessSignatureV2.explicitBusinessCustomPropertyKeys
+        )
+    }
+
+    nonisolated func localNetworkStudyItemBusinessFieldsV2(
+        explicitBusinessCustomPropertyKeys: Set<String>
+    ) -> LocalNetworkStudyItemBusinessFieldsV2 {
+        LocalNetworkStudyItemBusinessFieldsV2(
+            itemID: itemID,
+            itemKind: kind.rawValue,
+            title: title,
+            filing: localNetworkBusinessFilingV2,
+            tags: localNetworkBusinessTagsV2,
+            recordingID: recordingID,
+            isTrashed: isTrashed,
+            customProperties: LocalNetworkBusinessSignatureV2.filteredBusinessCustomProperties(
+                customProperties,
+                explicitBusinessKeys: explicitBusinessCustomPropertyKeys
+            )
+        )
+    }
+
+    nonisolated var localNetworkStudyItemBusinessSignatureV2: String {
+        LocalNetworkBusinessSignatureV2.studyItem(localNetworkStudyItemBusinessFieldsV2)
+    }
+
+    nonisolated func hasSameLocalNetworkBusinessFieldsV2(as other: StudyItemMetadata) -> Bool {
+        localNetworkStudyItemBusinessSignatureV2 == other.localNetworkStudyItemBusinessSignatureV2
+    }
+
+    /// Applies peer-owned business metadata while retaining device-local file,
+    /// processing, preview and conflict state. Derived folder IDs are rebuilt
+    /// from the incoming filing rather than copied from a peer-local list.
+    nonisolated func mergingRemoteBusinessFieldsV2(
+        from remote: StudyItemMetadata,
+        explicitBusinessCustomPropertyKeys: Set<String> = LocalNetworkBusinessSignatureV2.explicitBusinessCustomPropertyKeys
+    ) -> StudyItemMetadata {
+        guard itemID == remote.itemID else {
+            return self
+        }
+        if let localRecordingID = recordingID,
+           let remoteRecordingID = remote.recordingID,
+           localRecordingID != remoteRecordingID {
+            return self
+        }
+
+        var merged = self
+        merged.kind = remote.kind
+        merged.title = remote.title
+        merged.filing = remote.filing
+        merged.tags = StudyTagList.unique(remote.tags.map { remoteTag in
+            let localTag = tags.first { $0 == remoteTag }
+            return StudyTag(
+                id: localTag?.id,
+                namespace: remoteTag.namespace,
+                value: remoteTag.value,
+                displayName: remoteTag.displayName,
+                createdAt: localTag?.createdAt
+            )
+        })
+        merged.folderIDs = StudyItemMetadata.defaultFolderIDs(for: remote.filing)
+        if merged.recordingID == nil {
+            merged.recordingID = remote.recordingID
+        }
+        merged.customProperties = LocalNetworkBusinessSignatureV2.mergingBusinessCustomProperties(
+            local: customProperties,
+            remote: remote.customProperties,
+            explicitBusinessKeys: explicitBusinessCustomPropertyKeys
+        )
+        merged.isTrashed = remote.isTrashed
+        merged.trashedAt = remote.isTrashed ? remote.trashedAt : nil
+        merged.updatedAt = remote.updatedAt
+        merged.modifiedByDeviceID = remote.modifiedByDeviceID
+        return merged
+    }
+
+    private nonisolated var localNetworkBusinessFilingV2: LocalNetworkBusinessFilingV2 {
+        LocalNetworkBusinessFilingV2(
+            type: filing.type,
+            subject: filing.subject,
+            chapter: filing.chapter,
+            topic: filing.topic
+        )
+    }
+
+    private nonisolated var localNetworkBusinessTagsV2: [LocalNetworkBusinessTagV2] {
+        tags.map {
+            LocalNetworkBusinessTagV2(
+                namespace: $0.namespace,
+                value: $0.value,
+                displayName: $0.displayName
+            )
+        }
+    }
+}
+
+extension StudyFolderMetadata {
+    nonisolated var localNetworkFolderBusinessFieldsV2: LocalNetworkFolderBusinessFieldsV2 {
+        localNetworkFolderBusinessFieldsV2(
+            explicitBusinessCustomPropertyKeys: LocalNetworkBusinessSignatureV2.explicitBusinessCustomPropertyKeys
+        )
+    }
+
+    nonisolated func localNetworkFolderBusinessFieldsV2(
+        explicitBusinessCustomPropertyKeys: Set<String>
+    ) -> LocalNetworkFolderBusinessFieldsV2 {
+        LocalNetworkFolderBusinessFieldsV2(
+            folderID: folderID,
+            name: name,
+            level: level.rawValue,
+            parentFolderID: parentFolderID,
+            colorToken: colorToken?.rawValue,
+            isTrashed: isTrashed,
+            customProperties: LocalNetworkBusinessSignatureV2.filteredBusinessCustomProperties(
+                customProperties,
+                explicitBusinessKeys: explicitBusinessCustomPropertyKeys
+            )
+        )
+    }
+
+    nonisolated var localNetworkFolderBusinessSignatureV2: String {
+        LocalNetworkBusinessSignatureV2.folder(localNetworkFolderBusinessFieldsV2)
+    }
+
+    nonisolated func hasSameLocalNetworkBusinessFieldsV2(as other: StudyFolderMetadata) -> Bool {
+        localNetworkFolderBusinessSignatureV2 == other.localNetworkFolderBusinessSignatureV2
+    }
+
+    /// Applies peer-owned business metadata while retaining local membership
+    /// lists, local custom state and local conflict diagnostics.
+    nonisolated func mergingRemoteBusinessFieldsV2(
+        from remote: StudyFolderMetadata,
+        explicitBusinessCustomPropertyKeys: Set<String> = LocalNetworkBusinessSignatureV2.explicitBusinessCustomPropertyKeys
+    ) -> StudyFolderMetadata {
+        guard folderID == remote.folderID else {
+            return self
+        }
+
+        var merged = self
+        merged.name = remote.name
+        merged.level = remote.level
+        merged.path = remote.path
+        merged.parentFolderID = remote.parentFolderID
+        merged.colorToken = remote.colorToken
+        merged.customProperties = LocalNetworkBusinessSignatureV2.mergingBusinessCustomProperties(
+            local: customProperties,
+            remote: remote.customProperties,
+            explicitBusinessKeys: explicitBusinessCustomPropertyKeys
+        )
+        merged.isTrashed = remote.isTrashed
+        merged.trashedAt = remote.isTrashed ? remote.trashedAt : nil
+        merged.updatedAt = remote.updatedAt
+        merged.modifiedByDeviceID = remote.modifiedByDeviceID
+        return merged
+    }
+}
+
+/// Compatibility wrapper for call sites that still pass an Encodable value to
+/// `LocalNetworkSyncMetadataHash`. New inventory code should use
+/// `businessSignature` directly so the wire-visible version prefix is retained.
+nonisolated struct LocalNetworkSyncRecordingMetadataSignature: Codable, Equatable {
+    let businessSignature: String
+
+    nonisolated init(item: StudyItemMetadata) {
+        businessSignature = item.localNetworkRecordingBusinessSignatureV2
+    }
 }

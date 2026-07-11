@@ -39,7 +39,7 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
                     colorToken: folder.colorToken?.rawValue,
                     updatedAt: folder.updatedAt,
                     tombstone: folder.isTrashed,
-                    revisionHash: LocalNetworkSyncMetadataHash.hash(folder)
+                    revisionHash: folder.localNetworkFolderBusinessSignatureV2
                 )
             }
     }
@@ -174,7 +174,7 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
             name: folder.name,
             colorToken: folder.colorToken?.rawValue,
             updatedAt: folder.updatedAt,
-            revisionHash: LocalNetworkSyncMetadataHash.hash(folder),
+            revisionHash: folder.localNetworkFolderBusinessSignatureV2,
             deleted: folder.isTrashed
         )
     }
@@ -187,7 +187,7 @@ struct MacSyncStorageAdapter: SyncStorageAdapter {
             folderIDs: item.folderIDs,
             recordingID: item.recordingID,
             updatedAt: item.updatedAt,
-            revisionHash: LocalNetworkSyncMetadataHash.hash(item),
+            revisionHash: item.localNetworkStudyItemBusinessSignatureV2,
             deleted: item.isTrashed,
             path: item.filing.displaySummary,
             conflictStatus: item.syncConflictStatus

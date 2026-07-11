@@ -2896,10 +2896,15 @@ struct RecordingUploadFailureClassification: Equatable {
 }
 
 struct RecordingUploadRetryPolicy: Equatable {
-    nonisolated static let standard = RecordingUploadRetryPolicy(delays: [5, 30, 120], maximumDelay: 600)
+    nonisolated static let standard = RecordingUploadRetryPolicy(
+        delays: [5, 30, 120],
+        maximumDelay: 600,
+        maximumAutomaticAttempts: 8
+    )
 
     let delays: [TimeInterval]
     let maximumDelay: TimeInterval
+    var maximumAutomaticAttempts: Int = 8
 
     func delay(forAttemptCount attemptCount: Int) -> TimeInterval {
         guard attemptCount > 0 else {
@@ -2979,7 +2984,18 @@ final class RecordingUploadJobStore {
         now: Date
     ) throws -> RecordingUploadJob {
         if let existing = try loadJob(recordingID: metadata.id) {
-            return existing
+            let existingTarget = existing.targetDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let currentTarget = settings.deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !currentTarget.isEmpty, existingTarget == currentTarget {
+                return existing
+            }
+
+            // Upload proof is scoped to one paired receiver. A new or legacy-missing
+            // target must restart metadata and audio from a clean job so the new Mac
+            // cannot inherit another receiver's successful stages/session IDs.
+            let replacement = RecordingUploadJob.make(metadata: metadata, settings: settings, now: now)
+            try saveJob(replacement)
+            return replacement
         }
 
         let job = RecordingUploadJob.make(metadata: metadata, settings: settings, now: now)
@@ -3323,7 +3339,12 @@ final class RecordingUploadJobStore {
             )
         } catch {
             lastReadError = "upload ledger read failed: \(error.localizedDescription)"
-            throw error
+            // A damaged retry ledger is derived state. Treat it as empty so a
+            // malformed JSON file cannot block every otherwise-valid upload or
+            // endanger recording/audio metadata; retain `lastReadError` for
+            // diagnostics and leave the corrupt file untouched until a later
+            // successful ledger write replaces it atomically.
+            return .empty
         }
     }
 
@@ -3413,6 +3434,9 @@ struct RecordingUploadQueue {
 
     func isEligible(_ job: RecordingUploadJob, now: Date = Date()) -> Bool {
         guard job.isRetryable else {
+            return false
+        }
+        guard job.attemptCount < retryPolicy.maximumAutomaticAttempts else {
             return false
         }
 

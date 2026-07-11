@@ -578,13 +578,13 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
         progress: RecordingUploadProgressHandler?
     ) async throws -> RecordingUploadResult {
         let normalizedChunkSize = max(1, min(resumableChunkSize, Self.defaultResumableChunkSize * 2))
-        let totalSHA256: String
-        if let existingSHA256 = resumeContext?.audioTotalSHA256 {
-            totalSHA256 = existingSHA256
-        } else {
-            totalSHA256 = try await canonicalAudioChecksum(metadata: metadata, audioURL: audioURL)
-        }
-        var sessionID = resumeContext?.resumableSessionID
+        // A persisted session is valid only for the bytes that are currently on
+        // disk. Recompute through the checksum cache and discard the local
+        // session pointer if either size or content changed.
+        let totalSHA256 = try await canonicalAudioChecksum(metadata: metadata, audioURL: audioURL)
+        let resumeMatchesCurrentFile = resumeContext?.audioTotalBytes == audioSize
+            && resumeContext?.audioTotalSHA256 == totalSHA256
+        var sessionID = resumeMatchesCurrentFile ? resumeContext?.resumableSessionID : nil
         var confirmedBytes: Int64 = 0
         var nextOffset: Int64 = 0
         var audioDisposition: String? = nil
@@ -602,14 +602,43 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 httpPath: "/upload-recording-audio-session/status",
                 totalBytes: audioSize
             )
-            let statusResponse = try await secureClient.fetchResumableAudioUploadStatus(
-                settings: settings,
-                request: ResumableAudioUploadStatusRequest(
-                    recordingID: metadata.id,
-                    sessionID: existingSessionID,
-                    totalSHA256: totalSHA256
+            let statusResponse: ResumableAudioUploadSessionResponse
+            do {
+                statusResponse = try await secureClient.fetchResumableAudioUploadStatus(
+                    settings: settings,
+                    request: ResumableAudioUploadStatusRequest(
+                        recordingID: metadata.id,
+                        sessionID: existingSessionID,
+                        totalSHA256: totalSHA256
+                    )
                 )
-            )
+            } catch {
+                let message = error.localizedDescription.lowercased()
+                if message.contains("upload_session_missing") || message.contains("upload_session_conflict") {
+                    sessionID = nil
+                    statusResponse = ResumableAudioUploadSessionResponse(
+                        ok: false,
+                        disposition: nil,
+                        status: "restartRequired",
+                        sessionID: existingSessionID,
+                        confirmedBytes: 0,
+                        nextOffset: 0,
+                        chunkSize: nil,
+                        completed: false,
+                        finalAudioExists: false,
+                        chunkAccepted: nil,
+                        finalAudioRelativePath: nil,
+                        checksum: nil,
+                        fileSize: nil,
+                        receiveStatus: nil,
+                        processingStatus: nil,
+                        error: "upload_session_restart_required",
+                        reason: nil
+                    )
+                } else {
+                    throw error
+                }
+            }
             if statusResponse.completed || statusResponse.finalAudioExists == true {
                 UploadFlightRecorder.record(
                     side: .iPhone,

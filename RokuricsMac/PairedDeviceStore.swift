@@ -109,6 +109,24 @@ final class PairedDeviceStore: ObservableObject {
         save()
     }
 
+    /// Commits a pairing only when the atomic store write succeeds. On failure
+    /// the in-memory view is rolled back so the caller cannot return a secret for
+    /// a credential that will disappear on restart.
+    @discardableResult
+    func upsertPersisted(_ device: PairedDevice) -> Bool {
+        let previousDevices = devices
+        if let existingIndex = devices.firstIndex(where: { $0.id == device.id }) {
+            devices[existingIndex] = device
+        } else {
+            devices.append(device)
+        }
+        guard save() else {
+            devices = previousDevices
+            return false
+        }
+        return true
+    }
+
     func markSeen(deviceID: String, at date: Date = Date()) {
         guard let index = devices.firstIndex(where: { $0.id == deviceID }) else {
             return
@@ -171,17 +189,21 @@ final class PairedDeviceStore: ObservableObject {
         }
     }
 
-    private func save() {
+    @discardableResult
+    private func save() -> Bool {
         do {
             try fileManager.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(devices)
             try data.write(to: storeURL, options: .atomic)
+            lastError = nil
             print("[RokuricsPairing] saved paired devices: \(devices.count)")
+            return true
         } catch {
             lastError = "Paired device store save failed: \(error.localizedDescription)"
             print("[RokuricsPairing] errors: \(lastError ?? "unknown paired device save error")")
+            return false
         }
     }
 

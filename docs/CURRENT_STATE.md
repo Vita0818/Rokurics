@@ -1193,3 +1193,43 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 - 旧文档曾写 Mac TLS private key 在 Data Protection Keychain 中；当前源码 `MacIdentityManager` 实际使用 app-local `tls-private-key.json` 加 `SecIdentityCreate(nil, certificate, privateKey)`，测试也固定该行为。因此本轮文档改以源码为准，并把 Keychain 说法降为已纠正的旧文档冲突。
 - 已有 `docs/LongRecordingTestPlan.md` 与当前 `LongProcessingModels.swift`、`TranscriptionCoordinator.swift`、`NoteGenerationCoordinator.swift` 的长录音分块思路总体一致；未发现需要在本轮标记的冲突。
 - 发现构建配置/脚本中存在仓库外本地 whisper.cpp 路径依赖。为避免写入个人隐私路径，本文档只记录抽象依赖，不复制具体本机路径。
+
+## 2026-07-10 连接/同步/文件传输正确性收口
+
+- iPhone `LocalNetworkSyncEngine.performTick` 已重新接入 artifact upload/download 和缺失 recording audio upload。只有 metadata apply、artifact、audio 全部完成且无 unresolved conflict/partial failure 时，才写 `lastSuccessfulSyncAt` 和 `syncRunCompleted`。
+- legacy `StudyLibrarySyncCoordinator.performSync` 不再跳过 pending recording upload，也会验证双端 apply result。
+- Release 默认使用 old kernel；Debug 只允许在有效 stored mode 且手动确认后启用试验 canonical mode。非法/缺失配置回退 old kernel。
+- rename 会推进单调业务时间；restore 会清除 StudyItem tombstone/trashedAt。无持久 StudyItem 时，fallback metadata 使用 recording/inbox 中的稳定时间，不再使用每轮 `Date()`。
+- 配对为两阶段 prepare/confirm：iPhone 先保存 credential，再确认 Mac commit；确认 response 丢失时，可用已签名 heartbeat proof 恢复。Mac paired-store 持久化失败会回滚并拒绝成功。
+- Mac payload 使用稳定 `.local` hostname，并广播 `_rokurics._tcp`；IPv4 仅为 fallback。iPhone host normalization 支持 IPv6 authority。
+- Mac manual sync-start signal 会持久保存并重投到匹配 ACK；iPhone 先入队 sync 再 ACK。ACK 失败不影响已经建立的 online presence。
+- status exchange facts/request 保留到明确 ACK，并有 fact/byte batch 上限和 sender incarnation。重启后的 sequence 不再与旧 incarnation 冲突，纯 ACK 不产生 ACK loop。
+- upload/transfer ledger 按当前 peer device 过滤；重配到新 Mac 会重置旧 target 的 completed/session stage。
+- artifact resume 与 checksum/size 版本绑定；错误 full-size temp 会删除；`.resuming` 的 full-size offset 不能替代 server final apply ACK。
+- stale/incompatible audio session 会过期并重建；自动 retry 上限为 8。音频 progress task 在写最终状态前必须停止，避免 `.complete` 被回写成 `.transferring`。
+- 2026-07-10 已通过 iOS/Mac build-for-testing、iOS/Mac Release build、25 项 iOS 定向测试和 16 项 Mac 定向测试。仍无 paired 真机证据；网络切换、首次权限、后台/锁屏、长录音和 soak test 仍待验证。
+- Mac pairing listener 现在只在明确 `EADDRINUSE` 时将候选端口逐次加一：8787 失败后显示并保存 8788，用户下次点击配对时尝试 8788；再次占用则变为 8789。一般 TLS/listener 错误不会错误换端口。
+- 动态候选端口按 Mac app profile 持久化，重启后继续使用已经复制给 iPhone 的端口。
+- Mac pairing payload 和复制文本始终使用 ready listener 的实际 active port；iPhone 粘贴解析使用文本中的动态 `Port:`，不会被默认 8787 覆盖。
+
+## 2026-07-11 同步稳定性修复后的当前状态
+
+- iPhone 与 Mac 的 recording、study item、folder inventory 已统一使用 `LocalNetworkBusinessSignatureV2`。签名带 `ln-business-v2:` 版本前缀，只覆盖跨设备稳定的业务字段，并对文本、tag 和集合顺序做确定性归一化；时间戳、本机路径、处理/上传/冲突状态以及可从关系重建的派生列表均不进入签名。
+- `explicitBusinessCustomPropertyKeys` 当前为空，因此生产 V2 签名和业务 merge 不接受任意 custom property。以后若要同步某个 custom key，必须显式加入白名单、评估版本兼容并补双端 fixture。
+- “内容是否相同”和“谁更新”已拆开：V2 签名只回答业务等价，`updatedAt`/`modifiedAt` 作为独立的持久业务时钟决定 apply 方向；接收时间、processing 状态、upload ledger、UI 状态等运行时事实不再推进业务版本。远端时钟较新才覆盖，时钟相等但 V2 业务内容不同仍报告冲突。
+- canonical wire timestamp 在创建和解码时统一向下归一到整秒，匹配 JSON `.iso8601` 精度，避免同一 manifest 经 encode/decode 后 hash 漂移。
+- metadata apply/upload 会把完整 manifest 裁剪为 action-scoped manifest，只携带本轮 action 直接涉及及 item↔recording 关系扩展后的对象、tombstone、pending upload 和 recording facts。计划要求的 manifest/payload 缺失会直接失败，不再静默跳过。
+- 冲突对象及其依赖对象会先从可执行计划隔离；不相关的 metadata、artifact、audio 安全动作仍可继续。安全动作完成后，原始 conflict 仍使本轮以 unresolved conflict 结束，不会写 `lastSuccessfulSyncAt`。
+- recording existence 已改为证据模型：parent tombstone 优先阻止 apply/upload/复活；metadata-only、receive record、study item 或 completed ledger 都不是音频存在证明；只有匹配的 hash+byte-size、finalize proof 等内容级证据才允许 audio same no-op。Mac inbox 只有 `hasAudio` 的记录才可参与音频证明。
+- sync run store 记录有限集合的 superseded runID。新一轮开始可取代旧轮；旧轮后到的进度、success 或 failure 均被拒绝。iPhone heartbeat 携带当前 `LocalNetworkSyncRunStatus`，Mac 只接受符合当前 runID/代际的进度或终态，从而补齐 ACK/terminal response 丢失后的状态收敛；heartbeat 在线本身仍不等于同步成功。
+- 连接诊断队列现区分 normal/critical。带 error code 的事件，以及 sync run/tick、upload/finalize、metadata apply 的成功或失败终态均为 critical；队列满时 critical 优先驱逐 normal，而后续 normal 不能驱逐 critical。优先级不绕过既有 redaction。
+- 自动化已覆盖 V2 归一化和版本前缀、双端同 fixture 的跨设备等价、merge 保留本机字段、整秒 round-trip、action-scoped manifest、冲突隔离、tombstone/existence/audio proof、run supersede/heartbeat 和诊断优先级。仍需 paired 真机验证同库跨设备 V2 一致、旧版与 V2 混跑的一次性 diff、冲突伴随安全动作、metadata-only 到音频证明闭环，以及后台/网络切换下 run 收敛。
+
+### 2026-07-11 最终修复补记
+
+- action-scoped recording manifest 现在必须由同 ID 的 active/tombstoned recording 或有效 deletion tombstone 覆盖；StudyItem、pending upload 或其他关系记录不能替代 recording 本体。artifact conflict 找不到 owner 时执行计划 fail closed，不再让未知依赖动作继续。
+- iPhone 与 Mac 都把 `syncedMetadataOnly` 作为 receiver-local receipt marker：业务相等或 peer 时钟不同都不会把另一端的 marker 覆盖到本机；真实音频出现时本机清除。foreground/background pending upload builder 通过 recordingID 反查并保留真实 StudyItem ID。
+- iPhone 的两个 sync-start 消费者分别使用原子持久化 FIFO。pending/in-flight/completed、生命周期去重和重启保守重放均落盘；enqueue 持久化失败会内存回滚并拒绝 ACK，in-flight 重启后回到队首。
+- Mac metadata apply 使用 lease 暂停 watchdog；apply 后刷新进度时间并恢复监督。同一 run 采用 first-terminal-wins，旧 run 迟到终态不能覆盖新 run。Mac inbox 更新通知在主线程同步刷新，metadata+audio route 完成后 UI/store 无需重启即可看见新状态。
+- pairing 只在 confirm 或已签名 proof 成功后保存 iPhone connection snapshot；Mac 只有确认 durable paired-store 成功才返回完成。续传内容合同变化会启动新 session，损坏的 upload ledger 可隔离错误记录并从真实文件/metadata 重建。
+- 当前代码级正常路径阻碍已闭环。iOS 主测试类记录 193 项、0 failure（3 项明确 skip）；Mac metadata/existence/manifest 相关 suite 45 项通过，另有 6 项真实 listener/route/control-plane 串行回归通过；iOS Simulator 与 macOS Debug build 均退出 0。仍缺 paired 真机、Release、TSan、弱网/后台和 soak 证据。

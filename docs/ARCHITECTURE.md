@@ -1330,3 +1330,73 @@ Canonical fallback 语义：
 - retry drainer、Mac pending sync 超时/ack 以及 checksum cache 已有单元测试覆盖，但 Mac 点击同步到 iPhone 前台执行 tick 的完整真机链路仍需手动验证。
 - UI 测试覆盖很轻，核心保障主要来自 Swift Testing 单元测试。
 - `RokuricsVisualDiagnostics/` 和顶层图标源的维护策略需要人工确认。
+
+## 2026-07-10 连接到内容完成的生产状态机
+
+生产链路的完成关系现在是：
+
+1. **连接**：TLS fingerprint pinning + 两阶段 pairing credential commit + HMAC/nonce request verification；heartbeat 成功独立建立 online evidence。
+2. **同步控制面**：双方交换 inventory、manifest、object metadata、hash/size、tombstone、ledger/status facts；status delta 需要显式 ACK，Mac manual sync-start 需要匹配 runID ACK。
+3. **metadata 应用**：双端等待全部必需 apply domain 完成；conflict、blocked、rollback failure、rejected/failed change 都使本轮失败。
+4. **内容执行**：iPhone→Mac 通过现有 recording upload coordinator 或 artifact put；Mac→iPhone 仍由 iPhone 主动 artifact request/pull。recording audio 不自动从 Mac 下载到 iPhone。
+5. **最终确认**：artifact 必须取得 server final apply/complete 证明；audio 必须由既有上传协议完成；所有 remaining transfer 为空后才能记录完整成功。
+
+关键持久化身份：
+
+- pairing：pending credential + confirmation token；提交后为 paired device credential。
+- sync-start：`deviceID + syncRunID`，持久到 ACK/timeout。
+- status exchange：`senderNodeID + sourceIncarnationID + sequence`。
+- recording upload job：`recordingID + targetDeviceID`；target 改变会重建 job。
+- artifact resume：`artifactID + checksum + size`，不能仅以 artifactID/offset 证明版本。
+
+地址层优先使用稳定 `.local` hostname 和 Bonjour advertisement；数字 IPv4 是配对 payload 的 fallback，不再是唯一长期 endpoint。Release production owner 保持 old kernel；Debug canonical mode 必须有显式 stored configuration 和人工确认。
+
+HTTPS listener 的候选端口初始由 `MacAppStorageProfile.receiverPort` 提供；该值优先读取当前 app profile 已持久化的动态端口。若绑定明确以 `EADDRINUSE` 失败，`SecureReceiverService` 释放失败 server、将候选端口加一、持久化并等待下一次用户点击；其他错误不移动端口。配对码和可复制 payload 只能在 listener ready 后发布，因此 payload 的 port 与真实 listener active port 相同。iPhone 不发现或猜测端口，而是读取 Mac 复制文本中的 `Port:` 并持久化到 paired connection snapshot。
+
+## 2026-07-11 稳定业务等价、隔离执行与状态收敛架构
+
+### V2 业务等价与业务时钟
+
+`RokuricsShared/SyncCore/LocalNetworkBusinessSignatureV2.swift` 定义跨 iPhone/Mac 共用的中性 projection、规范化规则和 hash envelope。两端模型先映射为相同 projection，再以 sorted-key JSON 和 SHA256 生成带 `ln-business-v2:` 前缀的签名。文本做 Unicode NFC/trim，tag namespace/value 归一为小写，tag 去重排序；本机文件路径、duration/处理/上传/冲突状态、时间戳和派生 membership 不属于业务身份。custom properties 只有明确列入 `explicitBusinessCustomPropertyKeys` 的 key 才能进入签名和 merge；当前白名单为空。
+
+同步因此维护三类互不替代的事实：
+
+1. V2 business signature：判断跨设备业务内容是否等价。
+2. 持久 `updatedAt`/canonical `modifiedAt`：决定相同对象的业务先后和 apply 方向。
+3. receive、processing、upload、UI、retry 等 runtime state：只描述本机执行状态，不改变前两者。
+
+merge 只覆盖 peer business fields，并保留本机路径、duration、processing 状态、note sections、source description、conflict state、本机 custom keys 和可重建 membership。tag 能匹配时保留本机 id/createdAt。canonical adapter 的业务时间来自持久对象或 deletion 事实，而不是接收/处理时刻；wire timestamp 在构造和解码时统一向下截断到整秒，使 ISO8601 round-trip 后 manifest hash 仍稳定。
+
+### Action-scoped 执行与冲突隔离
+
+planner 仍可从完整 inventory/manifest 形成全局差异，但执行前会按本轮 action ID 裁剪 manifest，并扩展必要的 item↔recording 关系。metadata apply/upload 只发送对应 object、tombstone、pending upload 与 recording facts；不存在所需 payload 时抛错。该边界防止一个小范围动作把无关对象或并发更新重新提交给 peer。
+
+执行计划以冲突依赖图隔离对象：artifact conflict 会阻塞 owner recording，item conflict 会阻塞其 recording，recording conflict 会阻塞关联 item，folder conflict 会阻塞成员 item/recording。隔离后的无关 metadata、artifact、audio 动作可先完成；但原始 `conflictActions` 继续参与最终判定，所以本轮不会因安全动作成功而伪装成完整成功。
+
+### Recording existence 与内容证明
+
+`CanonicalRecordingExistenceTruth` 把 parent tombstone、peer knowledge 和 audio proof 分开建模。tombstone 优先级最高并阻止 resurrection；peer unknown 保持 deferred；metadata-only、receive/index 记录、study item 和 completed ledger 只证明对象或历史流程存在，不证明 peer 持有字节。只有同 recording 的 hash+byte-size 匹配、finalize proof 等内容级事实才能产生 `audioSameNoOp`；hash/size 不同为 conflict，本机有真实音频且 peer 无内容证明时形成 upload candidate。
+
+### syncRunID 代际与 heartbeat 收敛
+
+双端 connection sync state store 以当前 active runID 为写入门槛，并保留最多 32 个 superseded runID。新的 beginning phase 可以取代未完成旧轮；同轮倒退、旧轮迟到进度以及旧轮终态都被拒绝。iPhone heartbeat 携带当前 `LocalNetworkSyncRunStatus`，Mac 通过同一 run-aware store 消费进度/completed/failed；这条旁路用于修复终态 response 或 ACK 丢失后的状态收敛，不把 heartbeat presence 提升为同步成功。
+
+### 诊断背压
+
+`CanonicalAsyncDiagnosticsWriter` 在同一有序队列中支持 normal/critical priority。error-bearing 事件和 sync run/tick、upload/finalize、metadata apply 的终态被归类为 critical；队列饱和时 critical 可驱逐最早 normal，normal 不可驱逐 critical。序列化 tail task 保留接受顺序，所有事件仍先经过原有字段约束和敏感信息 redaction。
+
+### Durable sync-start queue 与 ACK 边界
+
+iPhone 的 coordinator consumer 与 app-service consumer 各自拥有独立磁盘队列，状态为 pending/in-flight/completed。enqueue 只有在原子写成功后才可对 Mac ACK；写失败同时回滚内存，heartbeat 也不能代替 ACK。重启时未完成 in-flight 被保守放回队首，completed/lifetime dedupe 防止同一信号被当前生命周期重复执行。这个队列解决“Mac 已删 pending，但 iPhone 尚未真正接管 run”的空窗。
+
+### Metadata apply lease 与 terminal ownership
+
+Mac 在 metadata apply 开始时取得 run-scoped lease，lease 存续期间 watchdog 不得把长 apply 判为 stalled；结束时刷新 activity timestamp 后再恢复 watchdog。同一 active run 的 terminal state first-write-wins；superseded run、非 active run 和 terminal 后的倒退更新都被拒绝。这样 inventory、apply、heartbeat 和超时监督共享同一个 run generation，而不是相互覆盖。
+
+### Receiver-local marker 与真实对象身份
+
+`syncedMetadataOnly` 不属于跨端业务模型，而是接收端对“仅收到 metadata”的本地收据。business merge 先比较业务字段，再在接收端保留/清理本机 marker。Pending recording upload 的 owner 是真实 StudyItem；builder 必须通过 recording relation 找回 itemID，不能因常见的一对一数据而假设 `itemID == recordingID`。
+
+### Upload session 的内容合同
+
+resumable session 绑定 checksum、byte size 和目标 peer。客户端发现内容合同变化时废弃旧 offset/session 并创建新 session；服务端不得用旧完整临时文件代替 final apply ACK。损坏 ledger 作为可诊断的派生状态处理，不能让仍存在的 recording 和文件永久失去上传机会。

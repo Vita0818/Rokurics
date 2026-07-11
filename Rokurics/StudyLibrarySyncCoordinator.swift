@@ -80,10 +80,11 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     private var statusStoreSubscription: AnyCancellable?
     private var failureCount = 0
     private var pendingManualLocalNetworkSync = false
-    private var pendingHeartbeatRequestedSync: (syncRunID: String?, hintedAt: Date)?
+    private var heartbeatRequestedSyncQueue: LocalNetworkSyncDurableSignalQueue
+    private let heartbeatRequestedSyncQueueFileURL: URL
     private var heartbeatRequestedSyncTask: Task<Void, Never>?
-    private var lastHeartbeatRequestedSyncQueuedAt: Date?
-    private var lastHeartbeatRequestedSyncCompletedAt: Date?
+    private var lastUncorrelatedHeartbeatSyncQueuedAt: Date?
+    private var lastUncorrelatedHeartbeatSyncCompletedAt: Date?
     private let heartbeatRequestedSyncDebounceInterval: TimeInterval = 5
 
     init(
@@ -111,6 +112,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
         canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
         canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil,
+        durableSignalQueueFileURL: URL? = nil,
         heartbeatInterval: TimeInterval = 3,
         syncInterval: TimeInterval = 240
     ) {
@@ -132,6 +134,13 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 displayName: UIDevice.current.name
             )
         )
+        let resolvedDurableSignalQueueFileURL = durableSignalQueueFileURL
+            ?? studyLibraryStore.libraryRootURL
+                .appendingPathComponent("Sync", isDirectory: true)
+                .appendingPathComponent("study-coordinator-durable-signals.json", isDirectory: false)
+        let recoveredDurableSignalQueue = (try? LocalNetworkSyncDurableSignalQueue.loadPersistentState(
+            from: resolvedDurableSignalQueueFileURL
+        )) ?? LocalNetworkSyncDurableSignalQueue()
         self.connectionStore = connectionStore
         self.studyLibraryStore = studyLibraryStore
         self.recordingManager = recordingManager
@@ -171,13 +180,29 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         self.canonicalStatusTruthRuntime = resolvedStatusTruthRuntime
         self.canonicalStatusExchangeRuntime = resolvedStatusExchangeRuntime
         self.canonicalConnectionRuntime = resolvedConnectionRuntime
+        self.heartbeatRequestedSyncQueue = recoveredDurableSignalQueue
+        self.heartbeatRequestedSyncQueueFileURL = resolvedDurableSignalQueueFileURL
         self.presenceHeartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: presenceHeartbeatClient ?? resolvedClient,
             statusStore: resolvedStatusStore,
             diagnosticsStore: resolvedDiagnosticsStore,
             canonicalStatusExchangeRuntime: resolvedStatusExchangeRuntime,
-            canonicalConnectionRuntime: resolvedConnectionRuntime
+            canonicalConnectionRuntime: resolvedConnectionRuntime,
+            syncRunStatusProvider: {
+                let state = resolvedSyncStateStore.state
+                guard let syncRunID = state.activeSyncRunID,
+                      let controlPlaneState = state.syncControlPlaneState,
+                      let updatedAt = state.syncControlPlaneUpdatedAt else {
+                    return nil
+                }
+                return LocalNetworkSyncRunStatus(
+                    syncRunID: syncRunID,
+                    state: controlPlaneState,
+                    updatedAt: updatedAt,
+                    errorCode: controlPlaneState == .failed ? "sync_failed" : nil
+                )
+            }
         )
         self.heartbeatInterval = heartbeatInterval
         self.syncInterval = syncInterval
@@ -357,6 +382,9 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         }
         syncTask = Task { [weak self] in
             await self?.syncLoop()
+        }
+        if heartbeatRequestedSyncQueue.hasPendingRequests {
+            scheduleHeartbeatRequestedSyncDrainIfNeeded()
         }
     }
 
@@ -704,11 +732,12 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         )
     }
 
+    @discardableResult
     private func handleHeartbeatSyncRequestedHint(
         syncRunID: String?,
         hintReceivedAt: Date,
         now: Date = Date()
-    ) {
+    ) -> Bool {
         let snapshot = connectionStore.snapshot
         diagnosticsStore.record(
             phase: "heartbeatSyncRequestedHintReceived",
@@ -730,7 +759,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "not_paired"
             )
-            return
+            return false
         }
         guard userWantsConnection else {
             diagnosticsStore.record(
@@ -739,7 +768,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "user_does_not_want_connection"
             )
-            return
+            return false
         }
         if UIApplication.shared.applicationState == .background {
             diagnosticsStore.record(
@@ -748,7 +777,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "app_background"
             )
-            return
+            return false
         }
         if let presence = statusStore.status(for: snapshot.deviceID, now: now)?.presenceSnapshot(now: now),
            !presence.isOnline {
@@ -759,19 +788,12 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 result: presence.state.rawValue,
                 errorCode: "presence_not_online"
             )
-            return
+            return false
         }
-        if pendingHeartbeatRequestedSync != nil {
-            diagnosticsStore.record(
-                phase: "heartbeatSyncRequestedTickAlreadyPending",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "immediateSyncDedupedCount=1",
-                errorCode: "already_pending"
-            )
-            return
-        }
-        if let lastQueuedAt = lastHeartbeatRequestedSyncQueuedAt,
+        let normalizedRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isCorrelatedRun = normalizedRunID?.isEmpty == false
+        if !isCorrelatedRun,
+           let lastQueuedAt = lastUncorrelatedHeartbeatSyncQueuedAt,
            now.timeIntervalSince(lastQueuedAt) < heartbeatRequestedSyncDebounceInterval {
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickDebounced",
@@ -780,9 +802,10 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 result: "immediateSyncDedupedCount=1",
                 errorCode: "debounced"
             )
-            return
+            return true
         }
-        if let lastCompletedAt = lastHeartbeatRequestedSyncCompletedAt,
+        if !isCorrelatedRun,
+           let lastCompletedAt = lastUncorrelatedHeartbeatSyncCompletedAt,
            now.timeIntervalSince(lastCompletedAt) < heartbeatRequestedSyncDebounceInterval {
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickDebounced",
@@ -791,11 +814,48 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 result: "immediateSyncDedupedCount=1",
                 errorCode: "recently_completed"
             )
-            return
+            return true
         }
 
-        pendingHeartbeatRequestedSync = (syncRunID, hintReceivedAt)
-        lastHeartbeatRequestedSyncQueuedAt = now
+        let enqueueResult = heartbeatRequestedSyncQueue.enqueuePersistingCorrelatedRun(
+            syncRunID: syncRunID,
+            receivedAt: hintReceivedAt,
+            fileURL: heartbeatRequestedSyncQueueFileURL
+        )
+        switch enqueueResult {
+        case .duplicate:
+            diagnosticsStore.record(
+                phase: "heartbeatSyncRequestedTickAlreadyPending",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "immediateSyncDedupedCount=1",
+                errorCode: "run_already_tracked"
+            )
+            return true
+        case .capacityExceeded:
+            diagnosticsStore.record(
+                phase: "heartbeatSyncRequestedTickQueueFull",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "pendingCount=\(heartbeatRequestedSyncQueue.pendingCount)",
+                errorCode: "sync_signal_queue_full"
+            )
+            return false
+        case .persistenceFailed:
+            diagnosticsStore.record(
+                phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                errorCode: "sync_signal_queue_persist_failed"
+            )
+            return false
+        case .queued:
+            break
+        }
+
+        if !isCorrelatedRun {
+            lastUncorrelatedHeartbeatSyncQueuedAt = now
+        }
         diagnosticsStore.record(
             phase: isSyncing ? "heartbeatSyncRequestedTickAlreadyRunning" : "heartbeatSyncRequestedTickQueued",
             deviceID: snapshot.deviceID,
@@ -811,6 +871,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             )
         }
         scheduleHeartbeatRequestedSyncDrainIfNeeded()
+        return true
     }
 
     private func scheduleHeartbeatRequestedSyncDrainIfNeeded() {
@@ -824,7 +885,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
 
     private func drainHeartbeatRequestedSyncQueue() async {
         defer { heartbeatRequestedSyncTask = nil }
-        while let request = pendingHeartbeatRequestedSync {
+        while let request = heartbeatRequestedSyncQueue.peek() {
             if isSyncing {
                 diagnosticsStore.record(
                     phase: "heartbeatSyncRequestedTickAlreadyRunning",
@@ -837,9 +898,26 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 continue
             }
 
-            pendingHeartbeatRequestedSync = nil
+            guard let request = heartbeatRequestedSyncQueue.dequeueNext() else {
+                continue
+            }
+            if request.syncRunID != nil {
+                do {
+                    try heartbeatRequestedSyncQueue.writePersistentState(
+                        to: heartbeatRequestedSyncQueueFileURL
+                    )
+                } catch {
+                    diagnosticsStore.record(
+                        phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                        deviceID: connectionStore.snapshot.deviceID,
+                        syncRunID: request.syncRunID,
+                        result: "operation=dequeue",
+                        errorCode: "sync_signal_queue_persist_failed"
+                    )
+                }
+            }
             let startedAt = Date()
-            let latencyMs = max(0, startedAt.timeIntervalSince(request.hintedAt) * 1_000)
+            let latencyMs = max(0, startedAt.timeIntervalSince(request.receivedAt) * 1_000)
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickStarted",
                 deviceID: connectionStore.snapshot.deviceID,
@@ -851,8 +929,26 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             let succeeded = await runHeartbeatRequestedSync(syncRunID: request.syncRunID)
             let finishedAt = Date()
             let durationMs = max(0, finishedAt.timeIntervalSince(completedAt) * 1_000)
+            heartbeatRequestedSyncQueue.markFinished(request)
+            if request.syncRunID != nil {
+                do {
+                    try heartbeatRequestedSyncQueue.writePersistentState(
+                        to: heartbeatRequestedSyncQueueFileURL
+                    )
+                } catch {
+                    diagnosticsStore.record(
+                        phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                        deviceID: connectionStore.snapshot.deviceID,
+                        syncRunID: request.syncRunID,
+                        result: "operation=finish",
+                        errorCode: "sync_signal_queue_persist_failed"
+                    )
+                }
+            }
             if succeeded {
-                lastHeartbeatRequestedSyncCompletedAt = finishedAt
+                if request.syncRunID == nil {
+                    lastUncorrelatedHeartbeatSyncCompletedAt = finishedAt
+                }
                 diagnosticsStore.record(
                     phase: "heartbeatSyncRequestedTickCompleted",
                     deviceID: connectionStore.snapshot.deviceID,
@@ -998,21 +1094,24 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 state: .planningTransfers
             )
             let pullResult = try await studyLibraryStore.applySyncManifest(remoteManifest, localDeviceID: snapshot.deviceID)
+            guard pullResult.failedChanges == 0, pullResult.conflictCount == 0 else {
+                throw LocalNetworkSyncExecutionError.metadataApplyFailed(
+                    direction: "legacy-download",
+                    failedChanges: pullResult.failedChanges,
+                    conflictCount: pullResult.conflictCount,
+                    rejectedChanges: 0,
+                    serverError: nil
+                )
+            }
             syncStateStore.recordPull(
                 deviceID: snapshot.deviceID,
                 remoteManifestHash: remoteManifest.checksum,
                 remoteCommitID: remoteManifest.commitID ?? remoteResponse.newCommitID
             )
 
-            let skippedUploadCount = remoteManifest.pendingUploads.filter { $0.status != .uploaded }.count
-            let uploadResult = PendingUploadProcessingResult(remainingCount: skippedUploadCount)
-            if skippedUploadCount > 0 {
-                diagnosticsStore.record(
-                    phase: "contentTransferSkippedForStructureSync",
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "pendingRecordingUploads:\(skippedUploadCount)"
-                )
+            let uploadResult = await processPendingRecordingUploads(remoteManifest: remoteManifest, settings: snapshot)
+            guard uploadResult.failedCount == 0, uploadResult.remainingCount == 0 else {
+                throw LocalNetworkSyncExecutionError.contentTransfersIncomplete(uploadResult.remainingCount + uploadResult.failedCount)
             }
             LocalNetworkSyncProgressStore.shared.record(
                 deviceID: snapshot.deviceID,
@@ -1026,10 +1125,34 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             guard applyResponse.ok else {
                 throw SecureMacUploadError.serverRejected(applyResponse.error ?? "sync_apply_failed")
             }
+            let failedChanges = applyResponse.applyResult?.failedChanges ?? 0
+            let conflictCount = applyResponse.applyResult?.conflictCount ?? 0
+            let rejectedChanges = applyResponse.rejectedChanges?.count ?? 0
+            guard failedChanges == 0,
+                  conflictCount == 0,
+                  rejectedChanges == 0,
+                  applyResponse.error?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+                throw LocalNetworkSyncExecutionError.metadataApplyFailed(
+                    direction: "legacy-upload",
+                    failedChanges: failedChanges,
+                    conflictCount: conflictCount,
+                    rejectedChanges: rejectedChanges,
+                    serverError: applyResponse.error
+                )
+            }
 
             if let returnedManifest = applyResponse.manifest,
                returnedManifest.checksum != remoteManifest.checksum {
-                _ = try? await studyLibraryStore.applySyncManifest(returnedManifest, localDeviceID: snapshot.deviceID)
+                let returnedResult = try await studyLibraryStore.applySyncManifest(returnedManifest, localDeviceID: snapshot.deviceID)
+                guard returnedResult.failedChanges == 0, returnedResult.conflictCount == 0 else {
+                    throw LocalNetworkSyncExecutionError.metadataApplyFailed(
+                        direction: "legacy-returned-manifest",
+                        failedChanges: returnedResult.failedChanges,
+                        conflictCount: returnedResult.conflictCount,
+                        rejectedChanges: 0,
+                        serverError: nil
+                    )
+                }
             }
 
             let summary = Self.syncSummaryText(
@@ -1334,12 +1457,21 @@ protocol LocalNetworkSyncClientProtocol {
     func sendLocalNetworkSyncStartSignal(settings: SecureMacConnectionSnapshot, request: LocalNetworkSyncStartRequest) async throws -> LocalNetworkSyncStartResponse
     func sendLocalNetworkSyncStartAck(settings: SecureMacConnectionSnapshot, request: LocalNetworkSyncStartAckRequest) async throws -> LocalNetworkSyncStartAckResponse
     func applyLocalNetworkSyncMetadata(settings: SecureMacConnectionSnapshot, manifest: StudyLibrarySyncManifest) async throws -> StudyLibrarySyncManifestResponse
+    func applyLocalNetworkSyncMetadata(settings: SecureMacConnectionSnapshot, manifest: StudyLibrarySyncManifest, syncRunID: String?) async throws -> StudyLibrarySyncManifestResponse
     func requestLocalNetworkSyncArtifact(settings: SecureMacConnectionSnapshot, request: LocalNetworkSyncArtifactRequest) async throws -> LocalNetworkSyncArtifactResponse
     func fetchLocalNetworkSyncArtifactStatus(settings: SecureMacConnectionSnapshot, request: LocalNetworkSyncArtifactStatusRequest) async throws -> LocalNetworkSyncArtifactStatusResponse
     func putLocalNetworkSyncArtifact(settings: SecureMacConnectionSnapshot, request: LocalNetworkSyncArtifactPutRequest) async throws -> LocalNetworkSyncArtifactPutResponse
 }
 
 extension LocalNetworkSyncClientProtocol {
+    func applyLocalNetworkSyncMetadata(
+        settings: SecureMacConnectionSnapshot,
+        manifest: StudyLibrarySyncManifest,
+        syncRunID: String?
+    ) async throws -> StudyLibrarySyncManifestResponse {
+        try await applyLocalNetworkSyncMetadata(settings: settings, manifest: manifest)
+    }
+
     func fetchLocalNetworkSyncInventory(
         settings: SecureMacConnectionSnapshot,
         localInventory: LocalNetworkSyncInventory,
@@ -1420,10 +1552,11 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
     private let configuration: LocalNetworkHeartbeatConfiguration
     private let canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime?
     private let canonicalConnectionRuntime: CanonicalConnectionRuntime?
+    private let syncRunStatusProvider: (@MainActor () -> LocalNetworkSyncRunStatus?)?
     private var heartbeatTask: Task<Void, Never>?
     private var sequenceNumber: UInt64 = 0
     private(set) var isHeartbeatInFlight = false
-    var onSyncRequested: ((String?) -> Void)?
+    var onSyncRequested: (@MainActor (String?) async -> Bool)?
 
     init(
         connectionStore: any SecureMacConnectionSnapshotProviding,
@@ -1432,7 +1565,8 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
         diagnosticsStore: ConnectionDiagnosticsStore? = nil,
         configuration: LocalNetworkHeartbeatConfiguration = .foregroundDefault,
         canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
-        canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil
+        canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil,
+        syncRunStatusProvider: (@MainActor () -> LocalNetworkSyncRunStatus?)? = nil
     ) {
         self.connectionStore = connectionStore
         self.client = client ?? SecureMacUploadClient()
@@ -1441,6 +1575,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
         self.configuration = configuration
         self.canonicalStatusExchangeRuntime = canonicalStatusExchangeRuntime
         self.canonicalConnectionRuntime = canonicalConnectionRuntime
+        self.syncRunStatusProvider = syncRunStatusProvider
     }
 
     var isMonitoring: Bool {
@@ -1618,7 +1753,8 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
             sequenceNumber: requestSequence,
             sentAt: now,
             lastKnownPeerStatusRevision: statusBeforeSend?.connectionStatusRevision,
-            statusExchangeEnvelope: outgoingEnvelope
+            statusExchangeEnvelope: outgoingEnvelope,
+            syncRunStatus: syncRunStatusProvider?()
         )
 
         do {
@@ -1695,14 +1831,14 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                     diagnosticsStore.record(phase: "statusFactRejected", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: exchangeResult?.reason, errorCode: exchangeResult?.stale == true ? "stale_status_envelope" : "status_fact_rejected")
                 }
                 if exchangeResult?.requestedActions.contains(.enqueueRunSyncSoon) == true {
-                    onSyncRequested?(nil)
+                    _ = await onSyncRequested?(nil)
                 }
                 if exchangeResult?.requestedActions.contains(.requestLightweightAudioProof) == true {
                     diagnosticsStore.record(phase: "peerProofUnavailable", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: "sendAudioProofRequestObserved")
                 }
                 if exchangeResult?.requestedActions.contains(.requestFullInventory) == true {
                     diagnosticsStore.record(phase: "fullInventoryRequested", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: "requestOnly")
-                    onSyncRequested?(nil)
+                    _ = await onSyncRequested?(nil)
                 }
             }
             if let syncStartSignal = response.syncStartSignal {
@@ -1714,28 +1850,57 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                     syncRunID: syncStartSignal.syncRunID,
                     result: syncStartSignal.reason
                 )
-                let ack = try await client.sendLocalNetworkSyncStartAck(
-                    settings: snapshot,
-                    request: LocalNetworkSyncStartAckRequest(
-                        syncRunID: syncStartSignal.syncRunID,
+                // ACK only after the bounded local run queue has reliably
+                // accepted this run (or proves it is already tracked).
+                let reliablyQueued = await onSyncRequested?(syncStartSignal.syncRunID) ?? false
+                if reliablyQueued {
+                    do {
+                        let ack = try await client.sendLocalNetworkSyncStartAck(
+                            settings: snapshot,
+                            request: LocalNetworkSyncStartAckRequest(
+                                syncRunID: syncStartSignal.syncRunID,
+                                deviceID: snapshot.deviceID,
+                                platform: .iPhone,
+                                acknowledgedAt: Date(),
+                                disposition: "ack"
+                            )
+                        )
+                        guard ack.ok, ack.syncRunID == syncStartSignal.syncRunID else {
+                            throw SecureMacUploadError.serverRejected(ack.error ?? "sync_start_ack_failed")
+                        }
+                        diagnosticsStore.record(
+                            phase: "syncStartAckSent",
+                            deviceID: snapshot.deviceID,
+                            heartbeatSequence: requestSequence,
+                            responseSequence: response.receivedSequenceNumber,
+                            syncRunID: syncStartSignal.syncRunID,
+                            result: "ack"
+                        )
+                    } catch {
+                        // The heartbeat already succeeded. Keep connection presence
+                        // online and let the Mac redeliver the durable signal until
+                        // a later ACK succeeds.
+                        diagnosticsStore.record(
+                            phase: "syncStartAckFailed",
+                            deviceID: snapshot.deviceID,
+                            heartbeatSequence: requestSequence,
+                            responseSequence: response.receivedSequenceNumber,
+                            syncRunID: syncStartSignal.syncRunID,
+                            errorCode: "sync_start_ack_failed",
+                            errorMessage: error.localizedDescription
+                        )
+                    }
+                } else {
+                    diagnosticsStore.record(
+                        phase: "syncStartAckDeferredQueueRejected",
                         deviceID: snapshot.deviceID,
-                        platform: .iPhone,
-                        acknowledgedAt: Date(),
-                        disposition: "ack"
+                        heartbeatSequence: requestSequence,
+                        responseSequence: response.receivedSequenceNumber,
+                        syncRunID: syncStartSignal.syncRunID,
+                        result: "redeliveryRequired",
+                        errorCode: "sync_signal_not_queued"
                     )
-                )
-                guard ack.ok, ack.syncRunID == syncStartSignal.syncRunID else {
-                    throw SecureMacUploadError.serverRejected(ack.error ?? "sync_start_ack_failed")
                 }
-                diagnosticsStore.record(
-                    phase: "syncStartAckSent",
-                    deviceID: snapshot.deviceID,
-                    heartbeatSequence: requestSequence,
-                    responseSequence: response.receivedSequenceNumber,
-                    syncRunID: syncStartSignal.syncRunID,
-                    result: "ack"
-                )
-                onSyncRequested?(syncStartSignal.syncRunID)
             } else if response.syncRequested == true {
                 diagnosticsStore.record(
                     phase: "syncRequestedHintReceived",
@@ -1744,7 +1909,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                     responseSequence: response.receivedSequenceNumber,
                     result: "syncRequested"
                 )
-                onSyncRequested?(nil)
+                _ = await onSyncRequested?(nil)
             }
             return true
         } catch {
@@ -2237,7 +2402,10 @@ nonisolated struct LocalNetworkSyncBackgroundStudyManifestBuilder {
             folders: folders,
             tombstones: tombstones,
             pendingUploads: pendingUploads,
-            recordings: makeManifestRecordingEntries()
+            recordings: makeManifestRecordingEntries(itemsByRecordingID: Dictionary(
+                itemsByID.values.compactMap { item in item.recordingID.map { ($0, item) } },
+                uniquingKeysWith: { _, latest in latest }
+            ))
         )
         return LocalNetworkSyncBackgroundStudyManifestBuild(
             manifest: manifest
@@ -2402,13 +2570,26 @@ nonisolated struct LocalNetworkSyncBackgroundStudyManifestBuilder {
         itemsByID: [StudyItemID: StudyItemMetadata],
         targetDeviceID: String
     ) -> [PendingRecordingUpload] {
-        recordings.compactMap { recording in
+        let itemsByRecordingID = Dictionary(
+            itemsByID.values.compactMap { item in
+                item.recordingID.map { ($0, item) }
+            },
+            uniquingKeysWith: { current, candidate in
+                let fallbackItemID = candidate.recordingID.map(StudyItemMetadata.recordingBundleItemID(for:))
+                return current.itemID == fallbackItemID && candidate.itemID != fallbackItemID
+                    ? candidate
+                    : current
+            }
+        )
+        return recordings.compactMap { recording in
             guard !recording.isDeleted,
                   RecordingUploadStatus(rawMetadataValue: recording.uploadStatus) != .uploaded else {
                 return nil
             }
             let fallbackItemID = StudyItemMetadata.recordingBundleItemID(for: recording.id)
-            let item = itemsByID[fallbackItemID] ?? StudyItemMetadata.defaultMetadata(for: recording)
+            let item = itemsByRecordingID[recording.id]
+                ?? itemsByID[fallbackItemID]
+                ?? StudyItemMetadata.defaultMetadata(for: recording)
             return PendingRecordingUpload(
                 itemID: item.itemID,
                 recordingID: recording.id,
@@ -2421,9 +2602,17 @@ nonisolated struct LocalNetworkSyncBackgroundStudyManifestBuilder {
         }
     }
 
-    private func makeManifestRecordingEntries() -> [LocalNetworkSyncRecordingEntry] {
-        recordings.map { recording in
-            let audioURL = localFileURL(relativePath: recording.relativeAudioPath)
+    private func makeManifestRecordingEntries(
+        itemsByRecordingID: [String: StudyItemMetadata]
+    ) -> [LocalNetworkSyncRecordingEntry] {
+        let recordingsByID = Dictionary(recordings.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return Set(recordingsByID.keys).union(itemsByRecordingID.keys).sorted().compactMap { recordingID in
+            let recording = recordingsByID[recordingID]
+            guard let item = itemsByRecordingID[recordingID]
+                ?? recording.map(StudyItemMetadata.defaultMetadata(for:)) else {
+                return nil
+            }
+            let audioURL = recording.flatMap { localFileURL(relativePath: $0.relativeAudioPath) }
             let hasAudio = audioURL.map { fileManager.fileExists(atPath: $0.path) } ?? false
             let byteSize = hasAudio ? audioURL.flatMap { url -> Int64? in
                 guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
@@ -2433,32 +2622,32 @@ nonisolated struct LocalNetworkSyncBackgroundStudyManifestBuilder {
                 return size.int64Value
             } : nil
             return LocalNetworkSyncRecordingEntry(
-                recordingID: recording.id,
-                metadataHash: LocalNetworkSyncMetadataHash.hash(recording),
+                recordingID: recordingID,
+                metadataHash: item.localNetworkRecordingBusinessSignatureV2,
                 audioAvailable: hasAudio,
                 audioChecksum: nil,
                 audioSize: byteSize,
                 uploadLedgerState: nil,
                 receiveStatus: nil,
                 processingStatus: nil,
-                updatedAt: recording.deletedAt ?? recording.createdAt,
-                deleted: recording.isDeleted,
-                title: recording.title,
-                createdAt: recording.createdAt,
-                tombstone: recording.isDeleted,
+                updatedAt: item.trashedAt ?? item.updatedAt,
+                deleted: item.isTrashed,
+                title: item.title,
+                createdAt: item.createdAt,
+                tombstone: item.isTrashed,
                 audioAvailability: hasAudio ? .local : .missing,
-                uploadStatus: recording.uploadStatus,
-                transcriptionStatus: recording.transcriptionStatus,
-                noteStatus: recording.noteStatus,
+                uploadStatus: recording?.uploadStatus,
+                transcriptionStatus: recording?.transcriptionStatus,
+                noteStatus: recording?.noteStatus,
                 sourceDeviceID: deviceID,
-                artifactRefs: [
+                artifactRefs: recording.map { recording in [
                     LocalNetworkSyncArtifactID.make(
                         kind: .metadataJSON,
-                        ownerID: recording.id,
+                        ownerID: recordingID,
                         logicalPathToken: recording.relativeMetadataPath
                     )
-                ],
-                audioLogicalPathToken: recording.relativeAudioPath
+                ] },
+                audioLogicalPathToken: recording?.relativeAudioPath
             )
         }
     }
@@ -2635,13 +2824,13 @@ struct LocalNetworkSyncInventoryBuilder {
             )
             let folderRevisionHashesByID = Dictionary(
                 manifestBuild.manifest.folders.map { folder in
-                    (folder.folderID, LocalNetworkSyncMetadataHash.hash(folder))
+                    (folder.folderID, folder.localNetworkFolderBusinessSignatureV2)
                 },
                 uniquingKeysWith: { _, latest in latest }
             )
             let studyItemRevisionHashesByID = Dictionary(
                 manifestBuild.manifest.items.map { item in
-                    (item.itemID, LocalNetworkSyncMetadataHash.hash(item))
+                    (item.itemID, item.localNetworkStudyItemBusinessSignatureV2)
                 },
                 uniquingKeysWith: { _, latest in latest }
             )
@@ -2777,13 +2966,13 @@ struct LocalNetworkSyncInventoryBuilder {
         )
         let folderRevisionHashesByID = Dictionary(
             manifestBuild.manifest.folders.map { folder in
-                (folder.folderID, LocalNetworkSyncMetadataHash.hash(folder))
+                (folder.folderID, folder.localNetworkFolderBusinessSignatureV2)
             },
             uniquingKeysWith: { _, latest in latest }
         )
         let studyItemRevisionHashesByID = Dictionary(
             manifestBuild.manifest.items.map { item in
-                (item.itemID, LocalNetworkSyncMetadataHash.hash(item))
+                (item.itemID, item.localNetworkStudyItemBusinessSignatureV2)
             },
             uniquingKeysWith: { _, latest in latest }
         )
@@ -2882,14 +3071,26 @@ struct LocalNetworkSyncInventoryBuilder {
         var runtimeDiagnostics = input.diagnostics
         var runtimeFailures: [CanonicalInventoryRuntimeFailure] = input.failures
         let cacheDirectoryURL = canonicalChecksumCacheDirectory(rootURL: rootURL)
+        let manifestRecordingsByID = Dictionary(
+            manifest.recordings.map { ($0.recordingID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let recordingsByID = Dictionary(recordings.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         var recordingEntries: [LocalNetworkSyncRecordingEntry] = []
-        recordingEntries.reserveCapacity(recordings.count)
-        for metadata in recordings {
+        recordingEntries.reserveCapacity(manifestRecordingsByID.count)
+        for recordingID in Set(manifestRecordingsByID.keys).union(recordingsByID.keys).sorted() {
             if Task.isCancelled {
                 runtimeFailures.append(.cancelled)
                 break
             }
-            let audioFact = audioFactsByRecordingID[metadata.id]
+            guard var entry = manifestRecordingsByID[recordingID] else {
+                continue
+            }
+            guard let metadata = recordingsByID[recordingID] else {
+                recordingEntries.append(entry)
+                continue
+            }
+            let audioFact = audioFactsByRecordingID[recordingID]
             let audioURL = audioFact?.url
             let hasAudio = audioFact?.available ?? false
             let checksumResult: LocalNetworkChecksumCacheResult?
@@ -2899,7 +3100,7 @@ struct LocalNetworkSyncInventoryBuilder {
                     pathToken: metadata.relativeAudioPath,
                     deviceID: deviceID,
                     syncRunID: shadowSyncRunID,
-                    recordingID: metadata.id,
+                    recordingID: recordingID,
                     cacheDirectoryURL: cacheDirectoryURL
                 )
                 runtimeDiagnostics.merge(runtimeResult.runtimeResult)
@@ -2912,36 +3113,25 @@ struct LocalNetworkSyncInventoryBuilder {
             }
             let fileSize = checksumResult?.size ?? audioFact?.size
             let checksum = checksumResult?.sha256
-            recordingEntries.append(
-                LocalNetworkSyncRecordingEntry(
-                    recordingID: metadata.id,
-                    metadataHash: recordingMetadataHashesByID[metadata.id],
-                    audioAvailable: hasAudio,
-                    audioChecksum: checksum,
-                    audioSize: fileSize,
-                    uploadLedgerState: jobsByRecordingID[metadata.id]?.overallState.rawValue,
-                    receiveStatus: nil,
-                    processingStatus: nil,
-                    updatedAt: metadata.deletedAt ?? metadata.createdAt,
-                    deleted: metadata.isDeleted,
-                    title: metadata.title,
-                    createdAt: metadata.createdAt,
-                    tombstone: metadata.isDeleted,
-                    audioAvailability: hasAudio ? .local : .missing,
-                    uploadStatus: metadata.uploadStatus,
-                    transcriptionStatus: metadata.transcriptionStatus,
-                    noteStatus: metadata.noteStatus,
-                    sourceDeviceID: deviceID,
-                    artifactRefs: [
-                        LocalNetworkSyncArtifactID.make(
-                            kind: .metadataJSON,
-                            ownerID: metadata.id,
-                            logicalPathToken: metadata.relativeMetadataPath
-                        )
-                    ],
-                    audioLogicalPathToken: metadata.relativeAudioPath
+            entry.metadataHash = recordingMetadataHashesByID[recordingID] ?? entry.metadataHash
+            entry.audioAvailable = hasAudio
+            entry.audioChecksum = checksum
+            entry.audioSize = fileSize
+            entry.uploadLedgerState = jobsByRecordingID[recordingID]?.overallState.rawValue
+            entry.audioAvailability = hasAudio ? .local : .missing
+            entry.uploadStatus = metadata.uploadStatus
+            entry.transcriptionStatus = metadata.transcriptionStatus
+            entry.noteStatus = metadata.noteStatus
+            entry.sourceDeviceID = deviceID
+            entry.artifactRefs = [
+                LocalNetworkSyncArtifactID.make(
+                    kind: .metadataJSON,
+                    ownerID: recordingID,
+                    logicalPathToken: metadata.relativeMetadataPath
                 )
-            )
+            ]
+            entry.audioLogicalPathToken = metadata.relativeAudioPath
+            recordingEntries.append(entry)
         }
         let folders = manifest.folders.map { folder in
             LocalNetworkSyncFolderEntry(
@@ -3002,8 +3192,13 @@ struct LocalNetworkSyncInventoryBuilder {
             ]
         )
         let recordingAdapter = IPhoneCanonicalRecordingAdapter()
+        let canonicalStudyItemsByRecordingID = Dictionary(
+            manifest.items.compactMap { item in item.recordingID.map { ($0, item) } },
+            uniquingKeysWith: { _, latest in latest }
+        )
         let canonicalRecordingObjects = recordingAdapter.makeObjects(
             recordings: recordings,
+            studyItemsByRecordingID: canonicalStudyItemsByRecordingID,
             audioFactsByRecordingID: canonicalFactsByRecordingID,
             artifactFactsByRecordingID: canonicalGeneratedArtifactsByRecordingID,
             nodeID: deviceID
@@ -3149,39 +3344,41 @@ struct LocalNetworkSyncInventoryBuilder {
         let folderRevisionHashesByID = input.folderRevisionHashesByID
         let studyItemRevisionHashesByID = input.studyItemRevisionHashesByID
         let artifacts = input.artifacts
-        let recordingEntries = recordings.map { metadata in
-            let audioFact = audioFactsByRecordingID[metadata.id]
+        let manifestRecordingsByID = Dictionary(
+            manifest.recordings.map { ($0.recordingID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let recordingsByID = Dictionary(recordings.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let recordingEntries = Set(manifestRecordingsByID.keys).union(recordingsByID.keys).sorted().compactMap { recordingID -> LocalNetworkSyncRecordingEntry? in
+            guard var entry = manifestRecordingsByID[recordingID] else {
+                return nil
+            }
+            guard let metadata = recordingsByID[recordingID] else {
+                return entry
+            }
+            let audioFact = audioFactsByRecordingID[recordingID]
             let hasAudio = audioFact?.available ?? false
             let fileSize = audioFact?.size
             let checksum: String? = nil
-            return LocalNetworkSyncRecordingEntry(
-                recordingID: metadata.id,
-                metadataHash: recordingMetadataHashesByID[metadata.id],
-                audioAvailable: hasAudio,
-                audioChecksum: checksum,
-                audioSize: fileSize,
-                uploadLedgerState: jobsByRecordingID[metadata.id]?.overallState.rawValue,
-                receiveStatus: nil,
-                processingStatus: nil,
-                updatedAt: metadata.deletedAt ?? metadata.createdAt,
-                deleted: metadata.isDeleted,
-                title: metadata.title,
-                createdAt: metadata.createdAt,
-                tombstone: metadata.isDeleted,
-                audioAvailability: hasAudio ? .local : .missing,
-                uploadStatus: metadata.uploadStatus,
-                transcriptionStatus: metadata.transcriptionStatus,
-                noteStatus: metadata.noteStatus,
-                sourceDeviceID: deviceID,
-                artifactRefs: [
-                    LocalNetworkSyncArtifactID.make(
-                        kind: .metadataJSON,
-                        ownerID: metadata.id,
-                        logicalPathToken: metadata.relativeMetadataPath
-                    )
-                ],
-                audioLogicalPathToken: metadata.relativeAudioPath
-            )
+            entry.metadataHash = recordingMetadataHashesByID[recordingID] ?? entry.metadataHash
+            entry.audioAvailable = hasAudio
+            entry.audioChecksum = checksum
+            entry.audioSize = fileSize
+            entry.uploadLedgerState = jobsByRecordingID[recordingID]?.overallState.rawValue
+            entry.audioAvailability = hasAudio ? .local : .missing
+            entry.uploadStatus = metadata.uploadStatus
+            entry.transcriptionStatus = metadata.transcriptionStatus
+            entry.noteStatus = metadata.noteStatus
+            entry.sourceDeviceID = deviceID
+            entry.artifactRefs = [
+                LocalNetworkSyncArtifactID.make(
+                    kind: .metadataJSON,
+                    ownerID: recordingID,
+                    logicalPathToken: metadata.relativeMetadataPath
+                )
+            ]
+            entry.audioLogicalPathToken = metadata.relativeAudioPath
+            return entry
         }
         let folders = manifest.folders.map { folder in
             LocalNetworkSyncFolderEntry(
@@ -3242,8 +3439,13 @@ struct LocalNetworkSyncInventoryBuilder {
             ]
         )
         let recordingAdapter = IPhoneCanonicalRecordingAdapter()
+        let canonicalStudyItemsByRecordingID = Dictionary(
+            manifest.items.compactMap { item in item.recordingID.map { ($0, item) } },
+            uniquingKeysWith: { _, latest in latest }
+        )
         let canonicalRecordingObjects = recordingAdapter.makeObjects(
             recordings: recordings,
+            studyItemsByRecordingID: canonicalStudyItemsByRecordingID,
             audioFactsByRecordingID: canonicalFactsByRecordingID,
             artifactFactsByRecordingID: canonicalGeneratedArtifactsByRecordingID,
             nodeID: deviceID
@@ -3895,6 +4097,36 @@ struct LocalNetworkSyncInventoryBuilder {
 
 }
 
+private enum LocalNetworkSyncExecutionError: LocalizedError {
+    case unresolvedConflicts(Int)
+    case metadataApplyFailed(direction: String, failedChanges: Int, conflictCount: Int, rejectedChanges: Int, serverError: String?)
+    case contentTransfersIncomplete(Int)
+    case requiredSyncPayloadMissing(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unresolvedConflicts(let count):
+            return "sync_unresolved_conflicts:\(count)"
+        case .metadataApplyFailed(let direction, let failedChanges, let conflictCount, let rejectedChanges, let serverError):
+            let suffix = serverError?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return [
+                "sync_metadata_apply_failed",
+                "direction=\(direction)",
+                "failed=\(failedChanges)",
+                "conflicts=\(conflictCount)",
+                "rejected=\(rejectedChanges)",
+                suffix.map { "server=\($0)" }
+            ]
+            .compactMap { $0 }
+            .joined(separator: ",")
+        case .contentTransfersIncomplete(let count):
+            return "sync_content_transfers_incomplete:\(count)"
+        case .requiredSyncPayloadMissing(let payload):
+            return "sync_required_payload_missing:\(payload)"
+        }
+    }
+}
+
 @MainActor
 final class LocalNetworkSyncEngine {
     private static let maxSmallArtifactUploadBytes: Int64 = 4 * 1024 * 1024
@@ -4448,16 +4680,22 @@ final class LocalNetworkSyncEngine {
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID
             )
-            let contentUploadActionCount = plan.uploadRecordingAudioActions.count + plan.uploadArtifactActions.count
-            let contentDownloadActionCount = plan.downloadArtifactActions.count
-            let pendingUploadCount = plan.uploadMetadataActions.count
-            let pendingDownloadCount = plan.downloadMetadataActions.count
-            let skippedContentActionCount = contentUploadActionCount + contentDownloadActionCount
+            let isolatedExecution = Self.conflictIsolatedExecutionPlan(
+                plan,
+                localInventory: localInventory,
+                peerInventory: peerInventory
+            )
+            let executablePlan = isolatedExecution.plan
+            let pendingUploadCount = executablePlan.uploadMetadataActions.count
+                + executablePlan.uploadRecordingAudioActions.count
+                + executablePlan.uploadArtifactActions.count
+            let pendingDownloadCount = executablePlan.downloadMetadataActions.count
+                + executablePlan.downloadArtifactActions.count
             diagnosticsStore.record(
                 phase: "diffPlanCreated",
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
-                result: "metadataActionCount=\(pendingUploadCount + pendingDownloadCount),skippedContentActionCount=\(skippedContentActionCount),uploadMetadata:\(plan.uploadMetadataActions.count),uploadAudioSkipped:\(plan.uploadRecordingAudioActions.count),uploadArtifactsSkipped:\(plan.uploadArtifactActions.count),downloadMetadata:\(plan.downloadMetadataActions.count),downloadArtifactsSkipped:\(plan.downloadArtifactActions.count),conflicts:\(plan.conflictActions.count)",
+                result: "actionCount=\(pendingUploadCount + pendingDownloadCount + plan.conflictActions.count),uploadMetadata:\(plan.uploadMetadataActions.count),uploadAudio:\(plan.uploadRecordingAudioActions.count),uploadArtifacts:\(plan.uploadArtifactActions.count),downloadMetadata:\(plan.downloadMetadataActions.count),downloadArtifacts:\(plan.downloadArtifactActions.count),conflicts:\(plan.conflictActions.count)",
                 pendingUploadCount: pendingUploadCount,
                 pendingDownloadCount: pendingDownloadCount
             )
@@ -4465,7 +4703,7 @@ final class LocalNetworkSyncEngine {
                 phase: "bidirectionalDiffPlanCreated",
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
-                result: "metadataActionCount=\(pendingUploadCount + pendingDownloadCount),uploadMetadata:\(pendingUploadCount),downloadMetadata:\(pendingDownloadCount),skippedContent:\(skippedContentActionCount),conflicts:\(plan.conflictActions.count)",
+                result: "actionCount=\(pendingUploadCount + pendingDownloadCount + plan.conflictActions.count),upload:\(pendingUploadCount),download:\(pendingDownloadCount),conflicts:\(plan.conflictActions.count)",
                 pendingUploadCount: pendingUploadCount,
                 pendingDownloadCount: pendingDownloadCount
             )
@@ -4473,18 +4711,10 @@ final class LocalNetworkSyncEngine {
                 phase: "transferPlanCreated",
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
-                result: "metadataUpload:\(pendingUploadCount),metadataDownload:\(pendingDownloadCount),contentSkipped:\(skippedContentActionCount),conflict:\(plan.conflictActions.count)",
+                result: "upload:\(pendingUploadCount),download:\(pendingDownloadCount),conflict:\(plan.conflictActions.count)",
                 pendingUploadCount: pendingUploadCount,
                 pendingDownloadCount: pendingDownloadCount
             )
-            if skippedContentActionCount > 0 {
-                diagnosticsStore.record(
-                    phase: "contentTransferSkippedForStructureSync",
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "uploadAudio:\(plan.uploadRecordingAudioActions.count),uploadArtifacts:\(plan.uploadArtifactActions.count),downloadArtifacts:\(plan.downloadArtifactActions.count)"
-                )
-            }
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .transferJobsCreated)
             if pendingUploadCount == 0, pendingDownloadCount == 0, plan.conflictActions.isEmpty {
                 diagnosticsStore.record(phase: "noTransferNeeded", deviceID: snapshot.deviceID, syncRunID: syncRunID)
@@ -4509,21 +4739,58 @@ final class LocalNetworkSyncEngine {
                 peerInventoryHash: peerInventory.inventoryHash,
                 pendingUploadCount: pendingUploadCount,
                 pendingDownloadCount: pendingDownloadCount,
-                planSummary: "metadataUpload:\(pendingUploadCount),metadataDownload:\(pendingDownloadCount),contentSkipped:\(skippedContentActionCount),conflict:\(plan.conflictActions.count)",
+                planSummary: "upload:\(pendingUploadCount),download:\(pendingDownloadCount),conflict:\(plan.conflictActions.count)",
                 conflictCount: plan.conflictActions.count,
                 at: now
             )
 
-            try applyPeerRecordingStatuses(peerInventory: peerInventory)
-            try await applyPeerMetadataIfNeeded(peerInventory: peerInventory, plan: plan, localDeviceID: snapshot.deviceID)
+            let pendingTransfers = transferProgresses(peerInventory: peerInventory, plan: executablePlan, state: .pending)
+            if !pendingTransfers.isEmpty {
+                stateStore.recordActiveTransfers(pendingTransfers)
+            }
+
+            try applyPeerRecordingStatuses(
+                peerInventory: peerInventory,
+                excludedRecordingIDs: isolatedExecution.blockedRecordingIDs
+            )
+            try await applyPeerMetadataIfNeeded(peerInventory: peerInventory, plan: executablePlan, localDeviceID: snapshot.deviceID)
+            try createPlaceholderTransfers(peerInventory: peerInventory, plan: executablePlan, localDeviceID: snapshot.deviceID)
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .transferring)
             try await uploadLocalMetadataIfNeeded(
                 localInventory: localInventory,
-                plan: plan,
+                plan: executablePlan,
+                settings: snapshot,
+                syncRunID: syncRunID
+            )
+            try await uploadLocalArtifactsIfNeeded(
+                localInventory: localInventory,
+                plan: executablePlan,
+                settings: snapshot,
+                syncRunID: syncRunID
+            )
+            try await downloadPeerArtifactsIfNeeded(
+                peerInventory: peerInventory,
+                plan: executablePlan,
+                settings: snapshot,
+                syncRunID: syncRunID
+            )
+            let remainingAudioTransfers = await uploadMissingRecordingAudioIfNeeded(
+                plan: executablePlan,
+                localInventory: localInventory,
+                peerInventory: peerInventory,
                 settings: snapshot,
                 syncRunID: syncRunID,
-                forceSend: Self.isManualTrigger(trigger)
+                triggerSource: triggerSource
             )
+            guard remainingAudioTransfers.isEmpty else {
+                stateStore.recordActiveTransfers(remainingAudioTransfers)
+                throw LocalNetworkSyncExecutionError.contentTransfersIncomplete(remainingAudioTransfers.count)
+            }
+
+            guard plan.conflictActions.isEmpty else {
+                stateStore.recordActiveTransfers([])
+                throw LocalNetworkSyncExecutionError.unresolvedConflicts(plan.conflictActions.count)
+            }
 
             diagnosticsStore.record(
                 phase: "canonicalInventoryRuntimeSnapshotReused",
@@ -4543,14 +4810,26 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 result: "count=\(localRuntimeBuild.report.duplicateBuildCount)"
             )
-            let refreshedInventory = localInventory
+            let refreshedInventory = await inventoryBuilder.buildRuntimeSnapshot(
+                deviceID: snapshot.deviceID,
+                deviceName: UIDevice.current.name,
+                lastKnownPeerRevision: peerInventory.inventoryHash,
+                generatedAt: Date(),
+                shadowTrigger: trigger,
+                // This is a verification snapshot inside the same logical sync
+                // run. Reuse the run ID so diagnostics remain end-to-end
+                // correlatable instead of manufacturing a second run.
+                shadowSyncRunID: syncRunID,
+                sourceKind: .syncTick
+            ).inventory
             stateStore.recordSuccess(
                 peerDeviceID: peerInventory.device.deviceID,
                 localInventoryHash: refreshedInventory.inventoryHash,
                 peerInventoryHash: peerInventory.inventoryHash,
                 appliedPeerRevision: peerInventory.inventoryHash,
                 pendingUploadCount: 0,
-                pendingDownloadCount: 0
+                pendingDownloadCount: 0,
+                syncRunID: syncRunID
             )
             stateStore.recordActiveTransfers([])
             connectionStatusStore?.recordSignedRequestSucceeded(
@@ -4566,7 +4845,12 @@ final class LocalNetworkSyncEngine {
             diagnosticsStore.record(phase: "syncTickFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_tick_failed", errorMessage: error.localizedDescription)
             diagnosticsStore.record(phase: "syncRunFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_tick_failed", errorMessage: error.localizedDescription)
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .failed)
-            stateStore.recordFailure(code: "sync_tick_failed", message: error.localizedDescription, at: now)
+            stateStore.recordFailure(
+                code: "sync_tick_failed",
+                message: error.localizedDescription,
+                syncRunID: syncRunID,
+                at: now
+            )
             return nil
         }
     }
@@ -7622,11 +7906,12 @@ final class LocalNetworkSyncEngine {
         localManifest: CanonicalManifest?,
         peerManifest: CanonicalManifest?
     ) -> Int {
-        [localManifest, peerManifest].compactMap { $0 }.reduce(0) { count, manifest in
-            guard manifest.node.platform.caseInsensitiveCompare("iPhone") == .orderedSame else {
-                return count
-            }
-            return count + manifest.objects.count
+        let epoch = Date(timeIntervalSince1970: 0)
+        return [localManifest, peerManifest].compactMap { $0 }.reduce(0) { count, manifest in
+            count + manifest.objects.filter { object in
+                let modifiedAt = object.metadata.modifiedAt.date
+                return !modifiedAt.timeIntervalSince1970.isFinite || modifiedAt <= epoch
+            }.count
         }
     }
 
@@ -8643,9 +8928,12 @@ final class LocalNetworkSyncEngine {
             let peerDecisionState = peerAudioDecisionState(recordingID: recordingID, in: peerInventory, localAudioState: localDecisionState)
             let transferState = transferJobState(
                 transferID: transferID(direction: .upload, artifactID: objectID),
+                peerDeviceID: deviceID,
                 transferJobs: transferJobs
             )
-            let ledgerState = uploadLedgerState(uploadJobsByRecordingID[recordingID])
+            let ledgerState = uploadLedgerState(uploadJobsByRecordingID[recordingID].flatMap { job in
+                job.targetDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines) == deviceID ? job : nil
+            })
             let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
                 localAudioState: localDecisionState,
                 peerAudioState: peerDecisionState,
@@ -8775,7 +9063,7 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 result: [
                     "objectKind=\(action.entityKind)",
-                    "objectID=\(action.entityID)",
+                    "objectIDPrefix=\(safePrefix(action.entityID))",
                     "winner=\(winner)",
                     "loser=\(loser)",
                     "localHash=\(hashPrefix(pair.local?.sha256))",
@@ -9150,9 +9438,220 @@ final class LocalNetworkSyncEngine {
         return result
     }
 
-    private func applyPeerRecordingStatuses(peerInventory: LocalNetworkSyncInventory) throws {
+    static func conflictIsolatedExecutionPlan(
+        _ source: LocalNetworkSyncDiffPlan,
+        localInventory: LocalNetworkSyncInventory,
+        peerInventory: LocalNetworkSyncInventory
+    ) -> (plan: LocalNetworkSyncDiffPlan, blockedRecordingIDs: Set<String>) {
+        guard !source.conflictActions.isEmpty else {
+            return (source, [])
+        }
+
+        let allStudyItems = localInventory.studyItems + peerInventory.studyItems
+        let allFolders = localInventory.folders + peerInventory.folders
+        let allArtifacts = localInventory.artifacts + peerInventory.artifacts
+        let allItemIDs = Set(allStudyItems.map(\.itemID))
+        let allFolderIDs = Set(allFolders.map(\.folderID))
+
+        func normalizedEntityID(_ value: String, prefixes: [String]) -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            for prefix in prefixes where trimmed.hasPrefix(prefix) {
+                let suffix = String(trimmed.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !suffix.isEmpty {
+                    return suffix
+                }
+            }
+            return trimmed
+        }
+
+        func resolvedItemIDs(referencedBy rawID: String) -> Set<String> {
+            let entityID = normalizedEntityID(rawID, prefixes: ["studyItem:"])
+            var result: Set<String> = []
+            if allItemIDs.contains(entityID) {
+                result.insert(entityID)
+            }
+            // Compatibility with inventories produced before study-item
+            // actions switched from recording owner IDs to true item IDs.
+            result.formUnion(
+                allStudyItems.compactMap { item in
+                    item.recordingID == entityID ? item.itemID : nil
+                }
+            )
+            return result
+        }
+
+        func artifactOwnerIDs(for artifactID: String) -> Set<String> {
+            Set(allArtifacts.compactMap { artifact in
+                guard artifact.artifactID == artifactID else {
+                    return nil
+                }
+                let ownerID = artifact.ownerID.trimmingCharacters(in: .whitespacesAndNewlines)
+                return ownerID.isEmpty ? nil : ownerID
+            })
+        }
+
+        // An artifact conflict without an owner cannot be closed over the
+        // recording/item/folder dependency graph. Continuing with unrelated
+        // looking actions could still split one logical object across domains,
+        // so reject the executable plan as a whole and let the retained
+        // conflict make the run fail explicitly.
+        if source.conflictActions.contains(where: { action in
+            action.entityKind == "artifact"
+                && artifactOwnerIDs(for: action.entityID).isEmpty
+        }) {
+            var plan = source
+            plan.uploadMetadataActions.removeAll()
+            plan.downloadMetadataActions.removeAll()
+            plan.uploadArtifactActions.removeAll()
+            plan.downloadArtifactActions.removeAll()
+            plan.uploadRecordingAudioActions.removeAll()
+
+            var blockedRecordingIDs = Set(
+                (localInventory.recordings + peerInventory.recordings).map(\.recordingID)
+            )
+            blockedRecordingIDs.formUnion(allStudyItems.compactMap(\.recordingID))
+            blockedRecordingIDs.formUnion(
+                (source.uploadMetadataActions
+                    + source.downloadMetadataActions
+                    + source.uploadRecordingAudioActions)
+                    .filter { $0.entityKind == "recording" }
+                    .map {
+                        normalizedEntityID(
+                            $0.entityID,
+                            prefixes: ["recordingMetadata:", "recordingAudio:"]
+                        )
+                    }
+            )
+            return (plan, blockedRecordingIDs)
+        }
+
+        var blockedFolderIDs: Set<String> = []
+        var blockedItemIDs: Set<String> = []
+        var blockedRecordingIDs: Set<String> = []
+
+        for action in source.conflictActions {
+            switch action.entityKind {
+            case "folder":
+                blockedFolderIDs.insert(normalizedEntityID(action.entityID, prefixes: ["studyFolder:"]))
+            case "studyItem":
+                let referencedItems = resolvedItemIDs(referencedBy: action.entityID)
+                if referencedItems.isEmpty {
+                    blockedItemIDs.insert(normalizedEntityID(action.entityID, prefixes: ["studyItem:"]))
+                } else {
+                    blockedItemIDs.formUnion(referencedItems)
+                }
+            case "recording":
+                blockedRecordingIDs.insert(normalizedEntityID(
+                    action.entityID,
+                    prefixes: ["recordingMetadata:", "recordingAudio:"]
+                ))
+            case "artifact":
+                let owners = artifactOwnerIDs(for: action.entityID)
+                for ownerID in owners {
+                    if allFolderIDs.contains(ownerID) {
+                        blockedFolderIDs.insert(ownerID)
+                    } else if allItemIDs.contains(ownerID) {
+                        blockedItemIDs.insert(ownerID)
+                    } else {
+                        blockedRecordingIDs.insert(ownerID)
+                    }
+                }
+            default:
+                break
+            }
+        }
+
+        // Close the dependency graph to a fixed point. Folder descendants must
+        // be included before resolving their member items; item↔recording links
+        // are bidirectional because recording content and study metadata must
+        // never be partially applied across a conflict boundary.
+        var didExpand = true
+        while didExpand {
+            didExpand = false
+
+            for folder in allFolders {
+                guard let parentID = folder.parentID,
+                      blockedFolderIDs.contains(parentID),
+                      blockedFolderIDs.insert(folder.folderID).inserted else {
+                    continue
+                }
+                didExpand = true
+            }
+
+            for item in allStudyItems
+            where !blockedFolderIDs.isDisjoint(with: item.folderIDs) {
+                if blockedItemIDs.insert(item.itemID).inserted {
+                    didExpand = true
+                }
+            }
+
+            for item in allStudyItems where blockedItemIDs.contains(item.itemID) {
+                guard let recordingID = item.recordingID,
+                      blockedRecordingIDs.insert(recordingID).inserted else {
+                    continue
+                }
+                didExpand = true
+            }
+
+            for item in allStudyItems
+            where item.recordingID.map(blockedRecordingIDs.contains) == true {
+                if blockedItemIDs.insert(item.itemID).inserted {
+                    didExpand = true
+                }
+            }
+        }
+
+        let directConflictKeys = Set(source.conflictActions.map { "\($0.entityKind):\($0.entityID)" })
+        func isBlocked(_ action: LocalNetworkSyncDiffAction) -> Bool {
+            if directConflictKeys.contains("\(action.entityKind):\(action.entityID)") {
+                return true
+            }
+            switch action.entityKind {
+            case "recording":
+                return blockedRecordingIDs.contains(normalizedEntityID(
+                    action.entityID,
+                    prefixes: ["recordingMetadata:", "recordingAudio:"]
+                ))
+            case "studyItem":
+                let referencedItems = resolvedItemIDs(referencedBy: action.entityID)
+                return !blockedItemIDs.isDisjoint(with: referencedItems)
+                    || blockedItemIDs.contains(normalizedEntityID(action.entityID, prefixes: ["studyItem:"]))
+                    || blockedRecordingIDs.contains(action.entityID)
+            case "folder":
+                return blockedFolderIDs.contains(normalizedEntityID(action.entityID, prefixes: ["studyFolder:"]))
+            case "artifact":
+                let owners = artifactOwnerIDs(for: action.entityID)
+                guard !owners.isEmpty else {
+                    return true
+                }
+                return owners.contains {
+                    blockedRecordingIDs.contains($0)
+                        || blockedItemIDs.contains($0)
+                        || blockedFolderIDs.contains($0)
+                }
+            default:
+                return true
+            }
+        }
+
+        var plan = source
+        plan.uploadMetadataActions.removeAll(where: isBlocked)
+        plan.downloadMetadataActions.removeAll(where: isBlocked)
+        plan.uploadArtifactActions.removeAll(where: isBlocked)
+        plan.downloadArtifactActions.removeAll(where: isBlocked)
+        plan.uploadRecordingAudioActions.removeAll(where: isBlocked)
+        return (plan, blockedRecordingIDs)
+    }
+
+    private func applyPeerRecordingStatuses(
+        peerInventory: LocalNetworkSyncInventory,
+        excludedRecordingIDs: Set<String> = []
+    ) throws {
         var didChange = false
-        for peerRecording in peerInventory.recordings where peerRecording.receiveStatus == "completed" {
+        for peerRecording in peerInventory.recordings
+        where peerRecording.receiveStatus == "completed"
+            && !excludedRecordingIDs.contains(peerRecording.recordingID) {
             guard recordingAudioState(recordingID: peerRecording.recordingID, in: peerInventory).isAvailable else {
                 continue
             }
@@ -9173,11 +9672,23 @@ final class LocalNetworkSyncEngine {
         plan: LocalNetworkSyncDiffPlan,
         localDeviceID: String
     ) async throws {
-        guard !plan.downloadMetadataActions.isEmpty,
-              let manifest = peerInventory.studyManifest else {
+        guard !plan.downloadMetadataActions.isEmpty else {
             return
         }
-        _ = try await studyLibraryStore.applySyncManifest(manifest, localDeviceID: localDeviceID)
+        guard let manifest = peerInventory.studyManifest else {
+            throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("peer_manifest")
+        }
+        let scopedManifest = try Self.metadataManifest(manifest, scopedTo: plan.downloadMetadataActions)
+        let result = try await studyLibraryStore.applySyncManifest(scopedManifest, localDeviceID: localDeviceID)
+        guard result.failedChanges == 0, result.conflictCount == 0 else {
+            throw LocalNetworkSyncExecutionError.metadataApplyFailed(
+                direction: "download",
+                failedChanges: result.failedChanges,
+                conflictCount: result.conflictCount,
+                rejectedChanges: 0,
+                serverError: nil
+            )
+        }
         diagnosticsStore.record(phase: "metadataApplied", deviceID: localDeviceID)
         if plan.downloadMetadataActions.contains(where: { $0.reason == CanonicalApplyActionKind.recordingMetadataApply.rawValue }) {
             diagnosticsStore.record(phase: "canonicalRecordingMetadataAppliedFromCanonical", deviceID: localDeviceID)
@@ -9201,18 +9712,40 @@ final class LocalNetworkSyncEngine {
         localInventory: LocalNetworkSyncInventory,
         plan: LocalNetworkSyncDiffPlan,
         settings: SecureMacConnectionSnapshot,
-        syncRunID: String,
-        forceSend: Bool = false
+        syncRunID: String
     ) async throws {
-        guard (forceSend || !plan.uploadMetadataActions.isEmpty),
-              let manifest = localInventory.studyManifest else {
+        guard !plan.uploadMetadataActions.isEmpty else {
             return
         }
+        guard let manifest = localInventory.studyManifest else {
+            throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("local_manifest")
+        }
+        let scopedManifest = try Self.metadataManifest(manifest, scopedTo: plan.uploadMetadataActions)
         diagnosticsStore.record(phase: "uploadActionStarted", deviceID: settings.deviceID, syncRunID: syncRunID)
         do {
-            let response = try await client.applyLocalNetworkSyncMetadata(settings: settings, manifest: manifest)
+            let response = try await client.applyLocalNetworkSyncMetadata(
+                settings: settings,
+                manifest: scopedManifest,
+                syncRunID: syncRunID
+            )
             guard response.ok else {
                 throw SecureMacUploadError.serverRejected(response.error ?? "sync_apply_metadata_failed")
+            }
+            let failedChanges = response.applyResult?.failedChanges ?? 0
+            let conflictCount = response.applyResult?.conflictCount ?? 0
+            let rejectedChanges = response.rejectedChanges?.count ?? 0
+            let serverError = response.error?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard failedChanges == 0,
+                  conflictCount == 0,
+                  rejectedChanges == 0,
+                  serverError?.isEmpty != false else {
+                throw LocalNetworkSyncExecutionError.metadataApplyFailed(
+                    direction: "upload",
+                    failedChanges: failedChanges,
+                    conflictCount: conflictCount,
+                    rejectedChanges: rejectedChanges,
+                    serverError: serverError
+                )
             }
             diagnosticsStore.record(phase: "uploadActionCompleted", deviceID: settings.deviceID, syncRunID: syncRunID)
             if plan.uploadMetadataActions.contains(where: { $0.reason == CanonicalApplyActionKind.recordingMetadataSend.rawValue }) {
@@ -9236,6 +9769,157 @@ final class LocalNetworkSyncEngine {
         }
     }
 
+    static func metadataManifest(
+        _ manifest: StudyLibrarySyncManifest,
+        scopedTo actions: [LocalNetworkSyncDiffAction]
+    ) throws -> StudyLibrarySyncManifest {
+        let manifestItemIDs = Set(manifest.items.map(\.itemID))
+        let itemTombstoneIDs = Set(manifest.tombstones.compactMap {
+            $0.entityKind == .item ? $0.entityID : nil
+        })
+
+        func normalizedEntityID(_ value: String, prefixes: [String]) -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            for prefix in prefixes where trimmed.hasPrefix(prefix) {
+                let suffix = String(trimmed.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !suffix.isEmpty {
+                    return suffix
+                }
+            }
+            return trimmed
+        }
+
+        func resolvedItemIDs(referencedBy rawID: String) -> Set<String> {
+            let entityID = normalizedEntityID(rawID, prefixes: ["studyItem:"])
+            var result: Set<String> = []
+            if manifestItemIDs.contains(entityID) || itemTombstoneIDs.contains(entityID) {
+                result.insert(entityID)
+            }
+            // Compatibility for an old action whose `studyItem` entityID is a
+            // recording ID. Normal manifests retain trashed items, but also
+            // check the deterministic bundle ID for metadata-only tombstones.
+            result.formUnion(manifest.items.compactMap {
+                $0.recordingID == entityID ? $0.itemID : nil
+            })
+            let recordingBundleItemID = StudyItemMetadata.recordingBundleItemID(for: entityID)
+            if itemTombstoneIDs.contains(recordingBundleItemID) {
+                result.insert(recordingBundleItemID)
+            }
+            return result
+        }
+
+        var itemIDs: Set<String> = []
+        var folderIDs: Set<String> = []
+        var recordingIDs: Set<String> = []
+
+        for action in actions {
+            switch action.entityKind {
+            case "studyItem":
+                itemIDs.formUnion(resolvedItemIDs(referencedBy: action.entityID))
+            case "folder":
+                folderIDs.insert(normalizedEntityID(action.entityID, prefixes: ["studyFolder:"]))
+            case "recording":
+                recordingIDs.insert(normalizedEntityID(
+                    action.entityID,
+                    prefixes: ["recordingMetadata:", "recordingAudio:"]
+                ))
+            default:
+                throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("scoped_manifest_unknown_entity")
+            }
+        }
+
+        for item in manifest.items where itemIDs.contains(item.itemID) {
+            if let recordingID = item.recordingID {
+                recordingIDs.insert(recordingID)
+            }
+        }
+        for item in manifest.items where item.recordingID.map(recordingIDs.contains) == true {
+            itemIDs.insert(item.itemID)
+        }
+        for recordingID in recordingIDs {
+            let bundleItemID = StudyItemMetadata.recordingBundleItemID(for: recordingID)
+            if itemTombstoneIDs.contains(bundleItemID) {
+                itemIDs.insert(bundleItemID)
+            }
+        }
+
+        let scopedManifest = StudyLibrarySyncManifest.make(
+            deviceID: manifest.deviceID,
+            generatedAt: manifest.generatedAt,
+            libraryVersion: manifest.libraryVersion,
+            items: manifest.items.filter { itemIDs.contains($0.itemID) },
+            folders: manifest.folders.filter { folderIDs.contains($0.folderID) },
+            tombstones: manifest.tombstones.filter { tombstone in
+                switch tombstone.entityKind {
+                case .item:
+                    return itemIDs.contains(tombstone.entityID)
+                case .folder:
+                    return folderIDs.contains(tombstone.entityID)
+                }
+            },
+            pendingUploads: manifest.pendingUploads.filter {
+                recordingIDs.contains($0.recordingID) || itemIDs.contains($0.itemID)
+            },
+            recordings: manifest.recordings.filter { recordingIDs.contains($0.recordingID) },
+            baseCommitID: manifest.baseCommitID,
+            commitID: manifest.commitID,
+            localManifestHash: manifest.localManifestHash
+        )
+
+        func covers(_ action: LocalNetworkSyncDiffAction) -> Bool {
+            switch action.entityKind {
+            case "studyItem":
+                let expectedIDs = resolvedItemIDs(referencedBy: action.entityID)
+                guard !expectedIDs.isEmpty else {
+                    return false
+                }
+                let scopedIDs = Set(scopedManifest.items.map(\.itemID))
+                    .union(scopedManifest.tombstones.compactMap {
+                        $0.entityKind == .item ? $0.entityID : nil
+                    })
+                return expectedIDs.isSubset(of: scopedIDs)
+            case "folder":
+                let folderID = normalizedEntityID(action.entityID, prefixes: ["studyFolder:"])
+                return scopedManifest.folders.contains { $0.folderID == folderID }
+                    || scopedManifest.tombstones.contains {
+                        $0.entityKind == .folder && $0.entityID == folderID
+                    }
+            case "recording":
+                let recordingID = normalizedEntityID(
+                    action.entityID,
+                    prefixes: ["recordingMetadata:", "recordingAudio:"]
+                )
+                let bundleItemID = StudyItemMetadata.recordingBundleItemID(for: recordingID)
+                let isTombstoneAction = action.reason
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .localizedCaseInsensitiveContains("tombstone")
+                let hasMatchingRecording = scopedManifest.recordings.contains {
+                    guard $0.recordingID == recordingID else {
+                        return false
+                    }
+                    let isTombstoned = $0.deleted || $0.tombstone == true
+                    return isTombstoneAction ? isTombstoned : !isTombstoned
+                }
+                let hasMatchingDeletionTombstone = isTombstoneAction
+                    && scopedManifest.tombstones.contains {
+                        $0.entityKind == .item
+                            && $0.entityID == bundleItemID
+                            && [.trash, .delete, .deleteMetadataOnly].contains($0.operation)
+                    }
+                return hasMatchingRecording || hasMatchingDeletionTombstone
+            default:
+                return false
+            }
+        }
+
+        guard !actions.isEmpty,
+              actions.allSatisfy(covers) else {
+            throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("scoped_manifest_action_coverage")
+        }
+        return scopedManifest
+    }
+
     private func downloadPeerArtifactsIfNeeded(
         peerInventory: LocalNetworkSyncInventory,
         plan: LocalNetworkSyncDiffPlan,
@@ -9246,7 +9930,7 @@ final class LocalNetworkSyncEngine {
         for action in plan.downloadArtifactActions {
             guard let artifact = artifactsByID[action.entityID],
                   artifact.kind.isAutoDownloadAllowed else {
-                continue
+                throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("download_artifact")
             }
             diagnosticsStore.record(phase: "downloadActionStarted", deviceID: settings.deviceID, syncRunID: syncRunID)
             do {
@@ -9359,7 +10043,11 @@ final class LocalNetworkSyncEngine {
         expectedSize: Int64,
         syncRunID: String
     ) async throws {
-        let tempURL = try localIncomingTempURL(for: artifact.artifactID)
+        let tempURL = try localIncomingTempURL(
+            for: artifact.artifactID,
+            checksum: artifact.checksum,
+            size: artifact.size
+        )
         let statusResponse = try await client.fetchLocalNetworkSyncArtifactStatus(
             settings: settings,
             request: LocalNetworkSyncArtifactStatusRequest(
@@ -9462,7 +10150,10 @@ final class LocalNetworkSyncEngine {
             guard let item = localStudyItem(ownerID: transfer.objectID, peerInventory: peerInventory) else {
                 continue
             }
-            try studyLibraryStore.save(item.withLocalNetworkTransferProgress(transfer))
+            try studyLibraryStore.save(
+                itemMarkingMetadataOnlyIfNeeded(item)
+                    .withLocalNetworkTransferProgress(transfer)
+            )
             diagnosticsStore.record(phase: "placeholderCreated", deviceID: localDeviceID)
         }
         NotificationCenter.default.post(name: .localNetworkStudyLibraryDidChange, object: nil)
@@ -9540,7 +10231,10 @@ final class LocalNetworkSyncEngine {
             progressFraction: progressFraction,
             statusText: statusText
         )
-        try studyLibraryStore.save(item.withLocalNetworkTransferProgress(progress))
+        try studyLibraryStore.save(
+            itemMarkingMetadataOnlyIfNeeded(item)
+                .withLocalNetworkTransferProgress(progress)
+        )
         NotificationCenter.default.post(name: .localNetworkStudyLibraryDidChange, object: nil)
     }
 
@@ -9551,8 +10245,37 @@ final class LocalNetworkSyncEngine {
         guard let item = localStudyItem(ownerID: artifact.ownerID, peerInventory: peerInventory) else {
             return
         }
-        try studyLibraryStore.save(item.withLocalNetworkTransferProgress(nil))
+        try studyLibraryStore.save(
+            itemMarkingMetadataOnlyIfNeeded(item)
+                .withLocalNetworkTransferProgress(nil)
+        )
         NotificationCenter.default.post(name: .localNetworkStudyLibraryDidChange, object: nil)
+    }
+
+    /// Transfer placeholders may be created before a peer-only recording item
+    /// has been applied locally. Persist the same local-only marker used by the
+    /// manifest apply path so `StudyLibraryStore.refresh()` does not immediately
+    /// hide the placeholder merely because this device has no audio file yet.
+    private func itemMarkingMetadataOnlyIfNeeded(_ item: StudyItemMetadata) -> StudyItemMetadata {
+        guard let recordingID = item.recordingID else {
+            return item
+        }
+
+        var copy = item
+        let hasLocalAudio: Bool
+        if let metadata = try? audioFileStore.loadMetadata(id: recordingID),
+           let audioURL = try? audioFileStore.audioURL(for: metadata) {
+            hasLocalAudio = FileManager.default.fileExists(atPath: audioURL.path)
+        } else {
+            hasLocalAudio = false
+        }
+
+        if hasLocalAudio {
+            copy.customProperties.removeValue(forKey: "syncedMetadataOnly")
+        } else {
+            copy.customProperties["syncedMetadataOnly"] = "true"
+        }
+        return copy
     }
 
     private func localStudyItem(ownerID: String, peerInventory: LocalNetworkSyncInventory) -> StudyItemMetadata? {
@@ -9584,7 +10307,7 @@ final class LocalNetworkSyncEngine {
         for action in plan.uploadArtifactActions {
             guard let artifact = artifactsByID[action.entityID],
                   artifact.kind.isAutoDownloadAllowed else {
-                continue
+                throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("upload_artifact")
             }
 
             let fileURL = try LocalNetworkSyncArtifactFileService.safeFileURL(
@@ -9593,7 +10316,7 @@ final class LocalNetworkSyncEngine {
                 kind: artifact.kind
             )
             guard let metadata = LocalNetworkSyncArtifactFileService.metadata(for: fileURL) else {
-                continue
+                throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("upload_artifact_file")
             }
 
             if metadata.size > Self.maxSmallArtifactUploadBytes {
@@ -9663,7 +10386,11 @@ final class LocalNetworkSyncEngine {
                     )
                 ])
                 let response = try await client.putLocalNetworkSyncArtifact(settings: settings, request: request)
-                guard response.ok else {
+                guard response.ok,
+                      response.disposition == "acceptedNew" || response.disposition == "acceptedExisting",
+                      response.checksum == checksum,
+                      response.size == Int64(data.count),
+                      response.confirmedBytes == Int64(data.count) else {
                     throw SecureMacUploadError.serverRejected(response.error ?? "sync_artifact_put_failed")
                 }
                 try updateTransferJob(
@@ -9836,6 +10563,7 @@ final class LocalNetworkSyncEngine {
                 diagnosticsStore.record(phase: "transferResumed", deviceID: settings.deviceID, syncRunID: syncRunID, result: "offset=\(offset)")
             }
             var chunkIndex = 0
+            var finalPutResponse: LocalNetworkSyncArtifactPutResponse?
             while offset < fileSize {
                 let data = try handle.read(upToCount: min(Self.artifactChunkBytes, Int(fileSize - offset))) ?? Data()
                 guard !data.isEmpty else {
@@ -9861,6 +10589,7 @@ final class LocalNetworkSyncEngine {
                 guard response.ok else {
                     throw SecureMacUploadError.serverRejected(response.error ?? "sync_artifact_put_failed")
                 }
+                finalPutResponse = response
                 offset = response.confirmedBytes ?? nextOffset
                 let fraction = fileSize > 0 ? Double(offset) / Double(fileSize) : 1
                 try updateTransferJob(
@@ -9887,6 +10616,13 @@ final class LocalNetworkSyncEngine {
 
             guard offset == fileSize else {
                 throw SecureMacUploadError.serverRejected("sync_artifact_incomplete")
+            }
+            guard let finalPutResponse,
+                  finalPutResponse.disposition == "acceptedNew" || finalPutResponse.disposition == "acceptedExisting",
+                  finalPutResponse.checksum == checksum,
+                  finalPutResponse.size == fileSize,
+                  finalPutResponse.confirmedBytes == fileSize else {
+                throw SecureMacUploadError.serverRejected("sync_artifact_peer_completion_unconfirmed")
             }
             try updateTransferJob(
                 direction: .upload,
@@ -9955,8 +10691,17 @@ final class LocalNetworkSyncEngine {
             let wasDuplicateInRun = !seenKeys.insert(dedupKey).inserted
             let transferState = wasDuplicateInRun
                 ? RecordingTransferJobState.queued
-                : transferJobState(transferID: transferID, transferJobs: transferJobs)
-            let ledgerState = uploadLedgerState(uploadJobsByRecordingID[action.entityID])
+                : transferJobState(
+                    transferID: transferID,
+                    peerDeviceID: settings.deviceID,
+                    transferJobs: transferJobs
+                )
+            let uploadJob = uploadJobsByRecordingID[action.entityID].flatMap { job in
+                job.targetDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines) == settings.deviceID
+                    ? job
+                    : nil
+            }
+            let ledgerState = uploadLedgerState(uploadJob)
             let decision = RecordingAudioUploadDecisionEvaluator.evaluateRecordingAudioUploadDecision(
                 localAudioState: localAudio,
                 peerAudioState: peerAudio,
@@ -10164,9 +10909,12 @@ final class LocalNetworkSyncEngine {
 
     private func transferJobState(
         transferID: String,
+        peerDeviceID: String,
         transferJobs: [LocalNetworkSyncTransferJob]
     ) -> RecordingTransferJobState {
-        guard let job = transferJobs.first(where: { $0.transferID == transferID }) else {
+        guard let job = transferJobs.first(where: {
+            $0.transferID == transferID && $0.peerDeviceID == peerDeviceID
+        }) else {
             return .none
         }
         switch job.state {
@@ -10268,10 +11016,31 @@ final class LocalNetworkSyncEngine {
         syncRunID: String,
         triggerSource: RecordingAudioSyncTriggerSource
     ) async -> [LocalNetworkTransferProgress] {
-        guard let recordingManager, let uploadCoordinator else {
-            return []
-        }
         var remainingTransfers: [LocalNetworkTransferProgress] = []
+        let unresolvedProgress: (LocalNetworkSyncDiffAction, LocalNetworkTransferState, String) -> LocalNetworkTransferProgress = { action, state, statusText in
+            let recording = localInventory.recordings.first { $0.recordingID == action.entityID }
+            return LocalNetworkTransferProgress(
+                objectID: action.entityID,
+                objectKind: LocalNetworkSyncObjectKind.recordingAudio.rawValue,
+                state: state,
+                progressFraction: 0,
+                receivedBytes: 0,
+                totalBytes: recording?.audioSize,
+                sourceDeviceID: settings.deviceID,
+                statusText: statusText
+            )
+        }
+        guard let recordingManager, let uploadCoordinator else {
+            diagnosticsStore.record(
+                phase: "uploadActionFailed",
+                deviceID: settings.deviceID,
+                syncRunID: syncRunID,
+                errorCode: "recording_upload_runtime_unavailable"
+            )
+            return plan.uploadRecordingAudioActions.map {
+                unresolvedProgress($0, .retryPending, "等待上传运行时")
+            }
+        }
         recordingManager.reloadRecordings()
         let actions = uploadRecordingAudioActionsToRun(
             plan.uploadRecordingAudioActions,
@@ -10281,6 +11050,13 @@ final class LocalNetworkSyncEngine {
             syncRunID: syncRunID,
             triggerSource: triggerSource
         )
+        let selectedRecordingIDs = Set(actions.map(\.entityID))
+        var unresolvedRecordingIDs = Set<String>()
+        for action in plan.uploadRecordingAudioActions
+            where !selectedRecordingIDs.contains(action.entityID)
+                && unresolvedRecordingIDs.insert(action.entityID).inserted {
+            remainingTransfers.append(unresolvedProgress(action, .retryPending, "等待重试"))
+        }
         for action in actions {
             guard let metadata = recordingManager.recordings.first(where: { $0.id == action.entityID }) else {
                 let traceID = UploadFlightRecorder.makeTraceID()
@@ -10299,6 +11075,7 @@ final class LocalNetworkSyncEngine {
                     result: "recordingID=\(action.entityID)",
                     errorCode: "recording_missing"
                 )
+                remainingTransfers.append(unresolvedProgress(action, .failed, "本地录音不可用"))
                 continue
             }
             let traceID = UploadFlightRecorder.makeTraceID()
@@ -10399,7 +11176,14 @@ final class LocalNetworkSyncEngine {
             diagnosticsStore.record(phase: "uploadStarted", deviceID: settings.deviceID, syncRunID: syncRunID, result: "recordingID=\(metadata.id)")
             let progressTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    do {
+                        try await Task.sleep(nanoseconds: 200_000_000)
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else {
+                        return
+                    }
                     guard let self else {
                         return
                     }
@@ -10423,6 +11207,7 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID
             )
             progressTask.cancel()
+            await progressTask.value
             switch status {
             case .uploaded:
                 let verifiedProgress = audioTransferProgress(
@@ -10839,7 +11624,11 @@ final class LocalNetworkSyncEngine {
         let rootURL = try audioFileStore.baseDirectory()
         let destinationURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: rootURL, logicalPathToken: logicalPathToken, kind: kind)
         try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let tempURL = try localIncomingTempURL(for: response.artifactID ?? expectedArtifact.artifactID)
+        let tempURL = try localIncomingTempURL(
+            for: response.artifactID ?? expectedArtifact.artifactID,
+            checksum: expectedArtifact.checksum ?? response.checksum,
+            size: expectedArtifact.size ?? response.size
+        )
         if FileManager.default.fileExists(atPath: tempURL.path) {
             try FileManager.default.removeItem(at: tempURL)
         }
@@ -10861,6 +11650,7 @@ final class LocalNetworkSyncEngine {
     ) async throws {
         if let expectedSize = artifact.size,
            LocalNetworkSyncArtifactFileService.metadata(for: tempURL)?.size != expectedSize {
+            try? FileManager.default.removeItem(at: tempURL)
             throw SecureMacUploadError.serverRejected("sync_artifact_size_mismatch")
         }
         if let expectedChecksum = artifact.checksum,
@@ -10869,6 +11659,7 @@ final class LocalNetworkSyncEngine {
                 logicalToken: "Sync/Incoming/\(artifact.artifactID).part",
                 persistentCacheEnabled: false
            ) != expectedChecksum {
+            try? FileManager.default.removeItem(at: tempURL)
             throw SecureMacUploadError.serverRejected("sync_artifact_checksum_mismatch")
         }
         diagnosticsStore.record(phase: "artifactChecksumVerified", deviceID: deviceID)
@@ -10910,13 +11701,29 @@ final class LocalNetworkSyncEngine {
         return checksum
     }
 
-    private func localIncomingTempURL(for artifactID: String) throws -> URL {
+    private func localIncomingTempURL(
+        for artifactID: String,
+        checksum: String?,
+        size: Int64?
+    ) throws -> URL {
         let rootURL = try audioFileStore.baseDirectory()
         let tempDirectory = rootURL
             .appendingPathComponent("Sync", isDirectory: true)
             .appendingPathComponent("Incoming", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-        return tempDirectory.appendingPathComponent("\(artifactID.safeSyncFileComponent).tmp", isDirectory: false)
+        let safeArtifactID = artifactID.safeSyncFileComponent
+        let version = SecureUploadUtilities.sha256Hex(
+            Data("\(checksum?.lowercased() ?? "unknown"):\(size ?? -1)".utf8)
+        ).prefix(20)
+        let currentURL = tempDirectory.appendingPathComponent("\(safeArtifactID)-\(version).tmp", isDirectory: false)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: tempDirectory.path)) ?? []
+        for name in names where name == "\(safeArtifactID).tmp" || name.hasPrefix("\(safeArtifactID)-") {
+            let candidate = tempDirectory.appendingPathComponent(name, isDirectory: false)
+            if candidate.standardizedFileURL != currentURL.standardizedFileURL {
+                try? FileManager.default.removeItem(at: candidate)
+            }
+        }
+        return currentURL
     }
 
     private func atomicReplace(tempURL: URL, destinationURL: URL) throws {
@@ -11041,6 +11848,279 @@ final class LocalNetworkSyncScheduler {
     }
 }
 
+struct LocalNetworkSyncDurableSignalQueue {
+    struct Request: Codable, Equatable {
+        let syncRunID: String?
+        let receivedAt: Date
+    }
+
+    struct PersistentState: Codable, Equatable {
+        static let currentVersion = 1
+
+        var version: Int
+        var pending: [Request]
+        var inFlight: [Request]
+        var completedRunIDOrder: [String]
+
+        init(
+            version: Int = currentVersion,
+            pending: [Request],
+            inFlight: [Request],
+            completedRunIDOrder: [String]
+        ) {
+            self.version = version
+            self.pending = pending
+            self.inFlight = inFlight
+            self.completedRunIDOrder = completedRunIDOrder
+        }
+    }
+
+    enum EnqueueResult: Equatable {
+        case queued
+        case duplicate
+        case capacityExceeded
+        case persistenceFailed
+
+        var isReliablyQueued: Bool {
+            self == .queued || self == .duplicate
+        }
+    }
+
+    private let maximumPendingCount: Int
+    private let maximumCompletedRunIDCount: Int
+    private var pending: [Request] = []
+    private var pendingRunIDs: Set<String> = []
+    private var inFlight: [Request] = []
+    private var inFlightRunIDs: Set<String> = []
+    private var completedRunIDs: Set<String> = []
+    private var completedRunIDOrder: [String] = []
+    private var hasUncorrelatedRequestInFlight = false
+
+    init(maximumPendingCount: Int = 32, maximumCompletedRunIDCount: Int = 128) {
+        self.maximumPendingCount = max(1, maximumPendingCount)
+        self.maximumCompletedRunIDCount = max(1, maximumCompletedRunIDCount)
+    }
+
+    init(
+        restoring state: PersistentState,
+        maximumPendingCount: Int = 32,
+        maximumCompletedRunIDCount: Int = 128
+    ) {
+        self.init(
+            maximumPendingCount: maximumPendingCount,
+            maximumCompletedRunIDCount: maximumCompletedRunIDCount
+        )
+        guard state.version == PersistentState.currentVersion else {
+            return
+        }
+
+        for runID in state.completedRunIDOrder {
+            let normalized = Self.normalized(runID)
+            guard let normalized, completedRunIDs.insert(normalized).inserted else {
+                continue
+            }
+            completedRunIDOrder.append(normalized)
+        }
+        if completedRunIDOrder.count > self.maximumCompletedRunIDCount {
+            completedRunIDOrder = Array(completedRunIDOrder.suffix(self.maximumCompletedRunIDCount))
+            completedRunIDs = Set(completedRunIDOrder)
+        }
+
+        // Anything that was in flight when the process stopped is recovered
+        // ahead of later pending runs. Re-execution is safer than ACKed loss,
+        // and each sync operation remains idempotent by syncRunID.
+        for request in state.inFlight + state.pending {
+            guard pending.count < self.maximumPendingCount,
+                  let syncRunID = Self.normalized(request.syncRunID),
+                  !completedRunIDs.contains(syncRunID),
+                  pendingRunIDs.insert(syncRunID).inserted else {
+                continue
+            }
+            pending.append(Request(syncRunID: syncRunID, receivedAt: request.receivedAt))
+        }
+    }
+
+    var hasPendingRequests: Bool {
+        !pending.isEmpty
+    }
+
+    var pendingCount: Int {
+        pending.count
+    }
+
+    func peek() -> Request? {
+        pending.first
+    }
+
+    mutating func enqueue(syncRunID: String?, receivedAt: Date) -> EnqueueResult {
+        let normalizedRunID = Self.normalized(syncRunID)
+        if let normalizedRunID {
+            guard !pendingRunIDs.contains(normalizedRunID),
+                  !inFlightRunIDs.contains(normalizedRunID),
+                  !completedRunIDs.contains(normalizedRunID) else {
+                return .duplicate
+            }
+        } else if pending.contains(where: { $0.syncRunID == nil }) || hasUncorrelatedRequestInFlight {
+            return .duplicate
+        }
+
+        guard pending.count + inFlight.count < maximumPendingCount else {
+            return .capacityExceeded
+        }
+
+        pending.append(Request(syncRunID: normalizedRunID, receivedAt: receivedAt))
+        if let normalizedRunID {
+            pendingRunIDs.insert(normalizedRunID)
+        }
+        return .queued
+    }
+
+    mutating func enqueuePersistingCorrelatedRun(
+        syncRunID: String?,
+        receivedAt: Date,
+        fileURL: URL?
+    ) -> EnqueueResult {
+        guard Self.normalized(syncRunID) != nil else {
+            return enqueue(syncRunID: syncRunID, receivedAt: receivedAt)
+        }
+        guard let fileURL else {
+            return .persistenceFailed
+        }
+        let previous = self
+        let result = enqueue(syncRunID: syncRunID, receivedAt: receivedAt)
+        guard result == .queued else {
+            return result
+        }
+        do {
+            try writePersistentState(to: fileURL)
+            return .queued
+        } catch {
+            self = previous
+            return .persistenceFailed
+        }
+    }
+
+    mutating func dequeueNext() -> Request? {
+        guard !pending.isEmpty else {
+            return nil
+        }
+        let request = pending.removeFirst()
+        inFlight.append(request)
+        if let syncRunID = request.syncRunID {
+            pendingRunIDs.remove(syncRunID)
+            inFlightRunIDs.insert(syncRunID)
+        } else {
+            hasUncorrelatedRequestInFlight = true
+        }
+        return request
+    }
+
+    mutating func markFinished(_ request: Request) {
+        guard let syncRunID = request.syncRunID else {
+            inFlight.removeAll { $0 == request }
+            hasUncorrelatedRequestInFlight = false
+            return
+        }
+        guard inFlightRunIDs.remove(syncRunID) != nil else {
+            return
+        }
+        inFlight.removeAll { $0.syncRunID == syncRunID }
+        if completedRunIDs.insert(syncRunID).inserted {
+            completedRunIDOrder.append(syncRunID)
+        }
+        while completedRunIDOrder.count > maximumCompletedRunIDCount {
+            completedRunIDs.remove(completedRunIDOrder.removeFirst())
+        }
+    }
+
+    func persistentState() -> PersistentState {
+        PersistentState(
+            pending: pending.filter { $0.syncRunID != nil },
+            inFlight: inFlight.filter { $0.syncRunID != nil },
+            completedRunIDOrder: completedRunIDOrder
+        )
+    }
+
+    func writePersistentState(to fileURL: URL) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(persistentState()).write(to: fileURL, options: .atomic)
+    }
+
+    static func loadPersistentState(
+        from fileURL: URL,
+        maximumPendingCount: Int = 32,
+        maximumCompletedRunIDCount: Int = 128
+    ) throws -> LocalNetworkSyncDurableSignalQueue {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return LocalNetworkSyncDurableSignalQueue(
+                maximumPendingCount: maximumPendingCount,
+                maximumCompletedRunIDCount: maximumCompletedRunIDCount
+            )
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let state = try decoder.decode(PersistentState.self, from: Data(contentsOf: fileURL))
+        return LocalNetworkSyncDurableSignalQueue(
+            restoring: state,
+            maximumPendingCount: maximumPendingCount,
+            maximumCompletedRunIDCount: maximumCompletedRunIDCount
+        )
+    }
+
+    private static func normalized(_ syncRunID: String?) -> String? {
+        let value = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
+struct LocalNetworkSyncDurableSignalDebouncer {
+    let interval: TimeInterval
+    private let maximumTrackedRunIDCount: Int
+    private var trackedRunIDs: Set<String> = []
+    private var trackedRunIDOrder: [String] = []
+    private var lastUncorrelatedQueuedAt: Date?
+
+    init(interval: TimeInterval = 5, maximumTrackedRunIDCount: Int = 128) {
+        self.interval = interval
+        self.maximumTrackedRunIDCount = max(1, maximumTrackedRunIDCount)
+    }
+
+    func shouldDebounce(syncRunID: String?, now: Date) -> Bool {
+        if let syncRunID = normalized(syncRunID) {
+            return trackedRunIDs.contains(syncRunID)
+        }
+        guard let lastUncorrelatedQueuedAt else {
+            return false
+        }
+        return max(0, now.timeIntervalSince(lastUncorrelatedQueuedAt)) < interval
+    }
+
+    mutating func recordQueued(syncRunID: String?, at date: Date) {
+        guard let syncRunID = normalized(syncRunID) else {
+            lastUncorrelatedQueuedAt = date
+            return
+        }
+        guard trackedRunIDs.insert(syncRunID).inserted else {
+            return
+        }
+        trackedRunIDOrder.append(syncRunID)
+        while trackedRunIDOrder.count > maximumTrackedRunIDCount {
+            trackedRunIDs.remove(trackedRunIDOrder.removeFirst())
+        }
+    }
+
+    private func normalized(_ syncRunID: String?) -> String? {
+        let value = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
 @MainActor
 final class LocalNetworkSyncAppService: ObservableObject {
     private let connectionStore: SecureMacConnectionStore
@@ -11057,7 +12137,9 @@ final class LocalNetworkSyncAppService: ObservableObject {
     private var pairingObserver: NSObjectProtocol?
     private var statusStoreSubscription: AnyCancellable?
     private var lastSyncSoonRequestAt: Date?
-    private var lastHeartbeatSyncRequestedQueueAt: Date?
+    private var durableSyncSignalQueue: LocalNetworkSyncDurableSignalQueue
+    private let durableSyncSignalQueueFileURL: URL?
+    private var uncorrelatedSyncRequestDebouncer = LocalNetworkSyncDurableSignalDebouncer(interval: 5)
     private var syncEventDebounceTask: Task<Void, Never>?
     private var pendingSyncEventReasons: Set<SyncTriggerReason> = []
     private var pendingSyncEventRunID: String?
@@ -11068,20 +12150,30 @@ final class LocalNetworkSyncAppService: ObservableObject {
     private var syncEventWindowStartedAt: Date?
     private var syncEventWindowCount = 0
     private let syncEventTickContextStore: LocalNetworkSyncEventTickContextStore
-    private let heartbeatSyncRequestedDebounceInterval: TimeInterval = 5
     private let syncEventDebounceInterval: TimeInterval = 0.75
     private let syncEventMaxFrequencyInterval: TimeInterval = 1.5
     private let syncEventStormWindow: TimeInterval = 5
     private let syncEventMaxEventsPerWindow = 40
     private let syncEventMaxReasonDepth = SyncTriggerReason.allCases.count
 
-    init(interval: TimeInterval = 60) {
+    private var hasPendingImmediateSyncEvents: Bool {
+        durableSyncSignalQueue.hasPendingRequests || !pendingSyncEventReasons.isEmpty
+    }
+
+    init(interval: TimeInterval = 60, durableSignalQueueFileURL: URL? = nil) {
         let audioFileStore = AudioFileStore()
         let recordingManager = RecordingManager(fileStore: audioFileStore)
         let connectionStore = SecureMacConnectionStore()
         let connectionStatusStore = DeviceConnectionStatusStore.shared
         let secureClient = SecureMacUploadClient()
         let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioFileStore)
+        let resolvedDurableSignalQueueFileURL = durableSignalQueueFileURL
+            ?? (try? audioFileStore.baseDirectory())?
+                .appendingPathComponent("Sync", isDirectory: true)
+                .appendingPathComponent("app-service-durable-signals.json", isDirectory: false)
+        let recoveredDurableSignalQueue = resolvedDurableSignalQueueFileURL.flatMap {
+            try? LocalNetworkSyncDurableSignalQueue.loadPersistentState(from: $0)
+        } ?? LocalNetworkSyncDurableSignalQueue()
         let kernelSwitchResultProvider: () -> CanonicalKernelSwitchResult = {
             CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
         }
@@ -11097,6 +12189,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         )
         let kernelSwitchResult = kernelSwitchResultProvider()
         let eventTickContextStore = LocalNetworkSyncEventTickContextStore()
+        let localNetworkSyncStateStore = LocalNetworkSyncStateStore()
         let engine = LocalNetworkSyncEngine(
             connectionStore: connectionStore,
             audioFileStore: audioFileStore,
@@ -11105,6 +12198,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
             uploadCoordinator: uploadCoordinator,
             uploadJobStore: uploadJobStore,
             client: secureClient,
+            stateStore: localNetworkSyncStateStore,
             connectionStatusStore: connectionStatusStore,
             canonicalSyncRuntimeConfiguration: kernelSwitchResult.effectiveConfiguration.syncRuntimeConfiguration,
             canonicalApplyRuntimeConfiguration: kernelSwitchResult.effectiveConfiguration.applyRuntimeConfiguration,
@@ -11117,12 +12211,28 @@ final class LocalNetworkSyncAppService: ObservableObject {
         self.connectionStatusStore = connectionStatusStore
         self.recordingManager = recordingManager
         self.uploadCoordinator = uploadCoordinator
+        self.durableSyncSignalQueue = recoveredDurableSignalQueue
+        self.durableSyncSignalQueueFileURL = resolvedDurableSignalQueueFileURL
         self.syncEventTickContextStore = eventTickContextStore
         self.heartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: secureClient,
             statusStore: connectionStatusStore,
-            canonicalStatusExchangeRuntime: canonicalStatusExchangeRuntime
+            canonicalStatusExchangeRuntime: canonicalStatusExchangeRuntime,
+            syncRunStatusProvider: {
+                let state = localNetworkSyncStateStore.state
+                guard let syncRunID = state.activeSyncRunID,
+                      let controlPlaneState = state.controlPlaneState,
+                      let updatedAt = state.lastControlPlaneUpdatedAt else {
+                    return nil
+                }
+                return LocalNetworkSyncRunStatus(
+                    syncRunID: syncRunID,
+                    state: controlPlaneState,
+                    updatedAt: updatedAt,
+                    errorCode: state.lastErrorCode
+                )
+            }
         )
         let scheduler = LocalNetworkSyncScheduler(
             interval: interval,
@@ -11236,11 +12346,9 @@ final class LocalNetworkSyncAppService: ObservableObject {
         self.scheduler = scheduler
         self.heartbeatMonitor.onSyncRequested = { [weak self] syncRunID in
             guard let self else {
-                return
+                return false
             }
-            Task { @MainActor in
-                self.handleHeartbeatSyncRequestedHint(syncRunID: syncRunID)
-            }
+            return self.handleHeartbeatSyncRequestedHint(syncRunID: syncRunID)
         }
         self.uploadLedgerObserver = NotificationCenter.default.addObserver(
             forName: .recordingUploadJobLedgerDidChange,
@@ -11338,7 +12446,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
             result: connectionStore.userConnectionIntent.rawValue
         )
         startPairedServicesIfPossible()
-        if !pendingSyncEventReasons.isEmpty {
+        if hasPendingImmediateSyncEvents {
             queueImmediateSync(reason: .appForegroundedWithPendingChanges)
         }
     }
@@ -11349,7 +12457,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
         queueImmediateSync(reason: .retryStateChanged)
     }
 
-    private func handleHeartbeatSyncRequestedHint(syncRunID: String?, now: Date = Date()) {
+    @discardableResult
+    private func handleHeartbeatSyncRequestedHint(syncRunID: String?, now: Date = Date()) -> Bool {
         connectionStore.refreshFromStorage()
         let snapshot = connectionStore.snapshot
         ConnectionDiagnosticsStore.shared.record(
@@ -11366,7 +12475,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "not_paired"
             )
-            return
+            return false
         }
         guard connectionStore.userConnectionIntent == .wantsConnected else {
             ConnectionDiagnosticsStore.shared.record(
@@ -11375,7 +12484,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "user_does_not_want_connection"
             )
-            return
+            return false
         }
         ConnectionDiagnosticsStore.shared.record(
             phase: "syncRequestedHintReceived",
@@ -11383,7 +12492,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
             syncRunID: syncRunID,
             result: "connection-heartbeat"
         )
-        queueImmediateSync(reason: .manualPeerSyncRequested, syncRunID: syncRunID, now: now)
+        return queueImmediateSync(reason: .manualPeerSyncRequested, syncRunID: syncRunID, now: now)
     }
 
     private func handlePairingChanged() {
@@ -11456,7 +12565,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         }
 
         guard !scheduler.isRunning else {
-            if !pendingSyncEventReasons.isEmpty {
+            if hasPendingImmediateSyncEvents {
                 queueImmediateSync(reason: .appForegroundedWithPendingChanges)
             }
             return
@@ -11468,7 +12577,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         Task {
             await scheduler.foregroundTick()
         }
-        if !pendingSyncEventReasons.isEmpty {
+        if hasPendingImmediateSyncEvents {
             queueImmediateSync(reason: .appForegroundedWithPendingChanges)
         }
     }
@@ -11532,57 +12641,137 @@ final class LocalNetworkSyncAppService: ObservableObject {
         return true
     }
 
+    @discardableResult
+    private func persistDurableSyncSignalQueue(operation: String, syncRunID: String?) -> Bool {
+        guard let durableSyncSignalQueueFileURL else {
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                deviceID: connectionStore.snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "operation=\(operation)",
+                errorCode: "sync_signal_queue_file_unavailable"
+            )
+            return false
+        }
+        do {
+            try durableSyncSignalQueue.writePersistentState(to: durableSyncSignalQueueFileURL)
+            return true
+        } catch {
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                deviceID: connectionStore.snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "operation=\(operation)",
+                errorCode: "sync_signal_queue_persist_failed"
+            )
+            return false
+        }
+    }
+
+    @discardableResult
     func queueImmediateSync(
         reason: SyncTriggerReason,
         syncRunID: String? = nil,
         now: Date = Date()
-    ) {
+    ) -> Bool {
         connectionStore.refreshFromStorage()
         let snapshot = connectionStore.snapshot
-        recordSyncEventWindow(now: now, reason: reason, deviceID: snapshot.deviceID, syncRunID: syncRunID)
-        guard syncEventWindowCount <= syncEventMaxEventsPerWindow else {
-            pendingSyncEventReasons.insert(.syncStatusRefreshRequested)
-            ConnectionDiagnosticsStore.shared.record(
-                phase: "syncEventStormSuppressed",
-                deviceID: snapshot.deviceID,
+        if reason == .manualPeerSyncRequested {
+            let normalizedRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalizedRunID?.isEmpty != false,
+               uncorrelatedSyncRequestDebouncer.shouldDebounce(syncRunID: nil, now: now) {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickDebounced",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "immediateSyncDedupedCount=1",
+                    errorCode: "debounced"
+                )
+                return true
+            }
+            let enqueueResult = durableSyncSignalQueue.enqueuePersistingCorrelatedRun(
                 syncRunID: syncRunID,
-                result: "reason=\(reason.rawValue),stormSuppressedCount=1,maxEventsPerWindow=\(syncEventMaxEventsPerWindow)",
-                errorCode: "event_storm_suppressed"
+                receivedAt: now,
+                fileURL: durableSyncSignalQueueFileURL
             )
-            return
-        }
+            switch enqueueResult {
+            case .duplicate:
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickDebounced",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "immediateSyncDedupedCount=1",
+                    errorCode: "run_already_tracked"
+                )
+                return true
+            case .capacityExceeded:
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickQueueFull",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "pendingCount=\(durableSyncSignalQueue.pendingCount)",
+                    errorCode: "sync_signal_queue_full"
+                )
+                return false
+            case .persistenceFailed:
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    errorCode: "sync_signal_queue_persist_failed"
+                )
+                return false
+            case .queued:
+                if normalizedRunID?.isEmpty != false {
+                    uncorrelatedSyncRequestDebouncer.recordQueued(syncRunID: nil, at: now)
+                }
+            }
+        } else {
+            recordSyncEventWindow(now: now, reason: reason, deviceID: snapshot.deviceID, syncRunID: syncRunID)
+            guard syncEventWindowCount <= syncEventMaxEventsPerWindow else {
+                pendingSyncEventReasons.insert(.syncStatusRefreshRequested)
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncEventStormSuppressed",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "reason=\(reason.rawValue),stormSuppressedCount=1,maxEventsPerWindow=\(syncEventMaxEventsPerWindow)",
+                    errorCode: "event_storm_suppressed"
+                )
+                return false
+            }
 
-        let alreadyPending = pendingSyncEventReasons.contains(reason)
-        if pendingSyncEventReasons.count >= syncEventMaxReasonDepth, !alreadyPending {
-            ConnectionDiagnosticsStore.shared.record(
-                phase: "syncEventStormSuppressed",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "reasonDepth=\(pendingSyncEventReasons.count),stormSuppressedCount=1",
-                errorCode: "reason_depth_exceeded"
-            )
-            return
-        }
+            let alreadyPending = pendingSyncEventReasons.contains(reason)
+            if pendingSyncEventReasons.count >= syncEventMaxReasonDepth, !alreadyPending {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncEventStormSuppressed",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "reasonDepth=\(pendingSyncEventReasons.count),stormSuppressedCount=1",
+                    errorCode: "reason_depth_exceeded"
+                )
+                return false
+            }
 
-        pendingSyncEventReasons.insert(reason)
-        pendingSyncEventRunID = pendingSyncEventRunID ?? syncRunID
-        pendingSyncEventFirstReceivedAt = pendingSyncEventFirstReceivedAt ?? now
-        pendingSyncEventReceivedCount += 1
-        if alreadyPending {
-            pendingSyncEventCoalescedCount += 1
-            ConnectionDiagnosticsStore.shared.record(
-                phase: "syncEventTriggerCoalesced",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "reason=\(reason.rawValue),eventTriggerCoalescedCount=1,coalescedReasonCount=\(pendingSyncEventCoalescedCount)"
-            )
+            pendingSyncEventReasons.insert(reason)
+            pendingSyncEventRunID = pendingSyncEventRunID ?? syncRunID
+            pendingSyncEventFirstReceivedAt = pendingSyncEventFirstReceivedAt ?? now
+            pendingSyncEventReceivedCount += 1
+            if alreadyPending {
+                pendingSyncEventCoalescedCount += 1
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncEventTriggerCoalesced",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "reason=\(reason.rawValue),eventTriggerCoalescedCount=1,coalescedReasonCount=\(pendingSyncEventCoalescedCount)"
+                )
+            }
         }
 
         ConnectionDiagnosticsStore.shared.record(
             phase: "syncEventTriggerReceived",
             deviceID: snapshot.deviceID,
             syncRunID: syncRunID,
-            result: "reason=\(reason.rawValue),eventTriggerReceivedCount=1,pendingReasonCount=\(pendingSyncEventReasons.count)"
+            result: "reason=\(reason.rawValue),eventTriggerReceivedCount=1,pendingReasonCount=\(pendingSyncEventReasons.count),pendingRunCount=\(durableSyncSignalQueue.pendingCount)"
         )
         if reason == .manualPeerSyncRequested {
             ConnectionDiagnosticsStore.shared.record(
@@ -11615,7 +12804,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
                     errorCode: "app_inactive"
                 )
             }
-            return
+            return true
         }
 
         guard LocalNetworkSyncStartGate.canRun(
@@ -11642,23 +12831,11 @@ final class LocalNetworkSyncAppService: ObservableObject {
                     errorCode: errorCode
                 )
             }
-            return
-        }
-
-        if reason == .manualPeerSyncRequested,
-           let lastHeartbeatSyncRequestedQueueAt,
-           now.timeIntervalSince(lastHeartbeatSyncRequestedQueueAt) < heartbeatSyncRequestedDebounceInterval {
-            pendingSyncEventCoalescedCount += 1
-            ConnectionDiagnosticsStore.shared.record(
-                phase: "heartbeatSyncRequestedTickDebounced",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "immediateSyncDedupedCount=1",
-                errorCode: "debounced"
-            )
+            return true
         }
 
         scheduleImmediateSyncEventDrain(now: now)
+        return true
     }
 
     private func scheduleImmediateSyncEventDrain(now: Date) {
@@ -11688,9 +12865,14 @@ final class LocalNetworkSyncAppService: ObservableObject {
         connectionStore.refreshFromStorage()
         let snapshot = connectionStore.snapshot
         let now = Date()
-        guard !pendingSyncEventReasons.isEmpty else {
+        guard hasPendingImmediateSyncEvents else {
             return
         }
+        let durablePreview = durableSyncSignalQueue.peek()
+        let previewSyncRunID = durablePreview?.syncRunID ?? pendingSyncEventRunID
+        let previewReasons = durablePreview == nil
+            ? Self.reasonSummary(pendingSyncEventReasons)
+            : SyncTriggerReason.manualPeerSyncRequested.rawValue
         guard LocalNetworkSyncStartGate.canRun(
             isActive: isActive,
             snapshot: snapshot,
@@ -11701,8 +12883,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
             ConnectionDiagnosticsStore.shared.record(
                 phase: phase,
                 deviceID: snapshot.deviceID,
-                syncRunID: pendingSyncEventRunID,
-                result: "reasons=\(Self.reasonSummary(pendingSyncEventReasons))",
+                syncRunID: previewSyncRunID,
+                result: "reasons=\(previewReasons)",
                 errorCode: isActive ? "presence_not_online" : "app_inactive"
             )
             return
@@ -11711,9 +12893,20 @@ final class LocalNetworkSyncAppService: ObservableObject {
             ConnectionDiagnosticsStore.shared.record(
                 phase: "syncDeferredBecauseUploadActive",
                 deviceID: snapshot.deviceID,
-                syncRunID: pendingSyncEventRunID,
-                result: "reasons=\(Self.reasonSummary(pendingSyncEventReasons))",
+                syncRunID: previewSyncRunID,
+                result: "reasons=\(previewReasons)",
                 errorCode: "upload_active"
+            )
+            scheduleImmediateSyncEventDrain(now: now)
+            return
+        }
+        if durablePreview != nil, scheduler.isTickInFlight {
+            ConnectionDiagnosticsStore.shared.record(
+                phase: "heartbeatSyncRequestedTickAlreadyRunning",
+                deviceID: snapshot.deviceID,
+                syncRunID: previewSyncRunID,
+                result: "pendingInDurableQueue",
+                errorCode: "already_running"
             )
             scheduleImmediateSyncEventDrain(now: now)
             return
@@ -11722,29 +12915,44 @@ final class LocalNetworkSyncAppService: ObservableObject {
             ConnectionDiagnosticsStore.shared.record(
                 phase: "syncEventImmediateTickDebounced",
                 deviceID: snapshot.deviceID,
-                syncRunID: pendingSyncEventRunID,
-                result: "reasons=\(Self.reasonSummary(pendingSyncEventReasons))",
+                syncRunID: previewSyncRunID,
+                result: "reasons=\(previewReasons)",
                 errorCode: "debounced"
             )
             scheduleImmediateSyncEventDrain(now: now)
             return
         }
 
-        let reasons = pendingSyncEventReasons
-        let reasonsSummary = Self.reasonSummary(reasons)
-        let firstReceivedAt = pendingSyncEventFirstReceivedAt ?? now
-        let coalescedCount = pendingSyncEventCoalescedCount
-        let receivedCount = pendingSyncEventReceivedCount
-        let syncRunID = pendingSyncEventRunID ?? UUID().uuidString
-        pendingSyncEventReasons = []
-        pendingSyncEventRunID = nil
-        pendingSyncEventFirstReceivedAt = nil
-        pendingSyncEventReceivedCount = 0
-        pendingSyncEventCoalescedCount = 0
-        lastSyncEventQueuedAt = now
-        if reasons.contains(.manualPeerSyncRequested) {
-            lastHeartbeatSyncRequestedQueueAt = now
+        let durableRequest = durableSyncSignalQueue.dequeueNext()
+        if let durableRequest, durableRequest.syncRunID != nil {
+            persistDurableSyncSignalQueue(operation: "dequeue", syncRunID: durableRequest.syncRunID)
         }
+        let reasons: Set<SyncTriggerReason>
+        let firstReceivedAt: Date
+        let coalescedCount: Int
+        let receivedCount: Int
+        let requestedSyncRunID: String?
+        if let durableRequest {
+            reasons = [.manualPeerSyncRequested]
+            firstReceivedAt = durableRequest.receivedAt
+            coalescedCount = 0
+            receivedCount = 1
+            requestedSyncRunID = durableRequest.syncRunID
+        } else {
+            reasons = pendingSyncEventReasons
+            firstReceivedAt = pendingSyncEventFirstReceivedAt ?? now
+            coalescedCount = pendingSyncEventCoalescedCount
+            receivedCount = pendingSyncEventReceivedCount
+            requestedSyncRunID = pendingSyncEventRunID
+            pendingSyncEventReasons = []
+            pendingSyncEventRunID = nil
+            pendingSyncEventFirstReceivedAt = nil
+            pendingSyncEventReceivedCount = 0
+            pendingSyncEventCoalescedCount = 0
+        }
+        let reasonsSummary = Self.reasonSummary(reasons)
+        let syncRunID = requestedSyncRunID ?? UUID().uuidString
+        lastSyncEventQueuedAt = now
         syncEventTickContextStore.setContext(LocalNetworkSyncEventTickContext(
             firstReceivedAt: firstReceivedAt,
             reasons: reasons,
@@ -11758,7 +12966,16 @@ final class LocalNetworkSyncAppService: ObservableObject {
             syncRunID: syncRunID,
             result: "immediateSyncQueuedCount=1,reasons=\(reasonsSummary),eventTriggerReceivedCount=\(receivedCount),eventTriggerCoalescedCount=\(coalescedCount)"
         )
-        await scheduler.requestTick(trigger: "event-driven:\(reasonsSummary)", syncRunID: syncRunID)
+        _ = await scheduler.requestTick(trigger: "event-driven:\(reasonsSummary)", syncRunID: syncRunID)
+        if let durableRequest {
+            durableSyncSignalQueue.markFinished(durableRequest)
+            if durableRequest.syncRunID != nil {
+                persistDurableSyncSignalQueue(operation: "finish", syncRunID: durableRequest.syncRunID)
+            }
+        }
+        if hasPendingImmediateSyncEvents {
+            scheduleImmediateSyncEventDrain(now: Date())
+        }
     }
 
     private func recordSyncEventWindow(now: Date, reason: SyncTriggerReason, deviceID: String, syncRunID: String?) {

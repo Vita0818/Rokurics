@@ -159,6 +159,7 @@ nonisolated struct CanonicalStatusExchangeEnvelope: Codable, Equatable, Hashable
     var protocolVersion: CanonicalProtocolVersion
     var kind: CanonicalStatusExchangeMessageKind
     var sourceNodeID: CanonicalNodeID
+    var sourceIncarnationID: String?
     var destinationNodeID: CanonicalNodeID?
     var sequence: CanonicalSequence
     var logicalTime: CanonicalLogicalTime
@@ -174,6 +175,7 @@ nonisolated struct CanonicalStatusExchangeEnvelope: Codable, Equatable, Hashable
         envelopeID: String,
         kind: CanonicalStatusExchangeMessageKind,
         sourceNodeID: CanonicalNodeID,
+        sourceIncarnationID: String? = nil,
         destinationNodeID: CanonicalNodeID? = nil,
         sequence: CanonicalSequence,
         logicalTime: CanonicalLogicalTime,
@@ -190,6 +192,7 @@ nonisolated struct CanonicalStatusExchangeEnvelope: Codable, Equatable, Hashable
         self.protocolVersion = protocolVersion
         self.kind = kind
         self.sourceNodeID = sourceNodeID
+        self.sourceIncarnationID = CanonicalKernelStringSanitizer.optional(sourceIncarnationID)
         self.destinationNodeID = destinationNodeID
         self.sequence = sequence
         self.logicalTime = logicalTime

@@ -27,7 +27,6 @@ final class AudioInboxStore: ObservableObject {
         refreshRecordingInbox()
         cancellable = NotificationCenter.default
             .publisher(for: MacRecordingFileStore.inboxDidChangeNotification)
-            .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.refreshRecordingInbox()
             }

@@ -633,8 +633,8 @@ nonisolated struct CanonicalKernelSwitchConfiguration: Codable, Equatable, Senda
     static let debugModeKey = "Rokurics.debug.canonicalKernelSwitch.mode"
     static let debugFullSyncConfirmedKey = "Rokurics.debug.canonicalKernelSwitch.fullSyncConfirmed"
     static let diagnosticsPathText = "Application Support/Rokurics/Diagnostics/canonical-kernel-switch.log"
-    static let safetyText = "运行时固定 canonicalFullSync；旧内核代码保留为 canonical 端口不可执行时的操作级 legacy fallback。Debug/Release 不再读取 AppStorage mode 或人工确认开关，专项 debug switches 只能作为高级限制/诊断，不能越权启用。"
-    static let emergencyOldKernelSwitchBackText = "Legacy fallback 保留在具体操作层；切回证明 driver 仅验证 legacy 可读和可逆性，不再提供 oldKernel 运行模式。遇到 Divergent、FreezeViolation、RollbackFailed、SecurityFailure 或 ExistingDifferentAudioBlocked 立即停止当前操作。"
+    static let safetyText = "Release 默认 oldKernel；Debug 可读取明确保存的模式。canonicalFullSync 仍要求 debug/internal、owner approval 和人工确认，不能由专项开关越权启用。"
+    static let emergencyOldKernelSwitchBackText = "oldKernel 是默认且可回退的运行模式。遇到 Divergent、FreezeViolation、RollbackFailed、SecurityFailure 或 ExistingDifferentAudioBlocked 时停止 canonical 操作并保留 legacy 可读路径。"
 
     var mode: CanonicalKernelSwitchMode
     var policy: CanonicalKernelSwitchPolicy
@@ -683,7 +683,7 @@ nonisolated struct CanonicalKernelSwitchConfiguration: Codable, Equatable, Senda
     }
 
     nonisolated static func normalizedDebugMode(_ rawValue: String) -> String {
-        CanonicalKernelSwitchMode(rawValue: rawValue)?.rawValue ?? CanonicalKernelSwitchMode.canonicalFullSync.rawValue
+        CanonicalKernelSwitchMode(rawValue: rawValue)?.rawValue ?? CanonicalKernelSwitchMode.oldKernel.rawValue
     }
 
     nonisolated static func normalizedManualSwitchMode(_ rawValue: String) -> String {
@@ -697,15 +697,24 @@ nonisolated struct CanonicalKernelSwitchConfiguration: Codable, Equatable, Senda
     nonisolated static func debugStoredConfiguration(
         userDefaults: UserDefaults = .standard
     ) -> CanonicalKernelSwitchConfiguration {
-        _ = userDefaults
-        return .runtimeCanonicalFullSync
+        let rawMode = userDefaults.string(forKey: debugModeKey) ?? CanonicalKernelSwitchMode.oldKernel.rawValue
+        let mode = CanonicalKernelSwitchMode(rawValue: normalizedDebugMode(rawMode)) ?? .oldKernel
+        return CanonicalKernelSwitchConfiguration(
+            mode: mode,
+            policy: .debugInternal(
+                manualFullSyncConfirmation: userDefaults.bool(forKey: debugFullSyncConfirmedKey)
+            )
+        )
     }
 
     nonisolated static func runtimeConfigurationFromStoredDefaults(
         userDefaults: UserDefaults = .standard
     ) -> CanonicalKernelSwitchConfiguration {
-        _ = userDefaults
-        return .runtimeCanonicalFullSync
+#if DEBUG
+        return debugStoredConfiguration(userDefaults: userDefaults)
+#else
+        return .oldKernel
+#endif
     }
 
     nonisolated static func setDebugStoredMode(

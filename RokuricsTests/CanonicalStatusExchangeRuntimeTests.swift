@@ -163,6 +163,107 @@ struct CanonicalStatusExchangeRuntimeTests {
         #expect(record.redactedDetail == "redactionRejected")
     }
 
+    @Test func outgoingEnvelopeIsRetriedUntilExplicitPeerAck() async throws {
+        let truth = Self.runtime()
+        let exchange = CanonicalStatusExchangeRuntime(
+            nodeID: Self.iPhoneNode,
+            truthRuntime: truth,
+            nowProvider: { Self.now }
+        )
+        _ = await truth.produce(Self.fact("retry-fact", source: .syncRuntime, kind: .localFileExists))
+
+        let first = try #require(await exchange.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat))
+        let retry = try #require(await exchange.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .inventory))
+
+        #expect(retry.envelopeID == first.envelopeID)
+        #expect(retry.delta?.facts.map(\.factID) == first.delta?.facts.map(\.factID))
+
+        let ackEnvelope = Self.envelope(
+            sequence: 1,
+            kind: .ack,
+            source: Self.macNode,
+            destination: Self.iPhoneNode,
+            ack: CanonicalStatusAck(
+                ackID: "peer-ack",
+                acknowledgedSequence: first.sequence,
+                accepted: true
+            )
+        )
+        _ = await exchange.consumeIncomingEnvelope(ackEnvelope, carrier: .heartbeat)
+        #expect(await exchange.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat)?.delta == nil)
+    }
+
+    @Test func statusFactsAreBatchedAndRestartIncarnationResetsPeerSequenceScope() async throws {
+        let truth = Self.runtime()
+        let exchange = CanonicalStatusExchangeRuntime(
+            nodeID: Self.iPhoneNode,
+            truthRuntime: truth,
+            nowProvider: { Self.now },
+            maxFactsPerEnvelope: 1
+        )
+        _ = await truth.produce(Self.fact("batch-a", source: .syncRuntime, kind: .localFileExists, counter: 1))
+        _ = await truth.produce(Self.fact("batch-b", source: .peerMetadata, kind: .metadataOnly, counter: 2))
+        let firstBatch = try #require(await exchange.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat))
+        #expect(firstBatch.delta?.facts.count == 1)
+
+        let receiver = CanonicalStatusExchangeRuntime(
+            nodeID: Self.macNode,
+            truthRuntime: Self.runtime(),
+            nowProvider: { Self.now }
+        )
+        let senderBeforeRestart = CanonicalStatusExchangeRuntime(
+            nodeID: Self.iPhoneNode,
+            truthRuntime: Self.runtime(),
+            nowProvider: { Self.now }
+        )
+        let senderAfterRestart = CanonicalStatusExchangeRuntime(
+            nodeID: Self.iPhoneNode,
+            truthRuntime: Self.runtime(),
+            nowProvider: { Self.now }
+        )
+        await senderBeforeRestart.enqueueRequest(kind: .runSyncSoon)
+        await senderAfterRestart.enqueueRequest(kind: .runSyncSoon)
+        let before = try #require(await senderBeforeRestart.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat))
+        let after = try #require(await senderAfterRestart.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat))
+
+        #expect(before.sequence == after.sequence)
+        #expect(before.sourceIncarnationID != after.sourceIncarnationID)
+        #expect((await receiver.consumeIncomingEnvelope(before, carrier: .heartbeat)).accepted)
+        #expect((await receiver.consumeIncomingEnvelope(after, carrier: .heartbeat)).accepted)
+    }
+
+    @Test func pureAckTerminatesWithoutAckOfAckLoop() async throws {
+        let senderTruth = CanonicalStatusTruthRuntime()
+        let receiverTruth = CanonicalStatusTruthRuntime()
+        let sender = CanonicalStatusExchangeRuntime(
+            nodeID: Self.iPhoneNode,
+            truthRuntime: senderTruth,
+            nowProvider: { Self.now }
+        )
+        let receiver = CanonicalStatusExchangeRuntime(
+            nodeID: Self.macNode,
+            truthRuntime: receiverTruth,
+            nowProvider: { Self.now }
+        )
+        await sender.enqueueRequest(kind: .runSyncSoon)
+        let dataEnvelope = try #require(await sender.makeOutgoingEnvelope(
+            destinationNodeID: Self.macNode,
+            carrier: .heartbeat
+        ))
+        _ = await receiver.consumeIncomingEnvelope(dataEnvelope, carrier: .heartbeat)
+        let pureAck = try #require(await receiver.makeOutgoingEnvelope(
+            destinationNodeID: Self.iPhoneNode,
+            carrier: .heartbeat
+        ))
+
+        let result = await sender.consumeIncomingEnvelope(pureAck, carrier: .heartbeat)
+
+        #expect(result.accepted)
+        #expect(result.ackToSend == nil)
+        #expect(await sender.makeOutgoingEnvelope(destinationNodeID: Self.macNode, carrier: .heartbeat) == nil)
+        #expect(await receiver.makeOutgoingEnvelope(destinationNodeID: Self.iPhoneNode, carrier: .heartbeat) == nil)
+    }
+
     @Test func iPhoneAdaptersCarryExchangeOverExistingStatusAndInventoryPaths() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let coordinator = try String(

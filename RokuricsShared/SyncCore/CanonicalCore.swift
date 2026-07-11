@@ -12,11 +12,37 @@ nonisolated struct CanonicalTimestamp: Codable, Equatable, Hashable, Comparable,
     var date: Date
 
     nonisolated init(_ date: Date) {
-        self.date = date
+        self.date = Self.wireNormalized(date)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = Self.wireNormalized(try container.decode(Date.self, forKey: .date))
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(date, forKey: .date)
     }
 
     nonisolated static func < (left: CanonicalTimestamp, right: CanonicalTimestamp) -> Bool {
         left.date < right.date
+    }
+
+    /// Canonical payloads use Foundation's `.iso8601` date strategy on the wire.
+    /// That strategy has whole-second precision, so retaining sub-second values in
+    /// the in-memory hash input makes a freshly-created manifest fail validation
+    /// immediately after an encode/decode round trip.
+    nonisolated private static func wireNormalized(_ date: Date) -> Date {
+        let seconds = date.timeIntervalSince1970
+        guard seconds.isFinite else {
+            return date
+        }
+        return Date(timeIntervalSince1970: floor(seconds))
     }
 }
 

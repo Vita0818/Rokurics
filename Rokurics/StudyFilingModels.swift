@@ -765,15 +765,29 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
         duration ?? 0
     }
 
-    nonisolated func mergedWithCurrentRecording(_ recording: RecordingMetadata) -> StudyItemMetadata {
+    nonisolated func mergedWithCurrentRecording(
+        _ recording: RecordingMetadata,
+        businessMutationAt: Date? = nil,
+        clearsRecordingTombstone: Bool = false
+    ) -> StudyItemMetadata {
         let resolvedFiling = filing.isEmpty ? (recording.studyFiling ?? StudyFilingPath()) : filing
         let resolvedFolderIDs = folderIDs.isEmpty ? Self.defaultFolderIDs(for: resolvedFiling) : folderIDs
+        let resolvedIsTrashed = clearsRecordingTombstone ? recording.isDeleted : (isTrashed || recording.isDeleted)
+        let resolvedTrashedAt = clearsRecordingTombstone && !recording.isDeleted
+            ? nil
+            : (recording.deletedAt ?? trashedAt)
+        let resolvedUpdatedAt = businessMutationAt.map {
+            // The persisted ISO-8601 encoder currently has second precision.
+            // Advance by a full encoded tick so a rapid rename/restore cannot
+            // serialize back to the same business clock value.
+            max($0, updatedAt.addingTimeInterval(1))
+        } ?? updatedAt
         return StudyItemMetadata(
             itemID: itemID,
             kind: .recordingBundle,
             title: recording.title,
             createdAt: recording.createdAt,
-            updatedAt: updatedAt,
+            updatedAt: resolvedUpdatedAt,
             filing: resolvedFiling,
             tags: tags,
             folderIDs: resolvedFolderIDs,
@@ -790,8 +804,8 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
             noteStatus: recording.noteStatus,
             noteSections: noteSections,
             sourceDescription: sourceDescription,
-            isTrashed: isTrashed || recording.isDeleted,
-            trashedAt: recording.deletedAt ?? trashedAt,
+            isTrashed: resolvedIsTrashed,
+            trashedAt: resolvedTrashedAt,
             modifiedByDeviceID: modifiedByDeviceID,
             syncConflictStatus: syncConflictStatus
         )
@@ -813,7 +827,11 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
             studyFiling: recording.studyFiling,
             tags: recording.tags.map { StudyTag(namespace: "custom", value: $0) },
             customProperties: [:],
-            updatedAt: Date(),
+            // A fallback item can be reconstructed on every inventory build. Its
+            // business timestamp therefore must come from persisted recording
+            // metadata rather than wall-clock time, otherwise the metadata hash
+            // changes on every sync tick and creates a false conflict.
+            updatedAt: recording.endedAt,
             transcriptionStatus: recording.transcriptionStatus,
             noteStatus: recording.noteStatus,
             sourceDescription: "iPhone",

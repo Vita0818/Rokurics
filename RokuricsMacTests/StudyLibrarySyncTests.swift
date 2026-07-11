@@ -11,6 +11,195 @@ import Testing
 @testable import RokuricsMac
 
 struct StudyLibrarySyncTests {
+    @Test func macBusinessSignatureMappingMatchesSharedCrossDeviceFixtureAndIgnoresLocalState() {
+        let filing = StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵")
+        let mac = StudyItemMetadata(
+            itemID: "item_recording_business-01",
+            kind: .recordingBundle,
+            title: "矩阵复习",
+            createdAt: Date(timeIntervalSince1970: 8_100),
+            updatedAt: Date(timeIntervalSince1970: 8_200),
+            filing: filing,
+            tags: [
+                StudyTag(id: "mac-subject-id", namespace: "subject", value: "数学", displayName: "数学", createdAt: Date(timeIntervalSince1970: 8_102)),
+                StudyTag(id: "mac-topic-id", namespace: "topic", value: "特征值", displayName: "特征值", createdAt: Date(timeIntervalSince1970: 8_101))
+            ],
+            folderIDs: ["mac-derived-folder"],
+            customProperties: ["syncedMetadataOnly": "true"],
+            recordingID: "business-01",
+            sanitizedRecordingID: "mac-sanitized-id",
+            duration: 84,
+            audioRelativePath: "audio/inbox/business-01/audio.m4a",
+            receiveRelativePath: "audio/inbox/business-01/receive.json",
+            transcriptRelativePath: "mac/transcript.json",
+            transcriptMarkdownRelativePath: "mac/transcript.md",
+            noteRelativePath: "mac/note.md",
+            transcriptionStatus: "completed",
+            noteStatus: "completed",
+            sourceDescription: "Mac inbox",
+            modifiedByDeviceID: "mac-01",
+            syncConflictStatus: "mac-warning"
+        )
+        var macLocalVariant = mac
+        macLocalVariant.createdAt = Date(timeIntervalSince1970: 18_100)
+        macLocalVariant.updatedAt = Date(timeIntervalSince1970: 18_200)
+        macLocalVariant.folderIDs = ["another-derived-folder"]
+        macLocalVariant.customProperties = ["local.finderBookmark": "mac-only"]
+        macLocalVariant.sanitizedRecordingID = "another-local-sanitized-id"
+        macLocalVariant.duration = 999
+        macLocalVariant.audioRelativePath = "another/local/audio.m4a"
+        macLocalVariant.receiveRelativePath = "another/local/receive.json"
+        macLocalVariant.transcriptionStatus = "running"
+        macLocalVariant.noteStatus = "waiting"
+        macLocalVariant.modifiedByDeviceID = "another-mac"
+        macLocalVariant.syncConflictStatus = "another-local-warning"
+
+        let crossDeviceExpected = LocalNetworkStudyItemBusinessFieldsV2(
+            itemID: "item_recording_business-01",
+            itemKind: "recordingBundle",
+            title: "矩阵复习",
+            filing: LocalNetworkBusinessFilingV2(type: "课堂", subject: "线性代数", chapter: "矩阵"),
+            tags: [
+                LocalNetworkBusinessTagV2(namespace: "subject", value: "数学", displayName: "数学"),
+                LocalNetworkBusinessTagV2(namespace: "topic", value: "特征值", displayName: "特征值")
+            ],
+            recordingID: "business-01",
+            isTrashed: false
+        )
+
+        #expect(mac.localNetworkStudyItemBusinessFieldsV2 == crossDeviceExpected)
+        #expect(mac.localNetworkStudyItemBusinessSignatureV2 == LocalNetworkBusinessSignatureV2.studyItem(crossDeviceExpected))
+        #expect(mac.localNetworkStudyItemBusinessSignatureV2 == macLocalVariant.localNetworkStudyItemBusinessSignatureV2)
+        #expect(mac.localNetworkRecordingBusinessSignatureV2 == macLocalVariant.localNetworkRecordingBusinessSignatureV2)
+        #expect(mac.localNetworkStudyItemBusinessSignatureV2.hasPrefix(LocalNetworkBusinessSignatureV2.wirePrefix))
+
+        let folder = StudyFolderMetadata(
+            folderID: "folder-business-01",
+            name: "矩阵",
+            level: .chapter,
+            path: filing,
+            parentFolderID: "folder-parent-01",
+            childFolderIDs: ["mac-child"],
+            itemIDs: [mac.itemID],
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            colorToken: .blue,
+            customProperties: ["local.finderBookmark": "one"],
+            modifiedByDeviceID: "mac-01",
+            syncConflictStatus: "local-warning"
+        )
+        let folderLocalVariant = StudyFolderMetadata(
+            folderID: folder.folderID,
+            name: folder.name,
+            level: folder.level,
+            path: StudyFilingPath(type: "device-local-derived", subject: "path"),
+            parentFolderID: folder.parentFolderID,
+            childFolderIDs: ["other-child"],
+            itemIDs: ["other-item"],
+            createdAt: Date(timeIntervalSince1970: 101),
+            updatedAt: Date(timeIntervalSince1970: 102),
+            colorToken: folder.colorToken,
+            customProperties: ["local.finderBookmark": "two"],
+            modifiedByDeviceID: "mac-02",
+            syncConflictStatus: "other-warning"
+        )
+        let expectedFolder = LocalNetworkFolderBusinessFieldsV2(
+            folderID: "folder-business-01",
+            name: "矩阵",
+            level: "chapter",
+            parentFolderID: "folder-parent-01",
+            colorToken: "blue",
+            isTrashed: false
+        )
+        #expect(folder.localNetworkFolderBusinessFieldsV2 == expectedFolder)
+        #expect(folder.localNetworkFolderBusinessSignatureV2 == LocalNetworkBusinessSignatureV2.folder(expectedFolder))
+        #expect(folder.localNetworkFolderBusinessSignatureV2 == folderLocalVariant.localNetworkFolderBusinessSignatureV2)
+
+        var folderBusinessChange = folderLocalVariant
+        folderBusinessChange.name = "矩阵（更新）"
+        #expect(folder.localNetworkFolderBusinessSignatureV2 != folderBusinessChange.localNetworkFolderBusinessSignatureV2)
+    }
+
+    @Test func macBusinessMergePreservesMacLocalFilesAndProcessingState() {
+        let localTagDate = Date(timeIntervalSince1970: 50)
+        let local = StudyItemMetadata(
+            itemID: "item_recording_mac-merge-01",
+            kind: .recordingBundle,
+            title: "旧标题",
+            createdAt: Date(timeIntervalSince1970: 10),
+            updatedAt: Date(timeIntervalSince1970: 20),
+            filing: StudyFilingPath(type: "课堂", subject: "旧课程"),
+            tags: [StudyTag(id: "mac-local-tag", namespace: "topic", value: "矩阵", displayName: "旧显示名", createdAt: localTagDate)],
+            folderIDs: ["mac-derived-folder"],
+            customProperties: ["syncedMetadataOnly": "true", "business.priority": "old"],
+            recordingID: "mac-merge-01",
+            sanitizedRecordingID: "mac-local-sanitized",
+            duration: 20,
+            audioRelativePath: "audio/inbox/mac-merge-01/audio.m4a",
+            receiveRelativePath: "audio/inbox/mac-merge-01/receive.json",
+            transcriptRelativePath: "local/transcript.json",
+            transcriptMarkdownRelativePath: "local/transcript.md",
+            noteRelativePath: "local/note.md",
+            transcriptionStatus: "local-completed",
+            noteStatus: "local-completed",
+            sourceDescription: "Mac inbox",
+            modifiedByDeviceID: "mac-01",
+            syncConflictStatus: "mac-local-conflict"
+        )
+        let remoteFiling = StudyFilingPath(type: "复习", subject: "新课程")
+        let remote = StudyItemMetadata(
+            itemID: local.itemID,
+            kind: .recordingBundle,
+            title: "新标题",
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 200),
+            filing: remoteFiling,
+            tags: [StudyTag(id: "iphone-tag", namespace: "topic", value: "矩阵", displayName: "新显示名", createdAt: Date(timeIntervalSince1970: 101))],
+            folderIDs: ["iphone-derived-folder"],
+            customProperties: ["business.priority": "new", "iphone.local": "drop"],
+            recordingID: "mac-merge-01",
+            sanitizedRecordingID: "iphone-sanitized",
+            duration: 99,
+            audioRelativePath: "Recordings/mac-merge-01.m4a",
+            receiveRelativePath: "Receives/mac-merge-01.json",
+            transcriptRelativePath: "remote/transcript.json",
+            transcriptMarkdownRelativePath: "remote/transcript.md",
+            noteRelativePath: "remote/note.md",
+            transcriptionStatus: "remote-running",
+            noteStatus: "remote-waiting",
+            sourceDescription: "iPhone microphone",
+            modifiedByDeviceID: "iphone-01",
+            syncConflictStatus: "iphone-conflict"
+        )
+
+        let merged = local.mergingRemoteBusinessFieldsV2(
+            from: remote,
+            explicitBusinessCustomPropertyKeys: ["business.priority"]
+        )
+        #expect(merged.title == remote.title)
+        #expect(merged.filing == remoteFiling)
+        #expect(merged.folderIDs == StudyItemMetadata.defaultFolderIDs(for: remoteFiling))
+        #expect(merged.tags.first?.displayName == "新显示名")
+        #expect(merged.tags.first?.id == "mac-local-tag")
+        #expect(merged.tags.first?.createdAt == localTagDate)
+        #expect(merged.customProperties == ["syncedMetadataOnly": "true", "business.priority": "new"])
+        #expect(merged.updatedAt == remote.updatedAt)
+        #expect(merged.modifiedByDeviceID == "iphone-01")
+
+        #expect(merged.createdAt == local.createdAt)
+        #expect(merged.sanitizedRecordingID == local.sanitizedRecordingID)
+        #expect(merged.duration == local.duration)
+        #expect(merged.audioRelativePath == local.audioRelativePath)
+        #expect(merged.receiveRelativePath == local.receiveRelativePath)
+        #expect(merged.transcriptRelativePath == local.transcriptRelativePath)
+        #expect(merged.transcriptMarkdownRelativePath == local.transcriptMarkdownRelativePath)
+        #expect(merged.noteRelativePath == local.noteRelativePath)
+        #expect(merged.transcriptionStatus == local.transcriptionStatus)
+        #expect(merged.noteStatus == local.noteStatus)
+        #expect(merged.sourceDescription == local.sourceDescription)
+        #expect(merged.syncConflictStatus == local.syncConflictStatus)
+    }
+
     @Test func sharedSyncCorePlansObjectDiffsWithoutFileTypeBranches() {
         let date = Date(timeIntervalSince1970: 10)
         let localSummary = SyncObject(
@@ -441,6 +630,71 @@ struct StudyLibrarySyncTests {
         #expect(merged.commitID == commit.commitID)
     }
 
+    @Test func macBusinessEqualMetadataOnlyMarkerPersistsAndClearsAcrossRefresh() async throws {
+        let (fileStore, appRootURL, scratchURL) = try makeMacStore()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let studyStore = StudyLibraryStore(
+            rootURL: appRootURL,
+            recordingFileStore: fileStore,
+            listenForInboxChanges: false
+        )
+        let item = StudyItemMetadata(
+            itemID: "iphone-stable-metadata-only-item",
+            kind: .recordingBundle,
+            title: "仅元数据录音",
+            createdAt: Date(timeIntervalSince1970: 2_200),
+            updatedAt: Date(timeIntervalSince1970: 2_210),
+            recordingID: "mac-marker-roundtrip",
+            duration: 6,
+            modifiedByDeviceID: "iphone-01"
+        )
+        try studyStore.save(item)
+        studyStore.refresh()
+
+        // A recording bundle without local audio is hidden until its local
+        // metadata-only receipt marker has been persisted.
+        #expect(studyStore.item(itemID: item.itemID) == nil)
+
+        let manifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-01",
+            generatedAt: Date(timeIntervalSince1970: 2_220),
+            items: [item],
+            folders: []
+        )
+        let metadataOnlyResult = try await studyStore.applySyncManifest(
+            manifest,
+            localDeviceID: "mac-01"
+        )
+        studyStore.refresh()
+        let metadataOnlyItem = try #require(studyStore.item(itemID: item.itemID))
+
+        #expect(metadataOnlyResult.appliedItemCount == 1)
+        #expect(metadataOnlyItem.customProperties["syncedMetadataOnly"] == "true")
+
+        _ = try await saveInboxRecording(
+            id: try #require(item.recordingID),
+            title: item.title,
+            store: fileStore
+        )
+        let audioAvailableResult = try await studyStore.applySyncManifest(
+            manifest,
+            localDeviceID: "mac-01"
+        )
+        studyStore.refresh()
+        let audioAvailableItem = try #require(studyStore.item(itemID: item.itemID))
+        let reloadedStore = StudyLibraryStore(
+            rootURL: appRootURL,
+            recordingFileStore: fileStore,
+            listenForInboxChanges: false
+        )
+        let reloadedItem = try #require(reloadedStore.item(itemID: item.itemID))
+
+        #expect(audioAvailableResult.appliedItemCount == 1)
+        #expect(audioAvailableItem.customProperties["syncedMetadataOnly"] == nil)
+        #expect(reloadedItem.customProperties["syncedMetadataOnly"] == nil)
+        #expect(reloadedItem.recordingID == item.recordingID)
+    }
+
     @Test func macSnapshotPullUsesLastWriteWinsAndKeepsMissingReferencesSafe() async throws {
         let (fileStore, appRootURL, scratchURL) = try makeMacStore()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
@@ -472,7 +726,10 @@ struct StudyLibrarySyncTests {
 
         #expect(result.appliedItemCount == 1)
         #expect(synced.title == "Mac 较新标题")
-        #expect(synced.transcriptMarkdownRelativePath == "transcripts/missing/transcript.md")
+        // A peer-owned path is not portable and the referenced file does not
+        // exist in this receiver's storage. LWW applies the business title,
+        // while the receiver keeps its local processing/resource facts.
+        #expect(synced.transcriptMarkdownRelativePath == nil)
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
     }
 
@@ -1142,6 +1399,153 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
+    @Test func localNetworkSyncArtifactResumeIsBoundToContentVersionAndChecksumFailureDeletesTemp() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(
+                rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)
+            ),
+            runtimeConfiguration: .default
+        )
+        let ownerID = "versioned-resume-recording"
+        let logicalPath = "transcripts/\(ownerID)/transcript.md"
+        let artifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: ownerID,
+            logicalPathToken: logicalPath
+        )
+        let totalCount = 3 * 1024 * 1024 + 17
+        let chunkCount = 2 * 1024 * 1024
+        let versionA = Data(repeating: 0x41, count: totalCount)
+        let versionB = Data(repeating: 0x42, count: totalCount)
+        let checksumA = MacSecurityUtilities.sha256Hex(versionA)
+        let checksumB = MacSecurityUtilities.sha256Hex(versionB)
+        let firstA = versionA.prefix(chunkCount)
+        let firstPutA = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                checksum: checksumA,
+                size: Int64(totalCount),
+                updatedAt: Date(timeIntervalSince1970: 2_500),
+                logicalPathToken: logicalPath,
+                dataBase64: Data(firstA).base64EncodedString(),
+                offset: 0,
+                chunkSize: firstA.count,
+                totalSize: Int64(totalCount),
+                isFinalChunk: false
+            ))
+        )
+        let statusForB = await server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactStatusRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                logicalPathToken: logicalPath,
+                checksum: checksumB,
+                size: Int64(totalCount)
+            ))
+        )
+
+        let firstB = versionB.prefix(chunkCount)
+        let firstPutB = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                checksum: checksumB,
+                size: Int64(totalCount),
+                updatedAt: Date(timeIntervalSince1970: 2_501),
+                logicalPathToken: logicalPath,
+                dataBase64: Data(firstB).base64EncodedString(),
+                offset: 0,
+                chunkSize: firstB.count,
+                totalSize: Int64(totalCount),
+                isFinalChunk: false
+            ))
+        )
+        let statusForAAfterBStarted = await server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactStatusRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                logicalPathToken: logicalPath,
+                checksum: checksumA,
+                size: Int64(totalCount)
+            ))
+        )
+
+        let intentionallyWrongChecksum = MacSecurityUtilities.sha256Hex(Data(repeating: 0x43, count: totalCount))
+        let badFirstPut = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                checksum: intentionallyWrongChecksum,
+                size: Int64(totalCount),
+                updatedAt: Date(timeIntervalSince1970: 2_502),
+                logicalPathToken: logicalPath,
+                dataBase64: Data(firstB).base64EncodedString(),
+                offset: 0,
+                chunkSize: firstB.count,
+                totalSize: Int64(totalCount),
+                isFinalChunk: false
+            ))
+        )
+        let remainingB = versionB.suffix(from: chunkCount)
+        let badFinalPut = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactPutRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                checksum: intentionallyWrongChecksum,
+                size: Int64(totalCount),
+                updatedAt: Date(timeIntervalSince1970: 2_502),
+                logicalPathToken: logicalPath,
+                dataBase64: Data(remainingB).base64EncodedString(),
+                offset: Int64(chunkCount),
+                chunkSize: remainingB.count,
+                totalSize: Int64(totalCount),
+                isFinalChunk: true
+            ))
+        )
+        let statusAfterChecksumFailure = await server.localNetworkSyncArtifactStatusResponseForVerifiedDevice(
+            makePairedDevice(),
+            requestBody: try JSONEncoder.syncTestEncoder.encode(LocalNetworkSyncArtifactStatusRequest(
+                artifactID: artifactID,
+                kind: .transcriptMarkdown,
+                ownerID: ownerID,
+                logicalPathToken: logicalPath,
+                checksum: intentionallyWrongChecksum,
+                size: Int64(totalCount)
+            ))
+        )
+
+        #expect(firstPutA.ok)
+        #expect(firstPutA.confirmedBytes == Int64(chunkCount))
+        #expect(statusForB.state == .pending)
+        #expect(statusForB.confirmedBytes == 0)
+        #expect(firstPutB.ok)
+        #expect(statusForAAfterBStarted.state == .pending)
+        #expect(statusForAAfterBStarted.confirmedBytes == 0)
+        #expect(badFirstPut.ok)
+        #expect(!badFinalPut.ok)
+        #expect(badFinalPut.error == "sync_artifact_checksum_mismatch")
+        #expect(statusAfterChecksumFailure.state == .pending)
+        #expect(statusAfterChecksumFailure.confirmedBytes == 0)
+    }
+
+    @MainActor
     @Test func localNetworkSyncApplyMetadataMergesStudyMetadataWithoutTouchingAudio() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
@@ -1302,7 +1706,9 @@ struct CanonicalManifestRecordingsApplyTests {
         )
         let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
 
-        #expect(response.ok)
+        #expect(!response.ok)
+        #expect((response.applyResult?.failedChanges ?? 0) > 0)
+        #expect(response.error == "sync_apply_metadata_partial_failure")
         let malformedRecord = try port.readRecord(objectID: "malformed-recording")
         let validRecord = try port.readRecord(objectID: "valid-recording")
         #expect(malformedRecord == nil)
@@ -1358,6 +1764,98 @@ struct CanonicalManifestRecordingsApplyTests {
 
         let record = try port.readRecord(objectID: "manifest-recording-01")
         #expect(record?.metadataHash == "second-metadata-hash")
+    }
+
+    @MainActor
+    @Test func recordingTombstoneDoesNotReturnConflictOrReappearFromExistenceLedger() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let appRootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let canonical = CanonicalKernelSwitchConfiguration(
+            mode: .canonicalFullSync,
+            policy: .debugInternal(manualFullSyncConfirmation: true)
+        ).resolve().effectiveConfiguration
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)),
+            runtimeConfiguration: .default,
+            canonicalSyncRuntimeConfiguration: canonical.syncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonical.applyRuntimeConfiguration,
+            canonicalExistenceApplyRuntimeConfiguration: canonical.existenceApplyRuntimeConfiguration
+        )
+        let recordingID = "tombstoned-recording"
+        var activeItem = StudyItemMetadata(
+            recordingID: recordingID,
+            title: "Active metadata",
+            createdAt: Date(timeIntervalSince1970: 8_500),
+            duration: 12,
+            updatedAt: Date(timeIntervalSince1970: 8_510),
+            modifiedByDeviceID: "iphone-device"
+        )
+        let activeManifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_511),
+            items: [activeItem],
+            folders: [],
+            recordings: [Self.recordingFact(recordingID: recordingID, metadataHash: "active-hash")]
+        )
+        let activeResponse = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: activeManifest))
+        )
+        let port = MacCanonicalRecordingExistenceLedgerPort(rootURL: appRootURL)
+        #expect(activeResponse.ok)
+        #expect(try port.readRecord(objectID: recordingID) != nil)
+
+        activeItem.isTrashed = true
+        activeItem.trashedAt = Date(timeIntervalSince1970: 8_520)
+        activeItem.updatedAt = Date(timeIntervalSince1970: 8_520)
+        var tombstoneRecording = Self.recordingFact(recordingID: recordingID, metadataHash: nil)
+        tombstoneRecording.deleted = true
+        tombstoneRecording.tombstone = true
+        tombstoneRecording.updatedAt = activeItem.updatedAt
+        let tombstoneManifest = StudyLibrarySyncManifest.make(
+            deviceID: "iphone-device",
+            generatedAt: Date(timeIntervalSince1970: 8_521),
+            items: [activeItem],
+            folders: [],
+            tombstones: [
+                StudyLibrarySyncTombstone(
+                    id: "item:\(activeItem.itemID)",
+                    entityKind: .item,
+                    entityID: activeItem.itemID,
+                    operation: .trash,
+                    updatedAt: activeItem.updatedAt,
+                    modifiedByDeviceID: "iphone-device"
+                )
+            ],
+            recordings: [tombstoneRecording]
+        )
+
+        let firstTombstoneResponse = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: tombstoneManifest))
+        )
+        let secondTombstoneResponse = try await server.localNetworkSyncApplyMetadataResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            requestBody: JSONEncoder.syncTestEncoder.encode(StudyLibrarySyncManifestRequest(manifest: tombstoneManifest))
+        )
+        let inventoryResponse = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            makePairedDevice(id: "iphone-device"),
+            syncRunID: "tombstone-inventory"
+        )
+        let inventoryRecording = try #require(inventoryResponse.inventory?.recordings.first { $0.recordingID == recordingID })
+
+        #expect(firstTombstoneResponse.ok)
+        #expect(firstTombstoneResponse.applyResult?.failedChanges == 0)
+        #expect(firstTombstoneResponse.error == nil)
+        #expect(secondTombstoneResponse.ok)
+        #expect(secondTombstoneResponse.applyResult?.failedChanges == 0)
+        #expect(try port.readRecord(objectID: recordingID) == nil)
+        #expect(inventoryRecording.deleted)
+        #expect(inventoryRecording.tombstone == true)
+        #expect(inventoryRecording.metadataHash != "active-hash")
     }
 
     private static func recordingFact(

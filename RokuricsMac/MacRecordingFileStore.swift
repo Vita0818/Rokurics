@@ -172,6 +172,7 @@ final class MacRecordingFileStore {
     private let receiveLogURL: URL
     private let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
     private let canonicalChecksumRuntime: CanonicalChecksumRuntime
+    private static let resumableSessionStaleInterval: TimeInterval = 24 * 60 * 60
 
     nonisolated init(
         fileManager: FileManager = .default,
@@ -989,31 +990,30 @@ final class MacRecordingFileStore {
         )
 
         if let existingSession = try existingResumableSession(recordingID: request.recordingID, sourceDeviceID: sourceDevice.id) {
-            guard sessionMatchesStart(existingSession, request: request, sourceDevice: sourceDevice) else {
-                try? markUploadConflict(
+            if sessionMatchesStart(existingSession, request: request, sourceDevice: sourceDevice),
+               !isResumableSessionStale(existingSession),
+               resumableSessionPartMatchesLedger(existingSession) {
+                try updateReceiveTransferProgress(
                     receiveURL: recordingResources.receiveURL,
                     recordingID: request.recordingID,
                     sourceDeviceID: sourceDevice.id,
-                    error: "upload_session_conflict"
+                    state: .transferring,
+                    receivedBytes: existingSession.receivedBytes,
+                    totalBytes: existingSession.expectedTotalBytes,
+                    statusText: transferStatusText(receivedBytes: existingSession.receivedBytes, totalBytes: existingSession.expectedTotalBytes)
                 )
-                throw MacRecordingFileStoreError.sessionConflict
+                return resumableResponse(
+                    disposition: .acceptedExisting,
+                    session: existingSession,
+                    completed: existingSession.status == "completed",
+                    finalAudioExists: false
+                )
             }
 
-            try updateReceiveTransferProgress(
-                receiveURL: recordingResources.receiveURL,
-                recordingID: request.recordingID,
-                sourceDeviceID: sourceDevice.id,
-                state: .transferring,
-                receivedBytes: existingSession.receivedBytes,
-                totalBytes: existingSession.expectedTotalBytes,
-                statusText: transferStatusText(receivedBytes: existingSession.receivedBytes, totalBytes: existingSession.expectedTotalBytes)
-            )
-            return resumableResponse(
-                disposition: .acceptedExisting,
-                session: existingSession,
-                completed: existingSession.status == "completed",
-                finalAudioExists: false
-            )
+            // A new content signature/chunk contract, a stale session, or a
+            // ledger/part mismatch is recoverable. Retire it before accepting a
+            // fresh start instead of trapping the client in permanent 409 retries.
+            try expireAndRemoveResumableSession(existingSession)
         }
 
         let sessionID = try generatedResumableSessionID(
@@ -1033,31 +1033,26 @@ final class MacRecordingFileStore {
 
         if fileManager.fileExists(atPath: sessionURL.path) {
             let session = try loadResumableSession(at: sessionURL)
-            guard sessionMatchesStart(session, request: request, sourceDevice: sourceDevice) else {
-                try? markUploadConflict(
+            if sessionMatchesStart(session, request: request, sourceDevice: sourceDevice),
+               !isResumableSessionStale(session),
+               resumableSessionPartMatchesLedger(session) {
+                try updateReceiveTransferProgress(
                     receiveURL: recordingResources.receiveURL,
                     recordingID: request.recordingID,
                     sourceDeviceID: sourceDevice.id,
-                    error: "upload_session_conflict"
+                    state: .transferring,
+                    receivedBytes: session.receivedBytes,
+                    totalBytes: session.expectedTotalBytes,
+                    statusText: transferStatusText(receivedBytes: session.receivedBytes, totalBytes: session.expectedTotalBytes)
                 )
-                throw MacRecordingFileStoreError.sessionConflict
+                return resumableResponse(
+                    disposition: .acceptedExisting,
+                    session: session,
+                    completed: session.status == "completed",
+                    finalAudioExists: false
+                )
             }
-
-            try updateReceiveTransferProgress(
-                receiveURL: recordingResources.receiveURL,
-                recordingID: request.recordingID,
-                sourceDeviceID: sourceDevice.id,
-                state: .transferring,
-                receivedBytes: session.receivedBytes,
-                totalBytes: session.expectedTotalBytes,
-                statusText: transferStatusText(receivedBytes: session.receivedBytes, totalBytes: session.expectedTotalBytes)
-            )
-            return resumableResponse(
-                disposition: .acceptedExisting,
-                session: session,
-                completed: session.status == "completed",
-                finalAudioExists: false
-            )
+            try expireAndRemoveResumableSession(session)
         }
 
         try fileManager.createDirectory(at: sessionDirectoryURL, withIntermediateDirectories: true)
@@ -1156,6 +1151,12 @@ final class MacRecordingFileStore {
         }
         guard session.status != "conflict" else {
             throw MacRecordingFileStoreError.sessionConflict
+        }
+        guard session.status == "active",
+              !isResumableSessionStale(session),
+              resumableSessionPartMatchesLedger(session) else {
+            try? expireAndRemoveResumableSession(session)
+            throw MacRecordingFileStoreError.sessionMissing
         }
 
         try updateReceiveTransferProgress(
@@ -2352,6 +2353,29 @@ final class MacRecordingFileStore {
             && session.chunkSize == request.chunkSize
     }
 
+    private func isResumableSessionStale(_ session: ResumableAudioSessionManifest, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(session.updatedAt) > Self.resumableSessionStaleInterval
+    }
+
+    private func resumableSessionPartMatchesLedger(_ session: ResumableAudioSessionManifest) -> Bool {
+        guard let partURL = try? resolvedResumablePartURL(for: session) else {
+            return false
+        }
+        return fileSize(at: partURL) == session.receivedBytes
+    }
+
+    private func expireAndRemoveResumableSession(_ session: ResumableAudioSessionManifest) throws {
+        var expired = session
+        expired.status = "expired"
+        expired.updatedAt = Date()
+        expired.lastError = "upload_session_expired"
+        try? saveResumableSession(expired)
+        let directoryURL = try resumableSessionDirectoryURL(sessionID: session.sessionID)
+        if fileManager.fileExists(atPath: directoryURL.path) {
+            try fileManager.removeItem(at: directoryURL)
+        }
+    }
+
     private func existingResumableSession(recordingID: String, sourceDeviceID: String) throws -> ResumableAudioSessionManifest? {
         guard fileManager.fileExists(atPath: uploadSessionsURL.path) else {
             return nil
@@ -2863,8 +2887,12 @@ final class MacRecordingFileStore {
     }
 
     private func postInboxChanged() {
-        DispatchQueue.main.async {
+        if Thread.isMainThread {
             NotificationCenter.default.post(name: Self.inboxDidChangeNotification, object: nil)
+        } else {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.inboxDidChangeNotification, object: nil)
+            }
         }
     }
 

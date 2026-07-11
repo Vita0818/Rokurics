@@ -233,6 +233,54 @@ struct CanonicalFileKernelRuntimeTests {
         #expect(lines.joined().contains("second") == false)
     }
 
+    @Test func asyncDiagnosticsWriterCriticalEvictsNormalAndCannotBeEvictedByNormal() async {
+        let sink = CanonicalInMemoryDiagnosticsSink()
+        let writer = CanonicalAsyncDiagnosticsWriter(
+            sink: sink,
+            configuration: CanonicalAsyncDiagnosticsWriterConfiguration(
+                maxQueuedEvents: 2,
+                automaticallyFlush: false
+            )
+        )
+        let firstNormal = CanonicalKernelDiagnosticRecord(
+            kind: .diagnosticsWriteDurationMs,
+            domain: .file,
+            redactedDetail: "event=first-normal"
+        )
+        let secondNormal = CanonicalKernelDiagnosticRecord(
+            kind: .diagnosticsWriteDurationMs,
+            domain: .file,
+            redactedDetail: "event=second-normal"
+        )
+        let critical = CanonicalKernelDiagnosticRecord(
+            kind: .diagnosticsWriteDurationMs,
+            domain: .file,
+            redactedDetail: "event=critical-terminal"
+        )
+        let lateNormal = CanonicalKernelDiagnosticRecord(
+            kind: .diagnosticsWriteDurationMs,
+            domain: .file,
+            redactedDetail: "event=late-normal"
+        )
+
+        #expect(await writer.enqueue(firstNormal) == .enqueued)
+        #expect(await writer.enqueue(secondNormal) == .enqueued)
+        #expect(await writer.enqueue(critical, priority: .critical) == .enqueued)
+        #expect(await writer.enqueue(lateNormal) == .droppedBackpressure)
+        await writer.drainForTests()
+        let metrics = await writer.currentMetrics()
+        let lines = await sink.allLines()
+        let text = lines.joined(separator: "\n")
+
+        #expect(text.contains("first-normal") == false)
+        #expect(text.contains("second-normal"))
+        #expect(text.contains("critical-terminal"))
+        #expect(text.contains("late-normal") == false)
+        #expect(metrics.enqueuedCount == 3)
+        #expect(metrics.droppedCount == 2)
+        #expect(metrics.writtenCount == 2)
+    }
+
     @MainActor
     @Test func connectionDiagnosticsRecordIsMainActorNonBlockingAndFlushesRedactedJSONL() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -272,6 +320,56 @@ struct CanonicalFileKernelRuntimeTests {
         #expect(raw.contains(fullHash) == false)
         #expect(raw.contains("request body") == false)
         #expect(raw.contains("redactionRejected"))
+    }
+
+    @MainActor
+    @Test func connectionDiagnosticsNoiseStormPersistsCriticalTerminalsInOrder() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ConnectionDiagnosticsCriticalStorm-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ConnectionDiagnosticsStore(
+            rootURL: root,
+            maxEntries: 10,
+            diagnosticsWriterConfiguration: CanonicalAsyncDiagnosticsWriterConfiguration(
+                maxQueuedEvents: 5,
+                automaticallyFlush: false
+            )
+        )
+
+        for index in 0..<100 {
+            store.record(phase: "noiseBefore\(index)", result: "normal")
+        }
+        store.record(phase: "syncRunCompleted", syncRunID: "critical-run")
+        store.record(phase: "syncTickFailed", syncRunID: "critical-run")
+        store.record(phase: "uploadFinalizeFailed", syncRunID: "critical-run")
+        store.record(phase: "metadataApplyFailed", syncRunID: "critical-run")
+        store.record(
+            phase: "ordinaryPhaseWithError",
+            syncRunID: "critical-run",
+            errorCode: "forced_error"
+        )
+        for index in 0..<100 {
+            store.record(phase: "noiseAfter\(index)", result: "normal")
+        }
+
+        await store.flushForTests()
+        let raw = try String(contentsOf: store.logURL, encoding: .utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let phases = raw
+            .split(separator: "\n")
+            .compactMap { try? decoder.decode(ConnectionDiagnosticEntry.self, from: Data($0.utf8)).phase }
+        let metrics = await store.diagnosticsWriterMetricsForTests()
+
+        #expect(phases == [
+            "syncRunCompleted",
+            "syncTickFailed",
+            "uploadFinalizeFailed",
+            "metadataApplyFailed",
+            "ordinaryPhaseWithError"
+        ])
+        #expect(metrics.droppedCount > 0)
+        #expect(metrics.writtenCount == 5)
     }
 
     @Test func mainActorHotPathGuardCountsInjectedAttempts() async {

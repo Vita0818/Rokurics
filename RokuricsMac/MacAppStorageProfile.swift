@@ -16,6 +16,8 @@ enum MacAppStorageProfile {
     private static let uiTestReceiverPortKey = "ROKURICS_UI_TEST_RECEIVER_PORT"
     private static let uiTestPreferredHostKey = "ROKURICS_UI_TEST_HOST"
     private static let uiTestStorageNamespaceKey = "ROKURICS_UI_TEST_STORAGE_NAMESPACE"
+    private static let persistedReceiverPortKey = "rokurics.mac.receiverPort"
+    static let defaultReceiverPort = 8_787
 
     static var currentBundleIdentifier: String {
         Bundle.main.bundleIdentifier ?? productionBundleIdentifier
@@ -38,13 +40,30 @@ enum MacAppStorageProfile {
     }
 
     static var receiverPort: Int {
-        guard isUITestMode,
-              let value = ProcessInfo.processInfo.environment[uiTestReceiverPortKey],
-              let port = Int(value),
-              (0...65_535).contains(port) else {
-            return 8787
+        if isUITestMode {
+            guard let value = ProcessInfo.processInfo.environment[uiTestReceiverPortKey],
+                  let port = Int(value),
+                  (0...65_535).contains(port) else {
+                return defaultReceiverPort
+            }
+            return port
         }
-        return port
+        return persistedReceiverPort() ?? defaultReceiverPort
+    }
+
+    static func persistedReceiverPort(userDefaults: UserDefaults = .standard) -> Int? {
+        guard let value = userDefaults.object(forKey: persistedReceiverPortKey) as? NSNumber else {
+            return nil
+        }
+        let port = value.intValue
+        return (1...65_535).contains(port) ? port : nil
+    }
+
+    static func persistReceiverPort(_ port: Int, userDefaults: UserDefaults = .standard) {
+        guard (1...65_535).contains(port) else {
+            return
+        }
+        userDefaults.set(port, forKey: persistedReceiverPortKey)
     }
 
     static var uiTestPreferredHost: String? {
