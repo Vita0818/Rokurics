@@ -15,6 +15,7 @@ enum UploadTraceSide: String, Codable, Sendable {
 
 struct UploadTraceEvent: Codable, Equatable, Sendable {
     var traceID: String
+    var developmentSessionID: String?
     var side: UploadTraceSide
     var stage: String
     var timestamp: Date
@@ -206,6 +207,14 @@ enum UploadFlightRecorder {
             safeErrorMessage: safeErrorMessage
         )
         writer.enqueue(event, logURL: logURL(for: side))
+        DevelopmentDiagnostics.record(
+            node: side == .iPhone ? .iPhone : .Mac,
+            subsystem: "upload",
+            event: stage,
+            severity: errorCode == nil && eventResult != "fail" ? .info : .error,
+            traceID: traceID,
+            details: developmentDiagnosticDetails(for: event)
+        )
     }
 
     private static func remember(traceID: String, recordingID: String) {
@@ -235,6 +244,7 @@ enum UploadFlightRecorder {
     private static func traceEvent(from event: PendingUploadTraceEvent) -> UploadTraceEvent {
         UploadTraceEvent(
             traceID: event.traceID,
+            developmentSessionID: DevelopmentDiagnostics.activeSessionIDForLogging,
             side: event.side,
             stage: sanitizeToken(event.stage) ?? "unknown",
             timestamp: event.timestamp,
@@ -264,6 +274,30 @@ enum UploadFlightRecorder {
             errorCode: sanitizeToken(event.errorCode),
             safeErrorMessage: sanitizeErrorMessage(event.safeErrorMessage)
         )
+    }
+
+    private static func developmentDiagnosticDetails(for event: PendingUploadTraceEvent) -> [String: String] {
+        var details: [String: String] = [:]
+        if let value = event.recordingID { details["recordingIDPrefix"] = String(value.prefix(12)) }
+        if let value = event.eventResult { details["result"] = value }
+        if let value = event.reasonCode { details["reasonCode"] = value }
+        if let value = event.uploadStatus { details["uploadStatus"] = value }
+        if let value = event.ledgerState { details["ledgerState"] = value }
+        if let value = event.jobID { details["jobIDPrefix"] = String(value.prefix(12)) }
+        if let value = event.sessionID { details["uploadSessionIDPrefix"] = String(value.prefix(12)) }
+        if let value = event.httpPath { details["httpPath"] = value.replacingOccurrences(of: "/", with: "_") }
+        if let value = event.httpStatus { details["httpStatus"] = String(value) }
+        if let value = event.verifierResult { details["verifierResult"] = value }
+        if let value = event.fileSize { details["fileSize"] = String(value) }
+        if let value = event.bodyBytes { details["bodyBytes"] = String(value) }
+        if let value = event.chunkOffset { details["chunkOffset"] = String(value) }
+        if let value = event.chunkLength { details["chunkLength"] = String(value) }
+        if let value = event.confirmedBytes { details["confirmedBytes"] = String(value) }
+        if let value = event.totalBytes { details["totalBytes"] = String(value) }
+        if let value = event.errorDomain { details["errorDomain"] = value }
+        if let value = event.errorCode { details["errorCode"] = value }
+        if let value = event.safeErrorMessage { details["safeErrorMessage"] = value }
+        return details
     }
 
     private static func defaultLogURL(side: UploadTraceSide) -> URL {

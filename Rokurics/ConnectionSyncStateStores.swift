@@ -563,6 +563,7 @@ final class DeviceConnectionStatusStore: ObservableObject {
 
 struct ConnectionDiagnosticEntry: Codable, Equatable {
     var timestamp: Date
+    var developmentSessionID: String?
     var phase: String
     var deviceIDPrefix: String?
     var heartbeatSequence: UInt64?
@@ -647,6 +648,7 @@ final class ConnectionDiagnosticsStore {
     ) {
         let entry = ConnectionDiagnosticEntry(
             timestamp: timestamp,
+            developmentSessionID: DevelopmentDiagnostics.activeSessionIDForLogging,
             phase: sanitizedForDiagnostics(phase) ?? "redactionRejected",
             deviceIDPrefix: deviceID.map { String($0.prefix(12)) },
             heartbeatSequence: heartbeatSequence,
@@ -678,6 +680,14 @@ final class ConnectionDiagnosticsStore {
         enqueueEntryForAsyncWrite(
             entry,
             priority: Self.diagnosticsPriority(phase: entry.phase, errorCode: entry.errorCode)
+        )
+        DevelopmentDiagnostics.record(
+            node: .iPhone,
+            subsystem: "connectionSync",
+            event: entry.phase,
+            severity: entry.errorCode == nil ? .info : .error,
+            syncRunID: entry.syncRunID,
+            details: Self.developmentDiagnosticDetails(entry)
         )
     }
 
@@ -768,6 +778,24 @@ final class ConnectionDiagnosticsStore {
         }
     }
 
+    private static func developmentDiagnosticDetails(_ entry: ConnectionDiagnosticEntry) -> [String: String] {
+        var details: [String: String] = [:]
+        if let value = entry.deviceIDPrefix { details["deviceIDPrefix"] = value }
+        if let value = entry.requestPath { details["requestPath"] = value }
+        if let value = entry.result { details["result"] = value }
+        if let value = entry.errorCode { details["errorCode"] = value }
+        if let value = entry.errorMessage { details["errorMessage"] = value }
+        if let value = entry.heartbeatSequence { details["heartbeatSequence"] = String(value) }
+        if let value = entry.responseSequence { details["responseSequence"] = String(value) }
+        if let value = entry.heartbeatMissCount { details["heartbeatMissCount"] = String(value) }
+        if let value = entry.pendingUploadCount { details["pendingUploadCount"] = String(value) }
+        if let value = entry.pendingDownloadCount { details["pendingDownloadCount"] = String(value) }
+        if let value = entry.latencyMs { details["latencyMs"] = String(format: "%.3f", value) }
+        if let value = entry.totalMs { details["totalMs"] = String(value) }
+        if let value = entry.dominantSubphase { details["dominantSubphase"] = value }
+        return details
+    }
+
     private func enqueueEntryForAsyncWrite(
         _ entry: ConnectionDiagnosticEntry,
         priority: CanonicalAsyncDiagnosticsPriority
@@ -831,6 +859,7 @@ final class ConnectionDiagnosticsStore {
     private nonisolated static func redactionRejectedEntry(timestamp: Date) -> ConnectionDiagnosticEntry {
         ConnectionDiagnosticEntry(
             timestamp: timestamp,
+            developmentSessionID: nil,
             phase: "diagnosticRedactionRejected",
             deviceIDPrefix: nil,
             heartbeatSequence: nil,

@@ -1428,11 +1428,12 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     }
 }
 
-private extension DeviceConnectionStatus {
+extension DeviceConnectionStatus {
     func isPublishEquivalent(to other: DeviceConnectionStatus) -> Bool {
         deviceID == other.deviceID
             && displayName == other.displayName
             && state == other.state
+            && latestPresenceEvidenceAt == other.latestPresenceEvidenceAt
             && lastSyncAt == other.lastSyncAt
             && lastSyncStatus == other.lastSyncStatus
             && lastError == other.lastError
@@ -4789,6 +4790,14 @@ final class LocalNetworkSyncEngine {
 
             guard plan.conflictActions.isEmpty else {
                 stateStore.recordActiveTransfers([])
+                recordConflictDiagnostics(
+                    localInventory: localInventory,
+                    peerInventory: peerInventory,
+                    plan: plan,
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    phase: "unresolvedConflictRetained"
+                )
                 throw LocalNetworkSyncExecutionError.unresolvedConflicts(plan.conflictActions.count)
             }
 
@@ -9039,7 +9048,8 @@ final class LocalNetworkSyncEngine {
         peerInventory: LocalNetworkSyncInventory,
         plan: LocalNetworkSyncDiffPlan,
         deviceID: String,
-        syncRunID: String
+        syncRunID: String,
+        phase: String = "conflictDetected"
     ) {
         for action in plan.conflictActions {
             let pair = objectPair(for: action, localInventory: localInventory, peerInventory: peerInventory)
@@ -9058,7 +9068,7 @@ final class LocalNetworkSyncEngine {
                 loser = "undetermined"
             }
             diagnosticsStore.record(
-                phase: "conflictDetected",
+                phase: phase,
                 deviceID: deviceID,
                 syncRunID: syncRunID,
                 result: [
@@ -9101,15 +9111,27 @@ final class LocalNetworkSyncEngine {
             return objects.first { $0.objectID == action.entityID }
         }
         let expectedKind: LocalNetworkSyncObjectKind?
+        let expectedObjectID: String?
         switch action.entityKind {
         case "recording":
             expectedKind = .recordingMetadata
+            expectedObjectID = "recordingMetadata:\(action.entityID)"
         case "folder":
             expectedKind = .studyFolder
+            expectedObjectID = "studyFolder:\(action.entityID)"
         case "studyItem":
             expectedKind = .studyItem
+            expectedObjectID = "studyItem:\(action.entityID)"
         default:
             expectedKind = nil
+            expectedObjectID = nil
+        }
+        if let expectedObjectID,
+           let exactObject = objects.first(where: {
+               $0.objectID == expectedObjectID
+                   && (expectedKind == nil || $0.objectKind == expectedKind)
+           }) {
+            return exactObject
         }
         return objects.first { object in
             (expectedKind == nil || object.objectKind == expectedKind)
@@ -9890,21 +9912,15 @@ final class LocalNetworkSyncEngine {
                     action.entityID,
                     prefixes: ["recordingMetadata:", "recordingAudio:"]
                 )
-                let bundleItemID = StudyItemMetadata.recordingBundleItemID(for: recordingID)
-                let isTombstoneAction = action.reason
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .localizedCaseInsensitiveContains("tombstone")
                 let hasMatchingRecording = scopedManifest.recordings.contains {
-                    guard $0.recordingID == recordingID else {
-                        return false
-                    }
-                    let isTombstoned = $0.deleted || $0.tombstone == true
-                    return isTombstoneAction ? isTombstoned : !isTombstoned
+                    $0.recordingID == recordingID
                 }
-                let hasMatchingDeletionTombstone = isTombstoneAction
-                    && scopedManifest.tombstones.contains {
+                let relatedItemIDs = Set(manifest.items.compactMap { item in
+                    item.recordingID == recordingID ? item.itemID : nil
+                }).union([StudyItemMetadata.recordingBundleItemID(for: recordingID)])
+                let hasMatchingDeletionTombstone = scopedManifest.tombstones.contains {
                         $0.entityKind == .item
-                            && $0.entityID == bundleItemID
+                            && relatedItemIDs.contains($0.entityID)
                             && [.trash, .delete, .deleteMetadataOnly].contains($0.operation)
                     }
                 return hasMatchingRecording || hasMatchingDeletionTombstone
@@ -9913,9 +9929,14 @@ final class LocalNetworkSyncEngine {
             }
         }
 
-        guard !actions.isEmpty,
-              actions.allSatisfy(covers) else {
-            throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing("scoped_manifest_action_coverage")
+        let uncoveredActions = actions.filter { !covers($0) }
+        guard !actions.isEmpty, uncoveredActions.isEmpty else {
+            let diagnosticSuffix = uncoveredActions.first.map {
+                ":\($0.kind.rawValue):\($0.entityKind)"
+            } ?? ""
+            throw LocalNetworkSyncExecutionError.requiredSyncPayloadMissing(
+                "scoped_manifest_action_coverage\(diagnosticSuffix)"
+            )
         }
         return scopedManifest
     }
@@ -12121,6 +12142,18 @@ struct LocalNetworkSyncDurableSignalDebouncer {
     }
 }
 
+enum LocalNetworkSyncDebounceDelay {
+    static func wait(seconds: TimeInterval) async -> Bool {
+        let nanoseconds = UInt64(max(0, seconds) * 1_000_000_000)
+        do {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            return !Task.isCancelled
+        } catch {
+            return false
+        }
+    }
+}
+
 @MainActor
 final class LocalNetworkSyncAppService: ObservableObject {
     private let connectionStore: SecureMacConnectionStore
@@ -12855,7 +12888,9 @@ final class LocalNetworkSyncAppService: ObservableObject {
             )
         }
         syncEventDebounceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard await LocalNetworkSyncDebounceDelay.wait(seconds: delay) else {
+                return
+            }
             await self?.drainImmediateSyncEventQueue()
         }
     }

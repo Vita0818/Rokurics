@@ -186,6 +186,9 @@ final class SecureMacUploadClient: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("close", forHTTPHeaderField: "Connection")
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         pinnedSession.context.emitDiagnosticStep("已发送 /health")
 
         do {
@@ -243,6 +246,9 @@ final class SecureMacUploadClient: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
 
         print("[RokuricsPairing] target URL: \(url.absoluteString)")
         print("[RokuricsPairing] pairing payload size: \(body.count)")
@@ -302,6 +308,9 @@ final class SecureMacUploadClient: ObservableObject {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+                request.setValue(value, forHTTPHeaderField: key)
+            }
             do {
                 let (data, response) = try await pinnedSession.session.upload(for: request, from: body)
                 if let pinningError = pinnedSession.context.currentPinningError {
@@ -385,7 +394,7 @@ final class SecureMacUploadClient: ObservableObject {
             throw SecureMacUploadError.invalidSecret
         }
 
-        let headers = [
+        var headers = [
             "Content-Type": "application/json",
             "X-Rokurics-Device-ID": settings.deviceID,
             "X-Rokurics-Timestamp": timestamp,
@@ -394,6 +403,9 @@ final class SecureMacUploadClient: ObservableObject {
             "X-Rokurics-Signature": signature,
             "X-Rokurics-Filename": Self.secureTestFileName(createdAt: now)
         ]
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            headers[key] = value
+        }
 
         return SecureUploadPreparedRequest(url: url, body: body, headers: headers)
     }
@@ -768,6 +780,9 @@ final class SecureMacUploadClient: ObservableObject {
         if let traceID {
             request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
         }
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         UploadFlightRecorder.record(
             side: .iPhone,
             stage: "secureRequestBuilt",
@@ -1029,6 +1044,9 @@ final class SecureMacUploadClient: ObservableObject {
         if let traceID {
             request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
         }
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         UploadFlightRecorder.record(
             side: .iPhone,
             stage: "secureRequestBuilt",
@@ -1261,6 +1279,9 @@ final class SecureMacUploadClient: ObservableObject {
         if let traceID {
             request.setValue(traceID, forHTTPHeaderField: UploadFlightRecorder.traceHeaderName)
         }
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
         UploadFlightRecorder.record(
             side: .iPhone,
             stage: "secureRequestBuilt",
@@ -1459,6 +1480,9 @@ final class SecureMacUploadClient: ObservableObject {
             headers[key] = value
         }
         var tracedHeaders = headers
+        DevelopmentDiagnostics.requestHeaderFields().forEach { key, value in
+            tracedHeaders[key] = value
+        }
         if let traceID = UploadFlightRecorder.currentTraceID {
             tracedHeaders[UploadFlightRecorder.traceHeaderName] = traceID
         }

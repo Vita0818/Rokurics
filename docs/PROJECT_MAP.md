@@ -1,8 +1,19 @@
 # PROJECT_MAP
 
-最近自查日期：2026-07-08
+最近自查日期：2026-07-12
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-07-12 开发诊断系统文件
+
+- `RokuricsShared/DevelopmentDiagnostics.swift`：共享 `testRunID`、统一事件 envelope、脱敏、异步串行写入、10 MB 分卷、writer health 和 session manifest。
+- `Rokurics/ConnectionSyncStateStores.swift`、`RokuricsMac/SecureReceiverService.swift`：保留旧 connection diagnostics，同时把连接/同步事件镜像到开发会话日志。
+- `RokuricsShared/UploadFlightRecorder.swift`：保留原 upload trace，同时写入开发会话日志并附带 `traceID`。
+- `Rokurics/SecureMacUploadClient.swift`：在 health、pair、pair confirm、签名 JSON、metadata/audio/chunk 请求上附加可选开发会话请求头。
+- `RokuricsMac/SecureLocalHTTPSServer.swift`：通用和 streaming request 入口读取会话请求头；不参与授权或业务路由判断。
+- `Scripts/collect_development_diagnostics.sh`：收集 Mac/iPhone 开发日志和状态快照，并验证 JSONL。
+- `RokuricsTests/DevelopmentDiagnosticsTests.swift`、`RokuricsMacTests/DevelopmentDiagnosticsTests.swift`：JSONL、health、redaction 和 rotation targeted tests。
+- `docs/DEVELOPMENT_DIAGNOSTICS.md`：存储结构、固定测试流程、收集命令和安全边界。
 
 ## 2026-07-08 新增/更新 v10.0 / Mac 首页与共享录音实时转写文件
 

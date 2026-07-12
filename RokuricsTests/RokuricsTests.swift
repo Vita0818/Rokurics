@@ -3609,6 +3609,61 @@ struct RokuricsTests {
             scopedTo: [action]
         )
         #expect(recordingScoped.recordings == [recordingEntry])
+
+        var deletedRecordingEntry = recordingEntry
+        deletedRecordingEntry.deleted = true
+        deletedRecordingEntry.tombstone = true
+        let canonicalMetadataAction = LocalNetworkSyncDiffAction(
+            id: "canonical-recording-coverage-action",
+            kind: .downloadMetadata,
+            entityKind: "recording",
+            entityID: recordingID,
+            reason: "recordingMetadataApply"
+        )
+        let deletedRecordingScoped = try LocalNetworkSyncEngine.metadataManifest(
+            StudyLibrarySyncManifest.make(
+                deviceID: "mac-coverage",
+                generatedAt: now,
+                items: [item],
+                folders: [],
+                recordings: [deletedRecordingEntry]
+            ),
+            scopedTo: [canonicalMetadataAction]
+        )
+        #expect(deletedRecordingScoped.recordings == [deletedRecordingEntry])
+
+        let customItemID = "custom-study-item-for-recording"
+        let customItem = StudyItemMetadata(
+            itemID: customItemID,
+            kind: .recordingBundle,
+            title: "Custom recording item",
+            createdAt: now.addingTimeInterval(-20),
+            updatedAt: now,
+            recordingID: recordingID,
+            duration: 20,
+            isTrashed: true,
+            trashedAt: now
+        )
+        let customDeletionMarker = StudyLibrarySyncTombstone(
+            id: "trash:\(customItemID)",
+            entityKind: .item,
+            entityID: customItemID,
+            operation: .trash,
+            updatedAt: now,
+            modifiedByDeviceID: "mac-coverage"
+        )
+        let customDeletionScoped = try LocalNetworkSyncEngine.metadataManifest(
+            StudyLibrarySyncManifest.make(
+                deviceID: "mac-coverage",
+                generatedAt: now,
+                items: [customItem],
+                folders: [],
+                tombstones: [customDeletionMarker]
+            ),
+            scopedTo: [canonicalMetadataAction]
+        )
+        #expect(customDeletionScoped.recordings.isEmpty)
+        #expect(customDeletionScoped.tombstones == [customDeletionMarker])
     }
 
     @Test func conflictIsolationClosesLegacyItemRecordingArtifactAndFolderDescendants() {
@@ -4163,6 +4218,16 @@ struct RokuricsTests {
         #expect(tickCount == 2)
         #expect(triggers == ["first", "second"])
         #expect(queuedTriggers == ["second"])
+    }
+
+    @Test func cancelledImmediateSyncDebounceDoesNotContinueToDrain() async {
+        let cancelledWait = Task {
+            await LocalNetworkSyncDebounceDelay.wait(seconds: 10)
+        }
+        cancelledWait.cancel()
+
+        #expect(await cancelledWait.value == false)
+        #expect(await LocalNetworkSyncDebounceDelay.wait(seconds: 0))
     }
 
     @Test func localNetworkSchedulerExposesPendingRequestForHeartbeatDedupe() async {
@@ -4965,6 +5030,34 @@ struct RokuricsTests {
         #expect(presence.state == .online)
         #expect(presence.interruptedSeconds == 0)
         #expect(presence.recentOnlineText == "刚刚")
+    }
+
+    @Test func connectionStatusPublicationTracksFreshHeartbeatEvidence() throws {
+        let (_, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let snapshot = makePairedMacSnapshot()
+        let firstHeartbeatAt = Date(timeIntervalSince1970: 10)
+        let secondHeartbeatAt = Date(timeIntervalSince1970: 13)
+
+        let firstStatus = statusStore.recordHeartbeatSuccess(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            sentAt: firstHeartbeatAt,
+            receivedAt: firstHeartbeatAt,
+            latencyMilliseconds: 1
+        )
+        let secondStatus = statusStore.recordHeartbeatSuccess(
+            deviceID: snapshot.deviceID,
+            displayName: "Rokurics Mac",
+            sentAt: secondHeartbeatAt,
+            receivedAt: secondHeartbeatAt,
+            latencyMilliseconds: 1
+        )
+
+        #expect(firstStatus.isPublishEquivalent(to: firstStatus))
+        #expect(!firstStatus.isPublishEquivalent(to: secondStatus))
+        #expect(secondStatus.latestPresenceEvidenceAt == secondHeartbeatAt)
     }
 
     @Test func disabledSyncCoordinatorReadsPresenceStoreInsteadOfMarkingOffline() async throws {

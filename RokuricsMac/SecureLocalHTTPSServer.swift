@@ -1612,6 +1612,7 @@ final class SecureLocalHTTPSServer {
     private let inventoryRuntimeConfiguration = CanonicalInventoryRuntimeConfiguration()
     private var listener: NWListener?
     private var activeConnections: [UUID: NWConnection] = [:]
+    private var deferredStatusExchangeRunSyncSoonDeviceIDs: Set<String> = []
     private let listenerStateLock = NSLock()
     private var listenerIsReady = false
     private var listenerActivePort: Int?
@@ -2155,6 +2156,7 @@ final class SecureLocalHTTPSServer {
     }
 
     private func startStreamingRecordingAudioBody(_ request: HTTPHeaderRequest, initialBuffer: Data, on connection: NWConnection) {
+        DevelopmentDiagnostics.adoptSessionID(from: request.headers)
         let headers = Self.normalizedHeaders(request.headers)
         let traceID = UploadFlightRecorder.traceID(from: request.headers)
         guard let recordingID = headers["x-rokurics-recording-id"], !recordingID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -2350,6 +2352,7 @@ final class SecureLocalHTTPSServer {
     }
 
     private func handleRequest(_ request: HTTPRequest, on connection: NWConnection) {
+        DevelopmentDiagnostics.adoptSessionID(from: request.headers)
         let traceID = UploadFlightRecorder.traceID(from: request.headers)
         let traceRecordingID = Self.normalizedHeaders(request.headers)["x-rokurics-recording-id"]
         if traceID != nil {
@@ -2708,14 +2711,16 @@ final class SecureLocalHTTPSServer {
                 errorCategory: result.reason
             )
         }
+        let requestedRunSyncSoon = result.requestedActions.contains(.enqueueRunSyncSoon)
         for action in result.requestedActions {
             switch action {
             case .enqueueRunSyncSoon:
                 if let deviceID = pairedDeviceID(forPrefix: deviceIDPrefix) {
-                    _ = deviceConnectionStatusStore.recordStatusExchangeRunSyncSoonRequest(
+                    queueStatusExchangeRunSyncSoon(
                         deviceID: deviceID,
-                        displayName: "iPhone",
-                        syncRunID: syncRunID ?? UUID().uuidString
+                        routePath: routePath,
+                        heartbeatSequence: heartbeatSequence,
+                        requestDeviceIDPrefix: deviceIDPrefix
                     )
                 }
                 emitConnectionDiagnostic(
@@ -2752,7 +2757,83 @@ final class SecureLocalHTTPSServer {
                 )
             }
         }
+        if !requestedRunSyncSoon,
+           let deviceID = pairedDeviceID(forPrefix: deviceIDPrefix),
+           deferredStatusExchangeRunSyncSoonDeviceIDs.contains(deviceID),
+           syncStateStore.state.syncControlPlaneState?.isSyncProgressActive != true {
+            queueStatusExchangeRunSyncSoon(
+                deviceID: deviceID,
+                routePath: routePath,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: deviceIDPrefix
+            )
+        }
         return result
+    }
+
+    @MainActor
+    private func queueStatusExchangeRunSyncSoon(
+        deviceID: String,
+        routePath: String,
+        heartbeatSequence: UInt64?,
+        requestDeviceIDPrefix: String?
+    ) {
+        if syncStateStore.state.syncControlPlaneState?.isSyncProgressActive == true {
+            deferredStatusExchangeRunSyncSoonDeviceIDs.insert(deviceID)
+            emitConnectionDiagnostic(
+                phase: "statusExchangeRunSyncSoonDeferredActiveRun",
+                listenerState: "ready",
+                activePort: activePort,
+                routePath: routePath,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: requestDeviceIDPrefix,
+                syncRunID: syncStateStore.state.activeSyncRunID,
+                errorCode: "sync_run_active"
+            )
+            return
+        }
+
+        let requestedRunID = UUID().uuidString
+        let pendingRecord = deviceConnectionStatusStore.recordPendingSyncRequestDetails(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            statusText: "已请求 iPhone 尽快同步",
+            syncRunID: requestedRunID,
+            initiatorDeviceID: "mac-local",
+            reason: "statusExchangeRunSyncSoon"
+        )
+        let effectiveSyncRunID = pendingRecord.signal.syncRunID
+        let registered = syncStateStore.recordControlPlane(
+            deviceID: deviceID,
+            syncRunID: effectiveSyncRunID,
+            state: .syncStartSignalSent
+        )
+        guard registered else {
+            deferredStatusExchangeRunSyncSoonDeviceIDs.insert(deviceID)
+            emitConnectionDiagnostic(
+                phase: "statusExchangeRunSyncSoonRegistrationDeferred",
+                listenerState: "ready",
+                activePort: activePort,
+                routePath: routePath,
+                heartbeatSequence: heartbeatSequence,
+                requestDeviceIDPrefix: requestDeviceIDPrefix,
+                syncRunID: effectiveSyncRunID,
+                errorCode: "sync_run_registration_rejected"
+            )
+            return
+        }
+
+        deferredStatusExchangeRunSyncSoonDeviceIDs.remove(deviceID)
+        emitConnectionDiagnostic(
+            phase: "statusExchangeRunSyncSoonRegistered",
+            listenerState: "ready",
+            activePort: activePort,
+            routePath: routePath,
+            heartbeatSequence: heartbeatSequence,
+            requestDeviceIDPrefix: requestDeviceIDPrefix,
+            syncRunID: effectiveSyncRunID,
+            errorCategory: "duplicatePending=\(pendingRecord.isDuplicate ? 1 : 0)"
+        )
     }
 
     @MainActor

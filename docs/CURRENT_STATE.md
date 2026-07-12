@@ -1,6 +1,14 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-07-08
+最近一次自查日期：2026-07-12
+
+## 2026-07-12 开发会话日志收集与存储系统
+
+新增 `RokuricsShared/DevelopmentDiagnostics.swift`，在 DEBUG 构建中提供双端统一的开发会话日志。iPhone 进程生成 `test-*` 会话 ID，并通过可选 `X-Rokurics-Development-Session-ID` 请求头传给 Mac；Mac 收到后采用同一 ID。连接/同步事件由双端 `ConnectionDiagnosticsStore` 镜像，上传事件由 `UploadFlightRecorder` 镜像，`syncRunID` 与 `traceID` 继续作为子关联键。
+
+会话日志使用独立串行 utility queue，单卷 10 MB、4 个备份、8192 事件队列，每端最多保留 20 个会话并清理超过 14 天的旧会话，同时保存 session manifest 与 writer health。只在 DEBUG 写入，不新增 UI，不改变连接方向、route、请求 body/schema、TLS/HMAC/pinning/nonce/body hash、`RequestVerifier`、Keychain 或 pairing 凭据。
+
+新增 `Scripts/collect_development_diagnostics.sh`，通过 `devicectl` 收集 iPhone Diagnostics/Sync、Mac local/production Diagnostics/Sync、旧 upload trace，并生成 collection manifest、warning 和逐文件 JSONL 完整性报告。详细流程见 `docs/DEVELOPMENT_DIAGNOSTICS.md`。
 
 ## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写保留范围
 

@@ -12,6 +12,96 @@ import Testing
 @testable import RokuricsMac
 
 struct RokuricsMacTests {
+    @Test func cancelledMacSyncEventDebounceDoesNotContinueToDrain() async {
+        let cancelledWait = Task {
+            await MacLocalNetworkSyncDebounceDelay.wait(seconds: 10)
+        }
+        cancelledWait.cancel()
+
+        #expect(await cancelledWait.value == false)
+        #expect(await MacLocalNetworkSyncDebounceDelay.wait(seconds: 0))
+    }
+
+    @Test func macSyncEventsWaitForActiveRunToReachTerminalState() {
+        #expect(MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: .inventoryExchanging))
+        #expect(MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: .transferring))
+        #expect(!MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: .completed))
+        #expect(!MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: .failed))
+        #expect(!MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: nil))
+    }
+
+    @Test func recordingBackedStudyItemObjectUsesStableItemIDOnMac() throws {
+        let recordingID = "mac-study-item-owner"
+        let itemID = StudyItemMetadata.recordingBundleItemID(for: recordingID)
+        let updatedAt = Date(timeIntervalSince1970: 200)
+        let inventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-owner-test",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: updatedAt,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            studyItems: [
+                LocalNetworkSyncStudyItemEntry(
+                    itemID: itemID,
+                    kind: .recordingBundle,
+                    title: "Stable owner",
+                    folderIDs: [],
+                    recordingID: recordingID,
+                    updatedAt: updatedAt,
+                    revisionHash: "ln-business-v2:test",
+                    deleted: false
+                )
+            ]
+        )
+
+        let object = try #require(inventory.objects.first { $0.objectKind == .studyItem })
+        #expect(object.objectID == "studyItem:\(itemID)")
+        #expect(object.ownerID == itemID)
+    }
+
+    @MainActor
+    @Test func statusExchangeFollowUpRunRegistersFreshRunAfterTerminal() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rokurics-status-follow-up-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let syncStateStore = StudyLibrarySyncStateStore(rootURL: rootURL)
+        let statusStore = DeviceConnectionStatusStore(rootURL: rootURL)
+        let deviceID = "iphone-status-follow-up"
+        let finishedRunID = "finished-run"
+        let followUpRunID = "follow-up-run"
+
+        #expect(syncStateStore.recordControlPlane(
+            deviceID: deviceID,
+            syncRunID: finishedRunID,
+            state: .syncStartSignalSent
+        ))
+        #expect(syncStateStore.recordFailure(
+            deviceID: deviceID,
+            error: "peer_sync_failed",
+            syncRunID: finishedRunID
+        ))
+
+        let pending = statusStore.recordPendingSyncRequestDetails(
+            deviceID: deviceID,
+            displayName: "iPhone",
+            syncRunID: followUpRunID,
+            reason: "statusExchangeRunSyncSoon"
+        )
+        let registered = syncStateStore.recordControlPlane(
+            deviceID: deviceID,
+            syncRunID: pending.signal.syncRunID,
+            state: .syncStartSignalSent
+        )
+
+        #expect(registered)
+        #expect(pending.signal.syncRunID == followUpRunID)
+        #expect(syncStateStore.state.activeSyncRunID == followUpRunID)
+        #expect(syncStateStore.state.syncControlPlaneState == .syncStartSignalSent)
+    }
+
     @Test func iPhoneConnectionCardLayoutKeepsStableWidthAcrossSidebarChanges() {
         #expect(MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: false) == MacIPhoneConnectionCardLayout.stableMaxWidth)
         #expect(MacIPhoneConnectionCardLayout.cardMaxWidth(isSidebarCollapsed: true) == MacIPhoneConnectionCardLayout.stableMaxWidth)

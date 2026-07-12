@@ -1,6 +1,14 @@
 # ARCHITECTURE
 
-最近自查日期：2026-07-08
+最近自查日期：2026-07-12
+
+## 2026-07-12 开发诊断架构
+
+开发诊断是旁路观察层，不是连接、同步或上传状态机的真相源。iPhone Debug 进程生成 `testRunID`；现有 HTTPS 请求附带可选会话头，Mac 只把它用于选择诊断目录。连接/同步 `syncRunID`、上传 `traceID`、node、subsystem、event、severity 和脱敏 details 被写成统一 JSONL envelope。
+
+写入链路为业务调用点 -> 内存事件 -> 独立 utility serial queue -> session JSONL。队列满、脱敏拒绝和文件写失败都进入 writer health，不改变业务调用返回值。单卷与备份数量有界，不同步重写旧 connection JSONL，不在 MainActor 扫描或解码完整日志。
+
+收集链路独立于局域网同步：Mac 脚本读取本机 app container，并通过 USB `devicectl` 读取 iPhone app data container。因此即使配对、连接或同步本身失败，仍可收集两端证据。该层不读取安全凭据或用户文件内容。
 
 ## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写架构
 

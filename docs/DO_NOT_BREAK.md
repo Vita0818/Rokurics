@@ -1,5 +1,14 @@
 # DO_NOT_BREAK
 
+## 2026-07-12 开发诊断系统禁区
+
+- `DevelopmentDiagnostics` 只允许 DEBUG 持久化；不得增加用户界面、用户设置或把日志作为业务成功条件。
+- `X-Rokurics-Development-Session-ID` 只能用于日志关联，不得进入授权、签名 payload、route 选择、peer proof、同步 decision 或上传完成判断。
+- 会话事件不得包含 shared secret、API key、TLS 私钥、完整证书指纹、完整 hash、绝对私有路径、请求/响应 body、原始音频、完整 metadata JSON、完整 transcript/note/summary/provider response。
+- writer queue/drop/write failure 必须可观察；日志写失败不得让连接、同步或上传失败。
+- 保留大小必须有界：单卷、分卷数、会话数和会话年龄均不得取消上限；不得在 MainActor 热路径同步读取、压缩或重写整个日志文件。
+- 收集脚本不得读取 Keychain、安全身份文件、音频内容或生成内容正文；不得以 USB 收集替代 TLS/HMAC/nonce/body hash/`RequestVerifier`。
+
 ## Git 禁区
 
 - 未经用户明文要求具体 Git 操作，不 add、不 commit、不 push、不创建 PR；编辑、整理、修复、验证或准备工作都不等于提交请求。

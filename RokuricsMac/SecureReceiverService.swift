@@ -56,6 +56,7 @@ struct SecureReceiverPairingPayload: Equatable {
 
 struct ConnectionDiagnosticEntry: Codable, Equatable {
     let timestamp: Date
+    let developmentSessionID: String?
     let phase: String
     let host: String?
     let port: Int?
@@ -162,6 +163,7 @@ final class ConnectionDiagnosticsStore {
     ) {
         let entry = ConnectionDiagnosticEntry(
             timestamp: timestamp,
+            developmentSessionID: DevelopmentDiagnostics.activeSessionIDForLogging,
             phase: sanitizedForDiagnostics(phase) ?? "redactionRejected",
             host: sanitizedForDiagnostics(host),
             port: port,
@@ -204,6 +206,14 @@ final class ConnectionDiagnosticsStore {
         enqueueEntryForAsyncWrite(
             entry,
             priority: Self.diagnosticsPriority(phase: entry.phase, errorCode: entry.errorCode)
+        )
+        DevelopmentDiagnostics.record(
+            node: .Mac,
+            subsystem: "connectionSync",
+            event: entry.phase,
+            severity: entry.errorCode == nil ? .info : .error,
+            syncRunID: entry.syncRunID,
+            details: Self.developmentDiagnosticDetails(entry)
         )
     }
 
@@ -296,6 +306,25 @@ final class ConnectionDiagnosticsStore {
         }
     }
 
+    private static func developmentDiagnosticDetails(_ entry: ConnectionDiagnosticEntry) -> [String: String] {
+        var details: [String: String] = [:]
+        if let value = entry.host { details["host"] = value }
+        if let value = entry.port { details["port"] = String(value) }
+        if let value = entry.listenerState { details["listenerState"] = value }
+        if let value = entry.activePort { details["activePort"] = String(value) }
+        if let value = entry.routePath { details["routePath"] = value }
+        if let value = entry.requestDeviceIDPrefix { details["deviceIDPrefix"] = value }
+        if let value = entry.errorCode { details["errorCode"] = value }
+        if let value = entry.errorMessage { details["errorMessage"] = value }
+        if let value = entry.errorCategory { details["errorCategory"] = value }
+        if let value = entry.heartbeatSequence { details["heartbeatSequence"] = String(value) }
+        if let value = entry.verifierSucceeded { details["verifierSucceeded"] = value ? "true" : "false" }
+        if let value = entry.connectionStatusStoreUpdated { details["connectionStatusStoreUpdated"] = value ? "true" : "false" }
+        if let value = entry.totalMs { details["totalMs"] = String(value) }
+        if let value = entry.dominantSubphase { details["dominantSubphase"] = value }
+        return details
+    }
+
     private func enqueueEntryForAsyncWrite(
         _ entry: ConnectionDiagnosticEntry,
         priority: CanonicalAsyncDiagnosticsPriority
@@ -359,6 +388,7 @@ final class ConnectionDiagnosticsStore {
     private nonisolated static func redactionRejectedEntry(timestamp: Date) -> ConnectionDiagnosticEntry {
         ConnectionDiagnosticEntry(
             timestamp: timestamp,
+            developmentSessionID: nil,
             phase: "diagnosticRedactionRejected",
             host: nil,
             port: nil,
@@ -411,6 +441,24 @@ final class ConnectionDiagnosticsStore {
             return trimmed
         }
         return "redactionRejected"
+    }
+}
+
+enum MacLocalNetworkSyncDebounceDelay {
+    static func wait(seconds: TimeInterval) async -> Bool {
+        let nanoseconds = UInt64(max(0, seconds) * 1_000_000_000)
+        do {
+            try await Task.sleep(nanoseconds: nanoseconds)
+            return !Task.isCancelled
+        } catch {
+            return false
+        }
+    }
+}
+
+enum MacLocalNetworkSyncEventDrainPolicy {
+    static func shouldDefer(controlPlaneState: LocalNetworkSyncControlPlaneState?) -> Bool {
+        controlPlaneState?.isSyncProgressActive == true
     }
 }
 
@@ -1271,9 +1319,16 @@ final class SecureReceiverService: ObservableObject {
             )
         }
 
+        scheduleMacSyncEventDrain()
+    }
+
+    private func scheduleMacSyncEventDrain() {
         macSyncEventDebounceTask?.cancel()
+        let delay = macSyncEventDebounceInterval
         macSyncEventDebounceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64((self?.macSyncEventDebounceInterval ?? 0.75) * 1_000_000_000))
+            guard await MacLocalNetworkSyncDebounceDelay.wait(seconds: delay) else {
+                return
+            }
             self?.drainMacSyncEventQueue()
         }
     }
@@ -1281,6 +1336,19 @@ final class SecureReceiverService: ObservableObject {
     private func drainMacSyncEventQueue(now: Date = Date()) {
         macSyncEventDebounceTask = nil
         guard !pendingMacSyncEventReasons.isEmpty else {
+            return
+        }
+
+        let activeControlPlaneState = syncStateStore.state.syncControlPlaneState
+        if MacLocalNetworkSyncEventDrainPolicy.shouldDefer(controlPlaneState: activeControlPlaneState) {
+            recordConnectionDiagnostic(
+                phase: "syncEventImmediateTickDeferredActiveRun",
+                requestDeviceIDPrefix: pendingMacSyncEventRecordingIDPrefix,
+                syncRunID: syncStateStore.state.activeSyncRunID,
+                errorCode: "sync_run_active",
+                errorCategory: "state=\(activeControlPlaneState?.rawValue ?? "unknown")"
+            )
+            scheduleMacSyncEventDrain()
             return
         }
 

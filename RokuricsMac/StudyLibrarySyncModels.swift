@@ -1859,7 +1859,9 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
             LocalNetworkSyncObjectEntry(
                 objectID: "studyItem:\(item.itemID)",
                 objectKind: .studyItem,
-                ownerID: item.recordingID ?? item.itemID,
+                // A linked recording is a relationship; the study-item ID is
+                // the stable identity copied into metadata sync actions.
+                ownerID: item.itemID,
                 displayTitle: item.title,
                 fileName: nil,
                 logicalName: item.path ?? item.itemID,

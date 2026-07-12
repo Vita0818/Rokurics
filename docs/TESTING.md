@@ -1,5 +1,30 @@
 # TESTING
 
+## 2026-07-12 Development Diagnostics 验证
+
+构建：
+
+```sh
+xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO
+xcodebuild -project Rokurics.xcodeproj -scheme Rokurics -configuration Debug -destination 'generic/platform=iOS' build CODE_SIGNING_ALLOWED=NO
+```
+
+Targeted tests：
+
+```sh
+xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -destination 'platform=macOS' -parallel-testing-enabled NO test -only-testing:RokuricsMacTests/MacDevelopmentDiagnosticsTests CODE_SIGNING_ALLOWED=NO
+xcodebuild -project Rokurics.xcodeproj -scheme Rokurics -destination 'platform=iOS Simulator,name=iPhone 17' test -only-testing:RokuricsTests/DevelopmentDiagnosticsTests CODE_SIGNING_ALLOWED=NO
+```
+
+脚本静态检查和真机收集：
+
+```sh
+zsh -n Scripts/collect_development_diagnostics.sh
+Scripts/collect_development_diagnostics.sh --device '<iPhone UDID 或设备名>'
+```
+
+收集后必须检查 `validation/jsonl-validation.json`：`invalidLines` 应为 0；并检查双端 writer health 的 `droppedCount`、`redactionRejectedCount` 和 `writeFailureCount`。固定测试流程与文件布局见 `docs/DEVELOPMENT_DIAGNOSTICS.md`。
+
 最近自查日期：2026-07-08
 
 ## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写验证

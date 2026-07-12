@@ -1,5 +1,13 @@
 # SYNC_STATE_AUDIT
 
+## 2026-07-12 开发会话日志对状态机的影响审计
+
+审计结论：开发会话日志是 DEBUG 旁路观察系统，不拥有连接、同步、上传、apply、retry 或 status truth。日志 writer 无论成功、丢弃、脱敏拒绝或写失败，都不改变业务返回值、状态推进、peer proof 或 UI projection。
+
+iPhone 通过现有请求附加可选 `testRunID` 请求头；Mac 只在 request 入口采用它作为诊断目录键。该头不进入 HMAC payload，不替代设备 ID、timestamp、nonce、body SHA256 或 signature，也不改变 `RequestVerifier` 的 path/content/security 校验。Mac 仍是 server，iPhone 仍是 client，不新增反向连接或 route。
+
+双端 connection/sync 事件保存 `syncRunID`，upload 事件保存 `traceID`。收集器通过 USB 复制日志和既有状态快照，所以同步通道失败时仍能得到证据。状态快照只用于事后分析，不能反向写回或被当成新的状态真相源。
+
 ## 2026-07-08 Rokurics v10.0 / Mac 本地录音对同步状态机影响审计
 
 审计结论：当前保留的 v10.0 改动不改变同步状态机、上传状态机或 Mac receiver route。Mac 首页只新增本地录音入口；`MacRecordingManager` 只写 Mac 本机 inbox 和 transcript store，不创建 iPhone upload job，不修改 heartbeat、manual sync ack、retry drainer、inventory response、metadata/artifact apply、TLS/HMAC/pinning/nonce/body hash、`RequestVerifier`、Keychain 或 pairing。
