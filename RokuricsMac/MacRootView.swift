@@ -107,6 +107,7 @@ struct MacRootView: View {
             )
         case .audioInbox:
             MacStudyLibraryView(
+                secureReceiverService: secureReceiverService,
                 studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
@@ -115,6 +116,7 @@ struct MacRootView: View {
             )
         case .studyLibrary:
             MacStudyLibraryView(
+                secureReceiverService: secureReceiverService,
                 studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,

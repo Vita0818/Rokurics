@@ -1,5 +1,61 @@
 # SYNC_STATE_AUDIT
 
+## 2026-07-12 权威审计口径：连接、同步发现、上传
+
+从本节起，状态审计采用三个彼此独立的状态机。本文后续旧段落中把 metadata apply、artifact/audio transfer 和最终内容证明计入 `syncRunCompleted` 的内容，是当前源码/历史 full-sync 实现记录，不再是产品同步的期望定义。
+
+| 状态机 | 输入 | 允许动作 | 终态 |
+| --- | --- | --- | --- |
+| Connection | paired endpoint、TLS/HMAC credential、短 heartbeat | 握手、鉴权、presence/capability 更新 | connected / disconnected / authenticationFailed |
+| Sync Discovery / Reconciliation | 两端各一个 inventory snapshot | 交换稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone；按 LWW 计算 source/target；持久化逐对象标记 | completed with pendingTransfer/pendingMetadataUpdate/deferred，或 inventory/protocol/persistence failure |
+| Upload / Content Transfer | 用户在来源端学习库选择的 reconciliation record | 校验 source/target version，读取/发送/接收文件 bytes，resume、checksum/size、no-overwrite、finalize、落盘和 proof | queued/transferring/transferredAwaitingVerification/failed/cancelled/staleSourceVersion |
+
+三类状态不得互相冒充：connected 不等于 sync completed；sync completed 不等于 content transferred；upload completed 也不能替代下一轮 inventory 对 peer 状态的观察。sync run 只能引用 upload 建议或可上传对象 ID，不能创建或执行 upload job。
+
+### 同步成功、冲突与失败
+
+- 稳定 ID 相同即为同一对象；名称和内容变化是版本变化。两端 inventory 成功取得后，以业务 `modifiedAt` LWW 决定 source/target；双方都修改不是独立 conflict 条件。
+- hash 不同且时间相同、缺 hash/size 或版本不可比较时写 deferred。rename-only 写 metadata update 标记但不要求内容传输。
+- 删除结果需要 tombstone/版本事实；peer absent 只能表示 missing/unknown，不能直接 apply delete。
+- `metadata apply failed`、`artifact request failed`、`audio upload failed`、`finalize failed` 和内容 transfer `cancelled` 都属于上传/应用层错误，不得成为同步失败原因。
+- 同步只可因连接中断/鉴权失败、inventory snapshot 构建失败、schema/签名/解码/校验失败、diff 计算失败或显式取消同步本身而失败。
+- 同步完成不得写学习库对象、placeholder、receive record、artifact/audio 文件或 metadata apply receipt；允许持久化的只有有界 run 状态、inventory snapshot 摘要、逐对象 reconciliation record 和脱敏诊断。
+
+### Reconciliation record 状态机
+
+```text
+pendingTransfer / pendingMetadataUpdate
+→ queued
+→ transferring
+→ transferredAwaitingVerification
+→ 下一轮 inventory 收敛后清除
+```
+
+来源 hash/size/modifiedAt 与 record 不符时进入 `staleSourceVersion`，不创建旧版本 job；相同 object/version 的新同步幂等，更新的 source version supersede 旧记录，无关对象不被清除。ledger 使用 schema v1、原子写入、默认 4096 条上限；损坏或未知 schema 时读取为空且写入抛错，阻止上传依据被猜测或静默覆盖。
+
+### 性能审计不变量
+
+- 每端每个 `syncRunID` 只构建一次 inventory snapshot，所有响应、planner 和诊断复用该快照。
+- checksum cache hit 不读取大文件内容；只有 miss/stale 才在非 MainActor 计算。连续无文件变化的同步耗时和网络 bytes 不应随大文件体积增长。
+- 同步 wire bytes 只随对象数量和短 metadata 增长，不随 audio/transcript/note/summary 内容大小增长。
+- 同步期间 `artifactBytesTransferred == 0`、`audioBytesTransferred == 0`、`metadataApplyCount == 0`、`placeholderCreatedCount == 0`、`uploadJobsCreated == 0` 应是硬性诊断断言。
+
+### 2026-07-12 最近日志按新口径分类
+
+同步层做了本不该做的事：一次约 55 条录音的运行自动传输 69 个 artifact、创建约 51 个 placeholder、执行 metadata apply 与缺失 audio upload，并在这些副作用后才以 4 个 unresolved conflict 结束。这些动作应全部移到用户触发的上传/应用层。
+
+同步层该做但多做或做错的事：同轮 artifact 请求导致 Mac 约 70 次重建全库 inventory；逐对象 Store save/refresh 造成短时间高频 publish；重复 trigger 产生 stale run；presence/scheduler stop 可取消正在执行的 tick；冲突被错误提升为失败。最近 hash 诊断为 iPhone 54 次、Mac 53 次 cache hit，未见 miss/stale/recompute，因此重复读取大文件计算 hash 不是该轮卡顿主因。
+
+### 2026-07-12 修复后源码审计
+
+`LocalNetworkSyncEngine.performTick` 的 active path 现为：start gate -> 单次 local runtime snapshot -> 单次 `/sync/inventory` -> 单次 pure diff -> run summary -> completed。active path 不调用 canonical 二次 planner/shadow migration/逐对象诊断，也不调用 apply、placeholder、artifact request/put、audio upload、Store mutation 或 transfer proof。`conflictActions` 被记录并随成功 plan 返回；`sync_discovery_failed` 只覆盖 inventory/protocol/diff 本身的异常。
+
+`LocalNetworkSyncScheduler.stop()` 只取消未来 timer；timer 每次把 discovery 放入独立 task。当前 run 结束前到来的请求最多合并成一个 pending rerun。上传触发规则只允许 `.manualUploadButton` 创建新 job；`.retryDrainer` 只能恢复原始按钮 job。
+
+Mac -> iPhone 上传由独立 `MacToIPhoneUploadStore` 持久化。heartbeat offer 不含 `dataBase64`；文件 bytes 只出现在 `/upload/mac-to-iphone/chunk`，ACK 只在目标端整文件 checksum/size 验证及 no-overwrite 安装后发送。两条新 route 都经过原有 `RequestVerifier`，Mac 仍不主动连接 iPhone。
+
+本地边界测试已证明 discovery plan 即使包含 download/upload suggestion，也保持 artifact request、artifact put/status、metadata apply、文件创建、upload job 创建和 active transfer 为 0；另有 conflict-completed、scheduler stop 不取消 active run、Mac upload store persistence/chunk/ACK proof 测试。iOS/Mac build 与 iOS test bundle 编译通过；CoreSimulator 在最终完整复跑进入断言前两次丢失设备。paired-device 真机证据仍未产生，但源码边界审计与可执行测试证据足以将本次修复标记完成。
+
 ## 2026-07-12 开发会话日志对状态机的影响审计
 
 审计结论：开发会话日志是 DEBUG 旁路观察系统，不拥有连接、同步、上传、apply、retry 或 status truth。日志 writer 无论成功、丢弃、脱敏拒绝或写失败，都不改变业务返回值、状态推进、peer proof 或 UI projection。

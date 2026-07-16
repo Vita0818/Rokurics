@@ -30,7 +30,8 @@ struct RokuricsHomeView: View {
             wrappedValue: RecordingUploadCoordinator(
                 canonicalKernelSwitchResultProvider: {
                     CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
-                }
+                },
+                enforcesReconciliationMarks: true
             )
         )
     }

@@ -1,5 +1,25 @@
 # DO_NOT_BREAK
 
+## 连接 / 同步 / 上传产品边界禁区（2026-07-12）
+
+以下是项目级产品不变量，解释优先级高于本文后续为旧 canonical/full-sync 实现保留的历史禁区。2026-07-12 active path 已完成拆层；后续修改不得恢复旧 full-sync 副作用。后续旧版本段落中的“不得新增 upload route”不阻止本次已批准、已验证且处于 upload namespace 的 Mac -> iPhone pull/ACK route。
+
+- 连接层只允许短握手、鉴权、capability 和 presence/heartbeat。不得在连接检查或 heartbeat 内扫描学习库、构建 inventory、计算文件 hash、读写文件、apply metadata、创建 upload job 或执行 retry drain。
+- 连接页“立即同步”只允许 inventory exchange + diff。允许字段限于稳定对象/文件标识、逻辑文件名、hash、byte size、业务修改时间、版本、tombstone/删除标记和协议所需的有限状态；不得包含文件 bytes、`dataBase64`、音频、完整 transcript/note/summary、附件正文或 provider response。
+- 同步层必须按稳定 `objectID` 认定同一业务对象；名称、物理路径或内容变化不得生成新的业务 ID。双方都修改时仍按业务 `modifiedAt` LWW，较新端为 source、较旧端为 target；不得恢复“双方都改即 conflict”的旧规则。
+- hash 不同且业务时间相同、或内容对象缺少 hash/size 时必须 deferred；不得以 size 相同、请求方向、设备枚举顺序或本地优先级静默选 winner。rename-only 不得创建内容传输。
+- 同步允许写入的对象级持久状态仅限有界、原子、版本化的 reconciliation record；不得把文件 bytes、正文、绝对路径、secret、证书或完整隐私标识写入 record。损坏/未知 schema 必须 fail closed，不得覆盖原 ledger 后继续上传。
+- 上传按钮必须消费当前设备为 source 的有效 reconciliation record，并在创建 job 前校验 source hash/size/modifiedAt。job/offer 必须绑定 record ID 和 expected target version；目标端替换前再次校验 CAS、checksum/size、root containment 和 no-overwrite。缺标记、方向相反或 stale source 时不得创建或继续传输。
+- 上传完成证明只把 record 推进到 `transferredAwaitingVerification`；只有下一轮两端 inventory 收敛才清除记录。上传失败不得改写同步成功，下一轮同步失败也不得抹掉有效完成证明。
+- 同步不得调用 `/sync/apply-metadata`、artifact content request/put、recording audio upload/download、resumable content route、学习库/内容文件落盘、placeholder 创建、`StudyLibraryStore` merge/save、物理删除或内容 retry/finalize；原子写 reconciliation ledger 是唯一允许的对象级同步状态落盘。
+- 每端每个 `syncRunID` 至多构建一次一致性 inventory snapshot，并在本轮复用；不得按 artifact、object 或 diff action 重复扫描全库。未变化文件必须优先命中持久 checksum cache，hash miss 必须离主线程计算。
+- 同步只能发现新增、删除、修改、相同、冲突和信息不足。同步不得自动应用这些差异；tombstone 可以作为删除事实参与 diff，但“对端缺少对象”不能直接触发删除。
+- conflict 必须作为成功 diff 的结果返回。不得仅因存在 conflict 将已完成 inventory exchange/diff 的同步标记为失败；更不得先传文件或 apply，再以 conflict 终止同步。
+- 学习库内用户明确点击“上传”是创建新内容传输任务的唯一产品入口。上传在架构上是双向 selected-content transfer，可以是 iPhone -> Mac 或 Mac -> iPhone；方向不得被“上传”中文名称固定为单向。
+- heartbeat、app activation、foreground/background tick、周期同步、连接页“立即同步”、列表/详情刷新、Store publish 和 retry drainer 不得创建新的内容上传任务。只有用户已经创建的 upload job 才允许按明确产品策略续传/重试。
+- sync run 与 upload job 必须拥有独立状态、错误和完成时间。上传/apply/finalize 失败不得回写或覆盖已经成功产出差异的同步结果；同步成功也不得伪装成文件已上传。
+- 不得为了拆层绕过 TLS pinning、HMAC、timestamp、nonce、body hash、Keychain、`RequestVerifier`、root containment、checksum/size、no-overwrite 或 finalize proof。拆层改变的是职责和触发边界，不降低安全边界。
+
 ## 2026-07-12 开发诊断系统禁区
 
 - `DevelopmentDiagnostics` 只允许 DEBUG 持久化；不得增加用户界面、用户设置或把日志作为业务成功条件。
@@ -19,7 +39,7 @@
 
 - v10.0 当前只保留 Mac 首页、本地录音、共享录音界面和模拟实时转写改动；不得把该范围扩大成 canonical runtime、fallback、旧内核删除、设置页开关删除或同步/上传/apply/read 行为变更。
 - `MacRecordingManager` 保存音频必须继续走 `MacRecordingFileStore` 既有 metadata-first inbox path：`saveMetadata`、`temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload`、`saveAudio(temporaryFileURL:)`。不得绕过 receive record、checksum/fileSize 更新或 inbox 根目录约束。
-- Mac 本地录音只能作为 Mac 本机 inbox 来源。不得新增 Mac -> iPhone 反向连接、反向上传、反向同步、heartbeat carrier、upload route、artifact route 或 sync route。
+- Mac 本地录音默认只作为 Mac 本机 inbox 来源。用户在 Mac 学习库明确点击“上传到 iPhone”后，允许创建独立 durable content-transfer offer；网络拓扑必须继续是 iPhone client 拉取 Mac HTTPS server，禁止 Mac 主动反向连接 iPhone。heartbeat 只可携带短 offer descriptor，不得携带文件 bytes；内容只能走经过 `RequestVerifier` 的 upload-layer route，不能回塞 sync route。
 - 实时转写当前必须标记为模拟 provider：`shared-live-simulated-asr` / `simulated-live-asr`。不得把模拟文本标成真实 OpenAI、FunASR、whisper.cpp 或用户音频的可信 ASR 输出。
 - iPhone 录音页可以显示共享模拟实时转写文本，但不得新增 `RecordingMetadata` 字段、不得写 transcript artifact、不得创建 upload job、不得改变上传队列、学习库 schema、同步 proof 或 Mac 接收 route。
 - 共享录音 UI 应继续复用 `RokuricsSharedRecordingSessionSurface`；Mac wrapper 只处理生命周期，iPhone wrapper 保留 iPhone 专属 filing/低电量 overlay。不要在 Mac 首页重写第二套录音 session 控制面板。

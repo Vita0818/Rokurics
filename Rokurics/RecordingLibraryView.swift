@@ -238,6 +238,15 @@ struct RecordingLibraryView: View {
 
     private func uploadActionAreaPresentation(for item: StudyItemMetadata) -> StudyRecordingActionAreaPresentation? {
         let metadata = recordingMetadata(for: item)
+        if let metadata,
+           let record = uploadCoordinator.reconciliationRecord(for: metadata) {
+            if record.targetDeviceID == macConnectionStore.snapshot.deviceID {
+                return .statusWithActions(RokuricsCopy.text("等待从 Mac 接收", "Waiting to receive from Mac"))
+            }
+            if record.status == .deferred {
+                return .statusWithActions(RokuricsCopy.text("同步差异待处理", "Sync difference deferred"))
+            }
+        }
         return RecordingUploadActionAreaPresentation.resolve(
             metadata: metadata,
             displaySyncState: canonicalDisplaySyncState(for: item),
@@ -269,10 +278,16 @@ struct RecordingLibraryView: View {
     }
 
     private func cardActionModels(for item: StudyItemMetadata) -> [StudyRecordingCardActionModel] {
-        IPhoneStudyRecordingCardActions.actions(
+        let canUploadSelectedVersion = recordingMetadata(for: item).map {
+            uploadCoordinator.pendingTransferRecord(
+                for: $0,
+                localDeviceID: macConnectionStore.snapshot.deviceID
+            ) != nil
+        } ?? false
+        return IPhoneStudyRecordingCardActions.actions(
             for: item,
             displaySyncState: canonicalDisplaySyncState(for: item),
-            isMacPaired: canStartManualUpload,
+            isMacPaired: canStartManualUpload && canUploadSelectedVersion,
             uploadAction: {
                 uploadRecording(from: item, source: "recordingCard")
             }

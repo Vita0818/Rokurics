@@ -8,7 +8,7 @@
 import CryptoKit
 import Foundation
 
-enum SecureUploadUtilities {
+nonisolated enum SecureUploadUtilities {
     static let defaultFileHashChunkBytes = 1024 * 1024
 
     static func randomBase64URLToken(byteCount: Int = 16) -> String {

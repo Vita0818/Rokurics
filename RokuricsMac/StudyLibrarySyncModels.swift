@@ -600,9 +600,10 @@ enum RecordingAudioSyncTriggerSource: String, Codable, Equatable {
 
     var canCreateUploadJob: Bool {
         switch self {
-        case .manualUploadButton, .retryDrainer, .manualSyncIPhone, .manualSyncMacHint, .periodicSync, .appActivationRefresh:
+        case .manualUploadButton:
             return true
-        case .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh:
+        case .retryDrainer, .manualSyncIPhone, .manualSyncMacHint, .periodicSync,
+             .folderViewRefresh, .recordingListRefresh, .studyLibraryRefresh, .appActivationRefresh:
             return false
         }
     }
@@ -757,7 +758,16 @@ enum RecordingAudioUploadDecisionEvaluator {
             break
         }
 
-        guard triggerSource.canCreateUploadJob else {
+        // A retry may resume a durable job created by an earlier explicit
+        // upload-button tap. Retry itself still cannot create a new job.
+        let isResumingUserInitiatedRetry: Bool
+        if triggerSource == .retryDrainer, case .retryPending = ledgerState {
+            isResumingUserInitiatedRetry = true
+        } else {
+            isResumingUserInitiatedRetry = false
+        }
+
+        guard triggerSource.canCreateUploadJob || isResumingUserInitiatedRetry else {
             return decision(.suppress, reason: "trigger_cannot_create_upload", stage: "uploadDecisionSuppressedViewRefreshOnly", display: .hidden)
         }
 
@@ -1411,8 +1421,61 @@ struct ConnectionHeartbeatResponse: Codable, Equatable {
     var minimumSuggestedInterval: TimeInterval?
     var syncRequested: Bool?
     var syncStartSignal: LocalNetworkSyncStartSignal? = nil
+    var macToIPhoneUploadOffer: MacToIPhoneUploadOffer? = nil
     var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
     var status: DeviceConnectionStatus?
+    var error: String?
+}
+
+nonisolated struct MacToIPhoneUploadOffer: Codable, Equatable {
+    var transferID: String
+    var sourceDeviceID: String
+    var targetDeviceID: String
+    var recordingID: String
+    var title: String
+    var createdAt: Date
+    var duration: TimeInterval
+    var fileName: String
+    var checksum: String
+    var size: Int64
+    var requestedAt: Date
+    var reconciliationRecordID: String? = nil
+    var expectedTargetSHA256: String? = nil
+    var expectedTargetSize: Int64? = nil
+    var sourceModifiedAt: Date? = nil
+    var targetModifiedAt: Date? = nil
+}
+
+nonisolated struct MacToIPhoneUploadChunkRequest: Codable, Equatable {
+    var transferID: String
+    var deviceID: String
+    var offset: Int64
+    var length: Int
+}
+
+nonisolated struct MacToIPhoneUploadChunkResponse: Codable, Equatable {
+    var ok: Bool
+    var transferID: String?
+    var offset: Int64?
+    var totalSize: Int64?
+    var chunkChecksum: String?
+    var dataBase64: String?
+    var isFinalChunk: Bool?
+    var error: String?
+}
+
+nonisolated struct MacToIPhoneUploadAckRequest: Codable, Equatable {
+    var transferID: String
+    var deviceID: String
+    var checksum: String
+    var size: Int64
+    var completedAt: Date
+}
+
+nonisolated struct MacToIPhoneUploadAckResponse: Codable, Equatable {
+    var ok: Bool
+    var transferID: String?
+    var disposition: String?
     var error: String?
 }
 
@@ -2201,6 +2264,7 @@ struct LocalNetworkSyncInventoryRequest: Codable, Equatable {
     var deviceID: String
     var generatedAt: Date
     var localInventoryHash: String?
+    var localInventory: LocalNetworkSyncInventory? = nil
     var syncRunID: String? = nil
     var statusExchangeEnvelope: CanonicalStatusExchangeEnvelope? = nil
 }
@@ -2313,6 +2377,37 @@ struct LocalNetworkSyncDiffPlan: Codable, Equatable {
 }
 
 struct LocalNetworkSyncDiffPlanner {
+    func plan(
+        reconciliationPlan: SyncReconciliationPlan,
+        local: LocalNetworkSyncInventory,
+        peer: LocalNetworkSyncInventory
+    ) -> LocalNetworkSyncDiffPlan {
+        let localCore = local.syncCoreInventory
+        let peerCore = peer.syncCoreInventory
+        let localByID = Dictionary(uniqueKeysWithValues: localCore.objects.map { ($0.objectID, $0) })
+        let peerByID = Dictionary(uniqueKeysWithValues: peerCore.objects.map { ($0.objectID, $0) })
+        let coreActions = reconciliationPlan.records.compactMap { record -> SyncDiffAction? in
+            guard let object = localByID[record.objectID] ?? peerByID[record.objectID] else { return nil }
+            if record.status == .deferred {
+                let kind: SyncDiffActionKind = record.differenceKind == .timestampTie ? .conflict : .skip
+                return SyncDiffAction(id: "\(kind.rawValue):\(record.recordID)", kind: kind, objectID: object.objectID, objectKind: object.objectKind, ownerID: object.ownerID, direction: nil, reason: record.reason)
+            }
+            let sourceIsLocal = record.sourceDeviceID == localCore.sourceDeviceID
+            let direction: SyncTransferDirection = sourceIsLocal ? .upload : .download
+            let kind: SyncDiffActionKind = record.differenceKind == .deleted
+                ? .applyTombstone
+                : (record.requiresContentTransfer ? (sourceIsLocal ? .uploadObject : .downloadObject) : .updateMetadata)
+            return SyncDiffAction(id: "\(kind.rawValue):\(record.recordID)", kind: kind, objectID: object.objectID, objectKind: object.objectKind, ownerID: object.ownerID, direction: direction, reason: record.reason)
+        } + reconciliationPlan.convergedObjectIDs.compactMap { objectID -> SyncDiffAction? in
+            guard let object = localByID[objectID] ?? peerByID[objectID] else { return nil }
+            return SyncDiffAction(id: "noOp:\(objectID)", kind: .noOp, objectID: object.objectID, objectKind: object.objectKind, ownerID: object.ownerID, direction: nil, reason: "versions_equal")
+        }
+        var plan = makeCompatibilityPlan(from: SyncDiffPlan(actions: coreActions))
+        appendRecordingReceiveStatusNoOps(local: local, peer: peer, plan: &plan)
+        suppressUploadsForPeerAvailableAudio(local: local, peer: peer, plan: &plan)
+        return plan
+    }
+
     func plan(
         local: LocalNetworkSyncInventory,
         peer: LocalNetworkSyncInventory,
@@ -2471,6 +2566,10 @@ struct LocalNetworkSyncDiffPlanner {
                 var retained = action
                 retained.reason = decision.reasonCode
                 retainedActions.append(retained)
+            } else if decision.reasonCode == "trigger_cannot_create_upload" {
+                // A sync plan may describe missing content, but only an
+                // explicit Upload action may turn that suggestion into a job.
+                retainedActions.append(action)
             } else {
                 plan.noOps.append(
                     self.action(

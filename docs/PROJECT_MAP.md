@@ -4,6 +4,17 @@
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
 
+## 连接 / 同步 / 上传职责地图（2026-07-12）
+
+产品层次固定为 Connection -> Sync Discovery -> User-Initiated Upload。2026-07-12 active app path 已按此职责拆分；历史 apply/artifact helper 仅作为未调用的兼容/迁移代码保留，不是“立即同步”执行路径。
+
+- 连接层文件：`SecureMacConnectionSettings.swift`、`SecureMacUploadClient.swift` 的 health/pair/heartbeat 部分、双端 `ConnectionSyncStateStores.swift`、`SecureReceiverService.swift` 和 `SecureLocalHTTPSServer.swift` 的连接/heartbeat route。目标职责仅为可信连接、在线状态和短控制消息。
+- 同步发现层文件：`RokuricsShared/SyncCore.swift` 的 `SyncReconciliationPlanner` / `SyncReconciliationStore`、双端 `StudyLibrarySyncModels.swift`、iPhone `StudyLibrarySyncCoordinator.swift` 和 Mac `SecureLocalHTTPSServer.swift` 的 inventory snapshot/exchange/diff 部分。active path 每端只运行一次 snapshot；两端交换短 inventory 后按稳定 ID + LWW 得到同一 source/target 结果，并把逐对象记录写入 `Sync/Reconciliation/records.json`。旧 canonical 二次 planner/shadow/apply helper不参与“立即同步”。
+- 上传/内容传输层文件：iPhone -> Mac 使用 `RecordingUploadCoordinator.swift`、`RecordingUploadClient.swift`、`SecureMacUploadClient.swift`、Mac recording upload handlers 和 `MacRecordingFileStore.swift`；Mac -> iPhone 使用 `MacToIPhoneUploadStore.swift`、`MacToIPhoneUploadReceiver.swift`、`MacStudyLibraryView.swift` 上传按钮及 `/upload/mac-to-iphone/chunk`、`/upload/mac-to-iphone/ack`。只有来源端学习库按钮可消费 reconciliation record 创建 job；两端在传输前做 source/target version CAS，完成后写 proof。
+- UI 入口：`MacConnectionView.swift` / `MacIPhoneConnectionView.swift` 的“立即同步”只能触发同步发现；iPhone/Mac 学习库内的“上传”按钮才允许创建内容传输 job。列表、详情、app lifecycle、heartbeat 和 Store refresh 不是上传入口。
+
+现有 route 名称不能决定产品归属：凡返回/接收实际文件 bytes（包括 base64 artifact、audio chunk）均属于上传层；凡只交换 inventory/diff 短字段才属于同步层。兼容 artifact route 仍存在，但 active sync path 不调用；新 Mac -> iPhone bytes 明确位于 upload namespace。
+
 ## 2026-07-12 开发诊断系统文件
 
 - `RokuricsShared/DevelopmentDiagnostics.swift`：共享 `testRunID`、统一事件 envelope、脱敏、异步串行写入、10 MB 分卷、writer health 和 session manifest。

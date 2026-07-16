@@ -580,7 +580,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     }
 
     private func performLocalNetworkManualSync(snapshot: SecureMacConnectionSnapshot) async -> StudyLibrarySyncApplyResult? {
-        guard let recordingManager, let uploadCoordinator else {
+        guard let recordingManager else {
             diagnosticsStore.record(
                 phase: "syncSkippedReason",
                 deviceID: snapshot.deviceID,
@@ -1047,6 +1047,19 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
 
     @discardableResult
     private func performSync(trigger: String) async -> StudyLibrarySyncApplyResult? {
+        let snapshot = connectionStore.snapshot
+        diagnosticsStore.record(
+            phase: "legacyApplySyncSuppressed",
+            deviceID: snapshot.deviceID,
+            result: trigger
+        )
+        return await performLocalNetworkManualSync(snapshot: snapshot)
+    }
+
+    /// Retained only as a migration reference for old persisted Git-backed
+    /// state. No connection, manual-sync, timer, or heartbeat path calls it.
+    @available(*, deprecated, message: "Sync discovery is read-only; metadata apply belongs to a separate user action")
+    private func performLegacyGitBackedApply(trigger: String) async -> StudyLibrarySyncApplyResult? {
         guard runtimeConfiguration.gitBackedSyncEnabled else {
             recordDisabledStatusForCurrentPairing()
             return nil
@@ -1509,6 +1522,14 @@ protocol LocalNetworkHeartbeatClientProtocol {
         settings: SecureMacConnectionSnapshot,
         request: LocalNetworkSyncStartAckRequest
     ) async throws -> LocalNetworkSyncStartAckResponse
+    func pullMacToIPhoneUploadChunk(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadChunkRequest
+    ) async throws -> MacToIPhoneUploadChunkResponse
+    func acknowledgeMacToIPhoneUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadAckRequest
+    ) async throws -> MacToIPhoneUploadAckResponse
 }
 
 extension LocalNetworkHeartbeatClientProtocol {
@@ -1523,6 +1544,20 @@ extension LocalNetworkHeartbeatClientProtocol {
             ackReceivedAt: Date(),
             error: nil
         )
+    }
+
+    func pullMacToIPhoneUploadChunk(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadChunkRequest
+    ) async throws -> MacToIPhoneUploadChunkResponse {
+        throw SecureMacUploadError.serverRejected("mac_to_iphone_upload_not_supported")
+    }
+
+    func acknowledgeMacToIPhoneUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadAckRequest
+    ) async throws -> MacToIPhoneUploadAckResponse {
+        throw SecureMacUploadError.serverRejected("mac_to_iphone_upload_not_supported")
     }
 }
 
@@ -1558,6 +1593,7 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
     private var sequenceNumber: UInt64 = 0
     private(set) var isHeartbeatInFlight = false
     var onSyncRequested: (@MainActor (String?) async -> Bool)?
+    var onMacToIPhoneUploadOffered: (@MainActor (MacToIPhoneUploadOffer, SecureMacConnectionSnapshot, any LocalNetworkHeartbeatClientProtocol) async -> Void)?
 
     init(
         connectionStore: any SecureMacConnectionSnapshotProviding,
@@ -1911,6 +1947,13 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                     result: "syncRequested"
                 )
                 _ = await onSyncRequested?(nil)
+            }
+            if let offer = response.macToIPhoneUploadOffer,
+               offer.targetDeviceID == snapshot.deviceID {
+                let handler = onMacToIPhoneUploadOffered
+                Task { @MainActor in
+                    await handler?(offer, snapshot, client)
+                }
             }
             return true
         } catch {
@@ -4147,6 +4190,7 @@ final class LocalNetworkSyncEngine {
     private let connectionStatusStore: DeviceConnectionStatusStore?
     private let diagnosticsStore: ConnectionDiagnosticsStore
     private let diffPlanner: LocalNetworkSyncDiffPlanner
+    private let reconciliationStore: SyncReconciliationStore
     private let canonicalShadowMigrationConfiguration: CanonicalShadowMigrationConfiguration
     private let canonicalSingleDomainShadowConfiguration: CanonicalSingleDomainShadowConfiguration
     private let canonicalV8CutoverAppSeamConfiguration: CanonicalCutoverAppSeamConfiguration
@@ -4186,6 +4230,7 @@ final class LocalNetworkSyncEngine {
         connectionStatusStore: DeviceConnectionStatusStore? = nil,
         diagnosticsStore: ConnectionDiagnosticsStore? = nil,
         diffPlanner: LocalNetworkSyncDiffPlanner? = nil,
+        reconciliationStore: SyncReconciliationStore? = nil,
         canonicalShadowMigrationConfiguration: CanonicalShadowMigrationConfiguration = .disabled,
         canonicalSingleDomainShadowConfiguration: CanonicalSingleDomainShadowConfiguration = .disabled,
         canonicalV8CutoverAppSeamConfiguration: CanonicalCutoverAppSeamConfiguration = .disabled,
@@ -4228,6 +4273,8 @@ final class LocalNetworkSyncEngine {
         self.connectionStatusStore = connectionStatusStore
         self.diagnosticsStore = diagnosticsStore ?? .shared
         self.diffPlanner = diffPlanner ?? LocalNetworkSyncDiffPlanner()
+        self.reconciliationStore = reconciliationStore
+            ?? SyncReconciliationStore(rootURL: try? audioFileStore.baseDirectory())
         self.canonicalShadowMigrationConfiguration = canonicalShadowMigrationConfiguration
         self.canonicalSingleDomainShadowConfiguration = canonicalSingleDomainShadowConfiguration
         self.canonicalV8CutoverAppSeamConfiguration = canonicalV8CutoverAppSeamConfiguration
@@ -4306,18 +4353,10 @@ final class LocalNetworkSyncEngine {
     ) async -> LocalNetworkSyncDiffPlan? {
         let snapshot = connectionStore.snapshot
         let syncRunID = providedSyncRunID ?? UUID().uuidString
-        let triggerSource = RecordingAudioSyncTriggerSource(syncTrigger: trigger)
         if providedSyncRunID == nil {
             diagnosticsStore.record(phase: "syncRunIDCreated", deviceID: snapshot.deviceID, syncRunID: syncRunID)
         }
         refreshCanonicalKernelSwitchConfiguration(syncRunID: syncRunID)
-        guard !shouldDeferSyncBecauseUploadActive(
-            trigger: trigger,
-            deviceID: snapshot.deviceID,
-            syncRunID: syncRunID
-        ) else {
-            return nil
-        }
         let bypassBackoffForTrigger = bypassBackoff || Self.isManualTrigger(trigger)
         guard !isSyncing else {
             diagnosticsStore.record(
@@ -4446,51 +4485,15 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 result: "objectCount=\(localInventory.objects.count),recordings:\(localInventory.recordings.count),items:\(localInventory.studyItems.count),artifacts:\(localInventory.artifacts.count)"
             )
-            await produceCanonicalStatusFactsFromLocalInventory(
-                localInventory,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let outgoingStatusEnvelope = await canonicalStatusExchangeRuntime.makeOutgoingEnvelope(
-                carrier: .inventory
-            )
-            if outgoingStatusEnvelope != nil {
-                diagnosticsStore.record(
-                    phase: "statusEnvelopeCarriedOverInventory",
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "request"
-                )
-                if outgoingStatusEnvelope?.delta != nil {
-                    diagnosticsStore.record(phase: "statusDeltaSent", deviceID: snapshot.deviceID, syncRunID: syncRunID, result: "inventory")
-                }
-                if outgoingStatusEnvelope?.ack != nil {
-                    diagnosticsStore.record(phase: "statusAckSent", deviceID: snapshot.deviceID, syncRunID: syncRunID, result: "inventory")
-                }
-                if outgoingStatusEnvelope?.request != nil {
-                    diagnosticsStore.record(phase: "statusRequestSent", deviceID: snapshot.deviceID, syncRunID: syncRunID, result: "inventory")
-                }
-            }
             let peerResponse = try await client.fetchLocalNetworkSyncInventory(
                 settings: snapshot,
                 localInventory: localInventory,
                 syncRunID: syncRunID,
-                statusExchangeEnvelope: outgoingStatusEnvelope
+                statusExchangeEnvelope: nil
             )
             guard peerResponse.ok, let peerInventory = peerResponse.inventory else {
                 throw SecureMacUploadError.serverRejected(peerResponse.error ?? "sync_inventory_missing")
             }
-            await consumeCanonicalInventoryStatusExchangeEnvelope(
-                peerResponse.statusExchangeEnvelope,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            await produceCanonicalStatusFactsFromPeerInventory(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
             diagnosticsStore.record(
                 phase: "peerInventoryFetched",
                 deviceID: snapshot.deviceID,
@@ -4499,199 +4502,25 @@ final class LocalNetworkSyncEngine {
             )
 
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .planningTransfers)
-            let lastSuccessfulSyncAt = stateStore.state.lastSuccessfulSyncAt
-            let legacyPlan = await Self.makeDiffPlanOffMain(
+            let plannerResult = await Self.makeDiffPlanOffMain(
                 local: localInventory,
                 peer: peerInventory,
-                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
                 diagnosticsStore: diagnosticsStore
             )
-            recordCanonicalShadowMigrationIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
+            try reconciliationStore.apply(
+                plan: plannerResult.reconciliation,
+                localDeviceID: localInventory.device.deviceID,
                 syncRunID: syncRunID,
-                generatedAt: now
+                now: now
             )
-            recordCanonicalV8CutoverNoCommitSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let canonicalRecordingMetadataCanaryResult = await recordCanonicalV86GuardedCommitSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalGeneratedArtifactNoCommitSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalGeneratedArtifactReadSideSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalGeneratedArtifactGuardedCommitSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let canonicalTombstoneConflictCanaryResult = await recordCanonicalTombstoneConflictCutoverSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalLibraryMetadataNoCommitSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalLibraryMetadataReadSideSeamIfEnabled(
-                localInventory: localInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalAudioUploadCutoverPreparationSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            refreshCanonicalReadRuntimeProjection(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            recordCanonicalRecordingExistenceTruthDiagnostics(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let canonicalGeneratedArtifactCanaryResult = await recordCanonicalGeneratedArtifactCutoverSeamIfEnabled(
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let canonicalLibraryMetadataCanaryResult: CanonicalLibraryMetadataCutoverResult?
-            if canonicalLibraryMetadataDebugPilotConfiguration.mode.isConfigured {
-                canonicalLibraryMetadataCanaryResult = await recordCanonicalLibraryMetadataLandingPilotIfConfigured(
-                    localInventory: localInventory,
-                    peerInventory: peerInventory,
-                    triggerSource: triggerSource,
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID
-                )
-            } else {
-                canonicalLibraryMetadataCanaryResult = await recordCanonicalLibraryMetadataCutoverSeamIfEnabled(
-                    localInventory: localInventory,
-                    peerInventory: peerInventory,
-                    legacyPlan: legacyPlan,
-                    triggerSource: triggerSource,
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID
-                )
-            }
-            await recordCanonicalLiveReadOnlyProbeIfEnabled(
-                settings: snapshot,
-                localInventory: localInventory,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                generatedAt: now
-            )
-            let planBeforeCanarySuppression = await canonicalSyncRuntimePlan(
-                localRuntimeSnapshot: localRuntimeBuild.snapshot,
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let canonicalApplyRuntimeResult = await executeCanonicalApplyRuntimeIfConfigured(
-                localRuntimeSnapshot: localRuntimeBuild.snapshot,
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                legacyPlan: legacyPlan,
-                triggerSource: triggerSource,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let applyRuntimeSuppressedPlan = suppressCanonicalApplyRuntimeDuplicateLegacyActions(
-                in: planBeforeCanarySuppression,
-                runtimeResult: canonicalApplyRuntimeResult,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let recordingMetadataSuppressedPlan = suppressCanonicalRecordingMetadataDuplicateLegacyActions(
-                in: applyRuntimeSuppressedPlan,
-                cutoverResult: canonicalRecordingMetadataCanaryResult,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let generatedArtifactSuppressedPlan = suppressCanonicalGeneratedArtifactDuplicateLegacyActions(
-                in: recordingMetadataSuppressedPlan,
-                cutoverResult: canonicalGeneratedArtifactCanaryResult,
-                peerInventory: peerInventory,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let libraryMetadataSuppressedPlan = suppressCanonicalLibraryMetadataDuplicateLegacyActions(
-                in: generatedArtifactSuppressedPlan,
-                cutoverResult: canonicalLibraryMetadataCanaryResult,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let plan = suppressCanonicalTombstoneConflictDuplicateLegacyActions(
-                in: libraryMetadataSuppressedPlan,
-                cutoverResult: canonicalTombstoneConflictCanaryResult,
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID
-            )
-            let isolatedExecution = Self.conflictIsolatedExecutionPlan(
-                plan,
-                localInventory: localInventory,
-                peerInventory: peerInventory
-            )
-            let executablePlan = isolatedExecution.plan
-            let pendingUploadCount = executablePlan.uploadMetadataActions.count
-                + executablePlan.uploadRecordingAudioActions.count
-                + executablePlan.uploadArtifactActions.count
-            let pendingDownloadCount = executablePlan.downloadMetadataActions.count
-                + executablePlan.downloadArtifactActions.count
+            let plan = plannerResult.compatibility
+            let pendingUploadCount = plan.uploadMetadataActions.count
+                + plan.uploadRecordingAudioActions.count
+                + plan.uploadArtifactActions.count
+            let pendingDownloadCount = plan.downloadMetadataActions.count
+                + plan.downloadArtifactActions.count
             diagnosticsStore.record(
                 phase: "diffPlanCreated",
                 deviceID: snapshot.deviceID,
@@ -4709,29 +4538,15 @@ final class LocalNetworkSyncEngine {
                 pendingDownloadCount: pendingDownloadCount
             )
             diagnosticsStore.record(
-                phase: "transferPlanCreated",
+                phase: "syncDiscoveryPlanCreated",
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
-                result: "upload:\(pendingUploadCount),download:\(pendingDownloadCount),conflict:\(plan.conflictActions.count)",
+                result: "suggestedUpload:\(pendingUploadCount),suggestedDownload:\(pendingDownloadCount),conflict:\(plan.conflictActions.count),same:\(plan.noOps.count)",
                 pendingUploadCount: pendingUploadCount,
                 pendingDownloadCount: pendingDownloadCount
             )
-            recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .transferJobsCreated)
             if pendingUploadCount == 0, pendingDownloadCount == 0, plan.conflictActions.isEmpty {
                 diagnosticsStore.record(phase: "noTransferNeeded", deviceID: snapshot.deviceID, syncRunID: syncRunID)
-            }
-            recordWeakCompareDiagnostics(localInventory: localInventory, peerInventory: peerInventory, plan: plan, deviceID: snapshot.deviceID, syncRunID: syncRunID)
-            recordRecordingAudioAvailabilityDiagnostics(localInventory: localInventory, peerInventory: peerInventory, deviceID: snapshot.deviceID, syncRunID: syncRunID, triggerSource: triggerSource)
-            for action in plan.uploadRecordingAudioActions {
-                diagnosticsStore.record(
-                    phase: "existingUploadActionCreated",
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "recordingID=\(action.entityID)"
-                )
-            }
-            if !plan.conflictActions.isEmpty {
-                recordConflictDiagnostics(localInventory: localInventory, peerInventory: peerInventory, plan: plan, deviceID: snapshot.deviceID, syncRunID: syncRunID)
             }
             stateStore.recordAttempt(
                 localDeviceID: localInventory.device.deviceID,
@@ -4744,100 +4559,13 @@ final class LocalNetworkSyncEngine {
                 conflictCount: plan.conflictActions.count,
                 at: now
             )
-
-            let pendingTransfers = transferProgresses(peerInventory: peerInventory, plan: executablePlan, state: .pending)
-            if !pendingTransfers.isEmpty {
-                stateStore.recordActiveTransfers(pendingTransfers)
-            }
-
-            try applyPeerRecordingStatuses(
-                peerInventory: peerInventory,
-                excludedRecordingIDs: isolatedExecution.blockedRecordingIDs
-            )
-            try await applyPeerMetadataIfNeeded(peerInventory: peerInventory, plan: executablePlan, localDeviceID: snapshot.deviceID)
-            try createPlaceholderTransfers(peerInventory: peerInventory, plan: executablePlan, localDeviceID: snapshot.deviceID)
-            recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .transferring)
-            try await uploadLocalMetadataIfNeeded(
-                localInventory: localInventory,
-                plan: executablePlan,
-                settings: snapshot,
-                syncRunID: syncRunID
-            )
-            try await uploadLocalArtifactsIfNeeded(
-                localInventory: localInventory,
-                plan: executablePlan,
-                settings: snapshot,
-                syncRunID: syncRunID
-            )
-            try await downloadPeerArtifactsIfNeeded(
-                peerInventory: peerInventory,
-                plan: executablePlan,
-                settings: snapshot,
-                syncRunID: syncRunID
-            )
-            let remainingAudioTransfers = await uploadMissingRecordingAudioIfNeeded(
-                plan: executablePlan,
-                localInventory: localInventory,
-                peerInventory: peerInventory,
-                settings: snapshot,
-                syncRunID: syncRunID,
-                triggerSource: triggerSource
-            )
-            guard remainingAudioTransfers.isEmpty else {
-                stateStore.recordActiveTransfers(remainingAudioTransfers)
-                throw LocalNetworkSyncExecutionError.contentTransfersIncomplete(remainingAudioTransfers.count)
-            }
-
-            guard plan.conflictActions.isEmpty else {
-                stateStore.recordActiveTransfers([])
-                recordConflictDiagnostics(
-                    localInventory: localInventory,
-                    peerInventory: peerInventory,
-                    plan: plan,
-                    deviceID: snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    phase: "unresolvedConflictRetained"
-                )
-                throw LocalNetworkSyncExecutionError.unresolvedConflicts(plan.conflictActions.count)
-            }
-
-            diagnosticsStore.record(
-                phase: "canonicalInventoryRuntimeSnapshotReused",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "source=syncTick,objectCount=\(localInventory.objects.count)"
-            )
-            diagnosticsStore.record(
-                phase: "canonicalInventoryRuntimeDuplicateBuildSuppressed",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "source=syncTick,duplicateBuildCount=\(localRuntimeBuild.report.duplicateBuildCount)"
-            )
-            diagnosticsStore.record(
-                phase: "canonicalInventoryRuntimeDuplicateBuildDetected",
-                deviceID: snapshot.deviceID,
-                syncRunID: syncRunID,
-                result: "count=\(localRuntimeBuild.report.duplicateBuildCount)"
-            )
-            let refreshedInventory = await inventoryBuilder.buildRuntimeSnapshot(
-                deviceID: snapshot.deviceID,
-                deviceName: UIDevice.current.name,
-                lastKnownPeerRevision: peerInventory.inventoryHash,
-                generatedAt: Date(),
-                shadowTrigger: trigger,
-                // This is a verification snapshot inside the same logical sync
-                // run. Reuse the run ID so diagnostics remain end-to-end
-                // correlatable instead of manufacturing a second run.
-                shadowSyncRunID: syncRunID,
-                sourceKind: .syncTick
-            ).inventory
             stateStore.recordSuccess(
                 peerDeviceID: peerInventory.device.deviceID,
-                localInventoryHash: refreshedInventory.inventoryHash,
+                localInventoryHash: localInventory.inventoryHash,
                 peerInventoryHash: peerInventory.inventoryHash,
-                appliedPeerRevision: peerInventory.inventoryHash,
-                pendingUploadCount: 0,
-                pendingDownloadCount: 0,
+                appliedPeerRevision: nil,
+                pendingUploadCount: pendingUploadCount,
+                pendingDownloadCount: pendingDownloadCount,
                 syncRunID: syncRunID
             )
             stateStore.recordActiveTransfers([])
@@ -4851,11 +4579,11 @@ final class LocalNetworkSyncEngine {
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .completed)
             return plan
         } catch {
-            diagnosticsStore.record(phase: "syncTickFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_tick_failed", errorMessage: error.localizedDescription)
-            diagnosticsStore.record(phase: "syncRunFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_tick_failed", errorMessage: error.localizedDescription)
+            diagnosticsStore.record(phase: "syncTickFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_discovery_failed", errorMessage: error.localizedDescription)
+            diagnosticsStore.record(phase: "syncRunFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_discovery_failed", errorMessage: error.localizedDescription)
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .failed)
             stateStore.recordFailure(
-                code: "sync_tick_failed",
+                code: "sync_discovery_failed",
                 message: error.localizedDescription,
                 syncRunID: syncRunID,
                 at: now
@@ -4897,23 +4625,24 @@ final class LocalNetworkSyncEngine {
     private nonisolated static func makeDiffPlanOffMain(
         local: LocalNetworkSyncInventory,
         peer: LocalNetworkSyncInventory,
-        lastSuccessfulSyncAt: Date?,
         deviceID: String,
         syncRunID: String,
         diagnosticsStore: ConnectionDiagnosticsStore
-    ) async -> LocalNetworkSyncDiffPlan {
+    ) async -> (compatibility: LocalNetworkSyncDiffPlan, reconciliation: SyncReconciliationPlan) {
         let startedAt = Date()
         let result = await Task.detached(priority: .utility) {
             let planStartedAt = Date()
             let startedOnMainActor = CanonicalInventoryRuntimeExecutionProbe.isMainThread()
-            let plan = LocalNetworkSyncDiffPlanner().plan(
-                local: local,
-                peer: peer,
-                lastSuccessfulSyncAt: lastSuccessfulSyncAt
+            let reconciliation = SyncReconciliationPlanner().plan(
+                local: local.syncCoreInventory,
+                peer: peer.syncCoreInventory,
+                syncRunID: syncRunID
             )
+            let plan = LocalNetworkSyncDiffPlanner().plan(reconciliationPlan: reconciliation, local: local, peer: peer)
             let durationMs = max(0, Int(Date().timeIntervalSince(planStartedAt) * 1_000))
             return (
                 plan: plan,
+                reconciliation: reconciliation,
                 durationMs: durationMs,
                 mainActorLongTaskDurationMs: startedOnMainActor ? durationMs : 0
             )
@@ -4940,7 +4669,7 @@ final class LocalNetworkSyncEngine {
                 ].joined(separator: ",")
             )
         }
-        return result.plan
+        return (result.plan, result.reconciliation)
     }
 
     private nonisolated static func makeCanonicalPlannerBundleOffMain(
@@ -11835,15 +11564,27 @@ final class LocalNetworkSyncScheduler {
                 guard let self else {
                     return
                 }
-                _ = await self.runTickIfPossible(trigger: "timer")
+                self.scheduleTick(trigger: "timer")
                 try? await Task.sleep(nanoseconds: UInt64(self.interval * 1_000_000_000))
             }
         }
     }
 
+    /// Stops future timer ticks only. The active discovery run is intentionally
+    /// owned by its own task so a transient presence change cannot cancel an
+    /// inventory exchange that has already started.
     func stop() {
         periodicTask?.cancel()
         periodicTask = nil
+    }
+
+    private func scheduleTick(trigger: String, syncRunID: String? = nil) {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            _ = await self.runTickIfPossible(trigger: trigger, syncRunID: syncRunID)
+        }
     }
 
     @discardableResult
@@ -12162,6 +11903,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
     private let uploadCoordinator: RecordingUploadCoordinator
     private let scheduler: LocalNetworkSyncScheduler
     private let heartbeatMonitor: LocalNetworkHeartbeatMonitor
+    private let macToIPhoneUploadReceiver: MacToIPhoneUploadReceiver
     private var isActive = false
     private var retryDrainTask: Task<Void, Never>?
     private var uploadLedgerObserver: NSObjectProtocol?
@@ -12218,11 +11960,16 @@ final class LocalNetworkSyncAppService: ObservableObject {
         let uploadCoordinator = RecordingUploadCoordinator(
             jobStore: uploadJobStore,
             canonicalKernelSwitchResultProvider: kernelSwitchResultProvider,
-            canonicalStatusTruthRuntime: canonicalStatusTruthRuntime
+            canonicalStatusTruthRuntime: canonicalStatusTruthRuntime,
+            enforcesReconciliationMarks: true
         )
         let kernelSwitchResult = kernelSwitchResultProvider()
         let eventTickContextStore = LocalNetworkSyncEventTickContextStore()
         let localNetworkSyncStateStore = LocalNetworkSyncStateStore()
+        let macToIPhoneUploadReceiver = MacToIPhoneUploadReceiver(
+            audioFileStore: audioFileStore,
+            recordingManager: recordingManager
+        )
         let engine = LocalNetworkSyncEngine(
             connectionStore: connectionStore,
             audioFileStore: audioFileStore,
@@ -12247,7 +11994,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         self.durableSyncSignalQueue = recoveredDurableSignalQueue
         self.durableSyncSignalQueueFileURL = resolvedDurableSignalQueueFileURL
         self.syncEventTickContextStore = eventTickContextStore
-        self.heartbeatMonitor = LocalNetworkHeartbeatMonitor(
+        let heartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: secureClient,
             statusStore: connectionStatusStore,
@@ -12267,6 +12014,11 @@ final class LocalNetworkSyncAppService: ObservableObject {
                 )
             }
         )
+        heartbeatMonitor.onMacToIPhoneUploadOffered = { offer, settings, client in
+            await macToIPhoneUploadReceiver.receive(offer: offer, settings: settings, client: client)
+        }
+        self.heartbeatMonitor = heartbeatMonitor
+        self.macToIPhoneUploadReceiver = macToIPhoneUploadReceiver
         let scheduler = LocalNetworkSyncScheduler(
             interval: interval,
             onInFlightRequestQueued: { trigger in

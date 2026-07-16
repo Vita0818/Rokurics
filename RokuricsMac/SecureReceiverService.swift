@@ -483,6 +483,7 @@ final class SecureReceiverService: ObservableObject {
     @Published private(set) var pairingPayload: SecureReceiverPairingPayload?
     @Published private(set) var presenceObservationRevision = 0
     @Published private(set) var effectiveSyncStatusByObjectID: [CanonicalObjectID: CanonicalEffectiveSyncStatus] = [:]
+    @Published private(set) var macToIPhoneUploadStatusByRecordingID: [String: String] = [:]
 
     let identityManager: MacIdentityManager
     let pairedDeviceStore: PairedDeviceStore
@@ -490,6 +491,8 @@ final class SecureReceiverService: ObservableObject {
     let requestVerifier: RequestVerifier
     let receivedFileStore: ReceivedFileStore
     let recordingFileStore: MacRecordingFileStore
+    let macToIPhoneUploadStore: MacToIPhoneUploadStore
+    let syncReconciliationStore: SyncReconciliationStore
     let studyLibraryStore: StudyLibraryStore
     let gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?
     let deviceConnectionStatusStore: DeviceConnectionStatusStore
@@ -548,6 +551,8 @@ final class SecureReceiverService: ObservableObject {
         pairedDeviceStore injectedPairedDeviceStore: PairedDeviceStore? = nil,
         receivedFileStore injectedReceivedFileStore: ReceivedFileStore? = nil,
         recordingFileStore injectedRecordingFileStore: MacRecordingFileStore? = nil,
+        macToIPhoneUploadStore injectedMacToIPhoneUploadStore: MacToIPhoneUploadStore? = nil,
+        syncReconciliationStore injectedSyncReconciliationStore: SyncReconciliationStore? = nil,
         studyLibraryStore injectedStudyLibraryStore: StudyLibraryStore? = nil,
         deviceConnectionStatusStore injectedDeviceConnectionStatusStore: DeviceConnectionStatusStore? = nil,
         syncStateStore injectedSyncStateStore: StudyLibrarySyncStateStore? = nil,
@@ -585,6 +590,10 @@ final class SecureReceiverService: ObservableObject {
         )
         let receivedFileStore = injectedReceivedFileStore ?? ReceivedFileStore()
         let recordingFileStore = injectedRecordingFileStore ?? MacRecordingFileStore()
+        let macToIPhoneUploadStore = injectedMacToIPhoneUploadStore
+            ?? MacToIPhoneUploadStore(rootURL: recordingFileStore.libraryRootURL)
+        let syncReconciliationStore = injectedSyncReconciliationStore
+            ?? SyncReconciliationStore(rootURL: recordingFileStore.libraryRootURL)
         let resolvedStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
         let canonicalKernelSwitchResult = canonicalKernelSwitchResultProvider?()
         let productionPortInjection = canonicalKernelSwitchResult.map {
@@ -655,6 +664,8 @@ final class SecureReceiverService: ObservableObject {
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
         self.recordingFileStore = recordingFileStore
+        self.macToIPhoneUploadStore = macToIPhoneUploadStore
+        self.syncReconciliationStore = syncReconciliationStore
         self.studyLibraryStore = studyLibraryStore
         self.gitBackedStudyMetadataStore = resolvedGitBackedStudyMetadataStore
         self.deviceConnectionStatusStore = deviceConnectionStatusStore
@@ -779,6 +790,88 @@ final class SecureReceiverService: ObservableObject {
             (first.lastSeenAt ?? first.pairedAt) > (second.lastSeenAt ?? second.pairedAt)
         }
         .first
+    }
+
+    /// Explicit upload-layer entry point used by the Mac learning library.
+    /// Merely running sync or heartbeat can never create one of these jobs.
+    @discardableResult
+    func queueUploadToIPhone(recordingID: String) async throws -> MacToIPhoneUploadOffer {
+        guard let target = latestPairedDevice else {
+            throw MacToIPhoneUploadStoreError.targetMismatch
+        }
+        macToIPhoneUploadStatusByRecordingID[recordingID] = "preparing"
+        do {
+            guard let reconciliationRecord = syncReconciliationStore.pendingSourceRecord(
+                objectID: "recordingAudio:\(recordingID)",
+                sourceDeviceID: localSyncDeviceID,
+                targetDeviceID: target.id
+            ), reconciliationRecord.requiresContentTransfer else {
+                throw MacToIPhoneUploadStoreError.invalidOffer
+            }
+            let source = try recordingFileStore.transcriptionSource(for: recordingID)
+            let attributes = try FileManager.default.attributesOfItem(atPath: source.audioFileURL.path)
+            let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+            let sourceURL = source.audioFileURL
+            let checksum = try await Task.detached(priority: .utility) {
+                try MacSecurityUtilities.sha256Hex(fileURL: sourceURL)
+            }.value
+            let currentBusinessModifiedAt = studyLibraryStore.item(recordingID: recordingID)?.updatedAt
+            let modifiedAtMatches = reconciliationRecord.sourceModifiedAt.map { expected in
+                guard let currentBusinessModifiedAt else { return false }
+                return Int64(expected.timeIntervalSince1970) == Int64(currentBusinessModifiedAt.timeIntervalSince1970)
+            } ?? true
+            guard reconciliationRecord.sourceSHA256?.lowercased() == checksum.lowercased(),
+                  reconciliationRecord.sourceSize == size,
+                  modifiedAtMatches else {
+                try? syncReconciliationStore.update(recordID: reconciliationRecord.recordID, status: .staleSourceVersion)
+                throw MacToIPhoneUploadStoreError.proofMismatch
+            }
+            let offer = try macToIPhoneUploadStore.enqueue(
+                recordingID: recordingID,
+                title: source.title,
+                createdAt: source.createdAt,
+                duration: source.duration,
+                sourceURL: source.audioFileURL,
+                sourceDeviceID: localSyncDeviceID,
+                targetDeviceID: target.id,
+                checksum: checksum,
+                size: size,
+                reconciliationRecord: reconciliationRecord
+            )
+            try syncReconciliationStore.update(recordID: reconciliationRecord.recordID, status: .queued, transferID: offer.transferID)
+            macToIPhoneUploadStatusByRecordingID[recordingID] = "queued"
+            return offer
+        } catch {
+            macToIPhoneUploadStatusByRecordingID[recordingID] = "failed"
+            throw error
+        }
+    }
+
+    func reconciliationRecord(recordingID: String) -> SyncReconciliationRecord? {
+        syncReconciliationStore.record(objectID: "recordingAudio:\(recordingID)")
+    }
+
+    func canUploadSelectedVersionToIPhone(recordingID: String) -> Bool {
+        guard let target = latestPairedDevice else { return false }
+        return syncReconciliationStore.pendingSourceRecord(
+            objectID: "recordingAudio:\(recordingID)",
+            sourceDeviceID: localSyncDeviceID,
+            targetDeviceID: target.id
+        )?.requiresContentTransfer == true
+    }
+
+    func reconciliationDirectionText(recordingID: String) -> String? {
+        guard let record = reconciliationRecord(recordingID: recordingID) else { return nil }
+        if record.status == .deferred {
+            return RokuricsCopy.text("同步差异待处理", "Sync difference deferred")
+        }
+        if record.sourceDeviceID == localSyncDeviceID {
+            return RokuricsCopy.text("待上传到 iPhone", "Pending upload to iPhone")
+        }
+        if record.targetDeviceID == localSyncDeviceID {
+            return RokuricsCopy.text("等待从 iPhone 接收", "Waiting to receive from iPhone")
+        }
+        return nil
     }
 
     var hasStoredPairedDevices: Bool {
@@ -914,6 +1007,8 @@ final class SecureReceiverService: ObservableObject {
             requestVerifier: requestVerifier,
             receivedFileStore: receivedFileStore,
             recordingFileStore: recordingFileStore,
+            macToIPhoneUploadStore: macToIPhoneUploadStore,
+            syncReconciliationStore: syncReconciliationStore,
             studyLibraryStore: studyLibraryStore,
             gitBackedStudyMetadataStore: gitBackedStudyMetadataStore,
             deviceConnectionStatusStore: deviceConnectionStatusStore,
@@ -1057,6 +1152,11 @@ final class SecureReceiverService: ObservableObject {
                 errorMessage: error.localizedDescription
             )
         }
+    }
+
+    private var localSyncDeviceID: String {
+        let value = identityManager.status.displayFingerprint
+        return value == "未生成" || value.isEmpty ? "mac-local" : "mac-\(String(value.prefix(16)))"
     }
 
     func stopSecureReceiving() {
@@ -1512,77 +1612,33 @@ final class SecureReceiverService: ObservableObject {
             return status
         }
 
-        guard syncRuntimeConfiguration.gitBackedSyncEnabled else {
-            let syncRunID = UUID().uuidString
-            let initiatorDeviceID = "mac-\(String(fingerprint.prefix(16)))"
-            let pendingRecord = deviceConnectionStatusStore.recordPendingSyncRequestDetails(
-                deviceID: device.id,
-                displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
-                statusText: "等待 iPhone 执行同步",
-                syncRunID: syncRunID,
-                initiatorDeviceID: initiatorDeviceID
-            )
-            let effectiveSyncRunID = pendingRecord.signal.syncRunID
-            if !pendingRecord.isDuplicate {
-                syncStateStore.recordControlPlane(
-                    deviceID: device.id,
-                    syncRunID: effectiveSyncRunID,
-                    state: .syncStartSignalSent
-                )
-            }
-            if pendingRecord.isDuplicate {
-                recordConnectionDiagnostic(
-                    phase: "pendingSyncRequestDuplicate",
-                    requestDeviceIDPrefix: String(device.id.prefix(12)),
-                    syncRunID: effectiveSyncRunID,
-                    errorCategory: "manualSyncDuplicate=1"
-                )
-            } else {
-                recordConnectionDiagnostic(
-                    phase: "syncRunIDCreated",
-                    requestDeviceIDPrefix: String(device.id.prefix(12)),
-                    syncRunID: effectiveSyncRunID
-                )
-                recordConnectionDiagnostic(
-                    phase: "syncStartSignalSent",
-                    requestDeviceIDPrefix: String(device.id.prefix(12)),
-                    syncRunID: effectiveSyncRunID
-                )
-                recordConnectionDiagnostic(
-                    phase: "pendingSyncRequestCreated",
-                    requestDeviceIDPrefix: String(device.id.prefix(12)),
-                    syncRunID: effectiveSyncRunID
-                )
-            }
-            recordConnectionDiagnostic(
-                phase: "manualSyncPendingCreated",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: effectiveSyncRunID
-            )
-            recordConnectionDiagnostic(
-                phase: "pendingSyncRequestSet",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: effectiveSyncRunID
-            )
-            recordConnectionDiagnostic(
-                phase: "manualSyncRequestedPendingSet",
-                requestDeviceIDPrefix: String(device.id.prefix(12)),
-                syncRunID: effectiveSyncRunID,
-                errorCategory: "manualSyncRequestedPendingCount=1"
-            )
-            let status = pendingRecord.status
-            publishManualSyncStatus(status)
-            return status
-        }
-
-        studyLibraryStore.refresh()
-        let manifest = studyLibraryStore.makeSyncManifest(deviceID: "mac-\(String(fingerprint.prefix(16)))")
-        syncStateStore.recordPush(deviceID: device.id, remoteManifestHash: nil, pendingUploads: manifest.pendingUploads.count)
-        let status = deviceConnectionStatusStore.recordSyncStatus(
+        // Product contract: every “Sync Now” variant requests the same
+        // inventory/diff discovery. This control never builds an apply manifest
+        // or mutates the study library.
+        let syncRunID = UUID().uuidString
+        let initiatorDeviceID = "mac-\(String(fingerprint.prefix(16)))"
+        let pendingRecord = deviceConnectionStatusStore.recordPendingSyncRequestDetails(
             deviceID: device.id,
             displayName: device.deviceName.isEmpty ? "iPhone" : device.deviceName,
-            statusText: "已准备 \(manifest.summaryText)"
+            statusText: "等待 iPhone 执行同步",
+            syncRunID: syncRunID,
+            initiatorDeviceID: initiatorDeviceID
         )
+        let effectiveSyncRunID = pendingRecord.signal.syncRunID
+        if !pendingRecord.isDuplicate {
+            syncStateStore.recordControlPlane(
+                deviceID: device.id,
+                syncRunID: effectiveSyncRunID,
+                state: .syncStartSignalSent
+            )
+        }
+        recordConnectionDiagnostic(
+            phase: pendingRecord.isDuplicate ? "pendingSyncRequestDuplicate" : "syncStartSignalSent",
+            requestDeviceIDPrefix: String(device.id.prefix(12)),
+            syncRunID: effectiveSyncRunID,
+            errorCategory: pendingRecord.isDuplicate ? "manualSyncDuplicate=1" : nil
+        )
+        let status = pendingRecord.status
         publishManualSyncStatus(status)
         return status
     }

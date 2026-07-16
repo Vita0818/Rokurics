@@ -32,6 +32,11 @@ struct ResumableAudioUploadStartRequest: Codable, Equatable {
     let chunkSize: Int
     let metadataHash: String?
     let uploadJobID: String?
+    var reconciliationRecordID: String? = nil
+    var expectedTargetSHA256: String? = nil
+    var expectedTargetSize: Int64? = nil
+    var sourceModifiedAt: Date? = nil
+    var targetModifiedAt: Date? = nil
 }
 
 struct ResumableAudioUploadStatusRequest: Codable, Equatable {
@@ -45,6 +50,7 @@ struct ResumableAudioUploadFinalizeRequest: Codable, Equatable {
     let sessionID: String
     let totalBytes: Int64
     let totalSHA256: String
+    var reconciliationRecordID: String? = nil
 }
 
 struct ResumableAudioUploadSessionResponse: Codable, Equatable {

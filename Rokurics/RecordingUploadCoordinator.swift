@@ -38,6 +38,8 @@ final class RecordingUploadCoordinator: ObservableObject {
     private let canonicalTransferRuntimePortFactory: CanonicalTransferRuntimePortFactory
     private let canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime
     private let canonicalChecksumRuntime: CanonicalChecksumRuntime
+    private let reconciliationStore: SyncReconciliationStore
+    private let enforcesReconciliationMarks: Bool
     private var uploadTasks: [String: Task<Void, Never>] = [:]
 
     init(
@@ -50,7 +52,9 @@ final class RecordingUploadCoordinator: ObservableObject {
         canonicalAudioUploadPortFactory: CanonicalAudioUploadPortFactory? = nil,
         canonicalTransferRuntimePortFactory: CanonicalTransferRuntimePortFactory? = nil,
         canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
-        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil
+        canonicalChecksumRuntime: CanonicalChecksumRuntime? = nil,
+        reconciliationStore: SyncReconciliationStore? = nil,
+        enforcesReconciliationMarks: Bool = false
     ) {
         let resolvedJobStore = jobStore ?? RecordingUploadJobStore()
         self.uploadClient = uploadClient ?? RecordingUploadClient()
@@ -62,6 +66,9 @@ final class RecordingUploadCoordinator: ObservableObject {
         self.canonicalAudioUploadExecutor = canonicalAudioUploadExecutor
         self.canonicalStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
         self.canonicalChecksumRuntime = canonicalChecksumRuntime ?? CanonicalChecksumRuntime()
+        self.reconciliationStore = reconciliationStore
+            ?? SyncReconciliationStore(rootURL: try? resolvedJobStore.baseDirectoryURL())
+        self.enforcesReconciliationMarks = enforcesReconciliationMarks
         self.canonicalAudioUploadPortFactory = canonicalAudioUploadPortFactory ?? { settings, configuration in
             IPhoneCanonicalSecureAudioUploadPort(
                 settings: settings,
@@ -133,6 +140,17 @@ final class RecordingUploadCoordinator: ObservableObject {
             return false
         }
         return jobs.contains(where: Self.isActiveUploadJob)
+    }
+
+    func pendingTransferRecord(for metadata: RecordingMetadata, localDeviceID: String) -> SyncReconciliationRecord? {
+        reconciliationStore.pendingSourceRecord(
+            objectID: Self.audioObjectID(recordingID: metadata.id),
+            sourceDeviceID: localDeviceID
+        )
+    }
+
+    func reconciliationRecord(for metadata: RecordingMetadata) -> SyncReconciliationRecord? {
+        reconciliationStore.record(objectID: Self.audioObjectID(recordingID: metadata.id))
     }
 
     private var canonicalFullSyncDisplayBindingAllowed: Bool {
@@ -748,6 +766,42 @@ final class RecordingUploadCoordinator: ObservableObject {
             resolvedRelativePathToken: metadata.relativeAudioPath
         )
 
+        var reconciliationRecord: SyncReconciliationRecord?
+        if enforcesReconciliationMarks {
+            do {
+                guard let record = reconciliationStore.pendingSourceRecord(
+                    objectID: Self.audioObjectID(recordingID: metadata.id),
+                    sourceDeviceID: settings.deviceID
+                ), record.requiresContentTransfer else {
+                    throw RecordingUploadError.audioUploadFailed("sync_pending_transfer_mark_missing")
+                }
+                let audioURL = try jobStore.audioURL(for: metadata)
+                let size = try jobStore.fileSize(at: audioURL)
+                let checksum = try await Task.detached(priority: .utility) {
+                    try SecureUploadUtilities.sha256Hex(fileURL: audioURL)
+                }.value.lowercased()
+                let currentBusinessModifiedAt = recordingManager.studyLibraryStore
+                    .item(recordingID: metadata.id)?
+                    .updatedAt
+                let modifiedAtMatches = record.sourceModifiedAt.map { expected in
+                    guard let currentBusinessModifiedAt else { return false }
+                    return Int64(expected.timeIntervalSince1970) == Int64(currentBusinessModifiedAt.timeIntervalSince1970)
+                } ?? true
+                guard record.sourceSize == size,
+                      record.sourceSHA256?.lowercased() == checksum,
+                      modifiedAtMatches else {
+                    try? reconciliationStore.update(recordID: record.recordID, status: .staleSourceVersion)
+                    throw RecordingUploadError.audioUploadFailed("sync_source_version_stale")
+                }
+                reconciliationRecord = record
+                try reconciliationStore.update(recordID: record.recordID, status: .queued)
+            } catch {
+                setActiveStatus(.failed, for: metadata)
+                updateErrorMessage(error.localizedDescription, for: metadata.id)
+                return .failed
+            }
+        }
+
         if activeStatuses[metadata.id] == .uploading {
             setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
             updateErrorMessage(nil, for: metadata.id)
@@ -841,7 +895,15 @@ final class RecordingUploadCoordinator: ObservableObject {
 
         do {
             try jobStore.recoverStaleInProgressJobs(now: Date())
-            let existingJob = try jobStore.ensureJob(for: metadata, settings: settings, now: Date())
+            let existingJob = try jobStore.ensureJob(
+                for: metadata,
+                settings: settings,
+                now: Date(),
+                creationTriggerSource: triggerSource
+            )
+            if let reconciliationRecord {
+                try jobStore.bindReconciliation(record: reconciliationRecord, recordingID: metadata.id, now: Date())
+            }
             print("[RokuricsRecordingUpload] upload ledger ready recordingIDPrefix=\(recordingIDPrefix), overall=\(existingJob.overallState.rawValue), metadataStage=\(existingJob.metadataStage.rawValue), audioStage=\(existingJob.audioStage.rawValue)")
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -904,7 +966,8 @@ final class RecordingUploadCoordinator: ObservableObject {
             return .failed
         }
 
-        if let canonicalStatus = await uploadViaCanonicalAudioRuntimeIfEnabled(
+        if !enforcesReconciliationMarks,
+           let canonicalStatus = await uploadViaCanonicalAudioRuntimeIfEnabled(
             metadata: metadata,
             settings: settings,
             recordingManager: recordingManager,
@@ -919,7 +982,12 @@ final class RecordingUploadCoordinator: ObservableObject {
         }
 
         do {
-            let fallbackJob = try jobStore.ensureJob(for: metadata, settings: settings, now: Date())
+            let fallbackJob = try jobStore.ensureJob(
+                for: metadata,
+                settings: settings,
+                now: Date(),
+                creationTriggerSource: triggerSource
+            )
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "uploadCoordinatorFallbackLedgerReady",
@@ -1238,6 +1306,19 @@ final class RecordingUploadCoordinator: ObservableObject {
         proofSignature: RecordingAudioSignature?
     ) throws -> RecordingUploadJob {
         let succeededJob = try jobStore.markSucceeded(recordingID: recordingID, result: result, now: now)
+        if let recordID = succeededJob.reconciliationRecordID {
+            try? reconciliationStore.update(
+                recordID: recordID,
+                status: .transferredAwaitingVerification,
+                transferID: succeededJob.resumableSessionID,
+                proof: SyncReconciliationCompletionProof(
+                    transferID: succeededJob.resumableSessionID,
+                    verifiedSHA256: proofSignature?.sha256,
+                    verifiedSize: proofSignature?.size,
+                    verifiedAt: now
+                )
+            )
+        }
         guard let proofSignature else {
             return succeededJob
         }
@@ -2128,6 +2209,19 @@ final class RecordingUploadCoordinator: ObservableObject {
         var nextRetryAfter: Date?
         for job in jobs {
             let traceID = UploadFlightRecorder.traceID(forRecordingID: job.recordingID) ?? UploadFlightRecorder.makeTraceID()
+            guard job.creationTriggerSource == .manualUploadButton else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "retryJobSkippedBackoff",
+                    traceID: traceID,
+                    recordingID: job.recordingID,
+                    eventResult: "skip",
+                    reasonCode: "not_user_initiated",
+                    ledgerState: job.overallState.rawValue,
+                    jobID: job.id
+                )
+                continue
+            }
             guard uploadTasks[job.recordingID] == nil else {
                 UploadFlightRecorder.record(
                     side: .iPhone,
@@ -2790,6 +2884,15 @@ nonisolated struct RecordingUploadJob: Codable, Equatable, Identifiable {
     var resumableState: RecordingResumableUploadState? = nil
     var lastConfirmedByMacAt: Date? = nil
     var lastSessionStatusError: String? = nil
+    /// Only jobs explicitly created from the learning-library upload action
+    /// may be resumed automatically. Legacy jobs decode as nil and require the
+    /// user to tap Upload once before they become retry eligible.
+    var creationTriggerSource: RecordingAudioSyncTriggerSource? = nil
+    var reconciliationRecordID: String? = nil
+    var expectedTargetSHA256: String? = nil
+    var expectedTargetSize: Int64? = nil
+    var sourceModifiedAt: Date? = nil
+    var targetModifiedAt: Date? = nil
 
     var isRetryable: Bool {
         overallState == .retryableFailed && !isFatal
@@ -2803,14 +2906,20 @@ nonisolated struct RecordingUploadJob: Codable, Equatable, Identifiable {
             audioConfirmedBytes: audioConfirmedBytes,
             audioTotalBytes: audioTotalBytes,
             audioChunkSize: audioChunkSize,
-            audioTotalSHA256: audioTotalSHA256
+            audioTotalSHA256: audioTotalSHA256,
+            reconciliationRecordID: reconciliationRecordID,
+            expectedTargetSHA256: expectedTargetSHA256,
+            expectedTargetSize: expectedTargetSize,
+            sourceModifiedAt: sourceModifiedAt,
+            targetModifiedAt: targetModifiedAt
         )
     }
 
     static func make(
         metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
-        now: Date
+        now: Date,
+        creationTriggerSource: RecordingAudioSyncTriggerSource = .manualUploadButton
     ) -> RecordingUploadJob {
         RecordingUploadJob(
             recordingID: metadata.id,
@@ -2830,7 +2939,8 @@ nonisolated struct RecordingUploadJob: Codable, Equatable, Identifiable {
             localMetadataPath: metadata.relativeMetadataPath,
             localAudioPath: metadata.relativeAudioPath,
             targetDeviceID: settings.deviceID,
-            targetMacName: settings.macName.isEmpty ? nil : settings.macName
+            targetMacName: settings.macName.isEmpty ? nil : settings.macName,
+            creationTriggerSource: creationTriggerSource
         )
     }
 }
@@ -2957,6 +3067,21 @@ final class RecordingUploadJobStore {
             .standardizedFileURL
     }
 
+    func baseDirectoryURL() throws -> URL {
+        try audioFileStore.baseDirectory()
+    }
+
+    func bindReconciliation(record: SyncReconciliationRecord, recordingID: String, now: Date) throws {
+        _ = try updateJob(recordingID: recordingID) { job in
+            job.updatedAt = now
+            job.reconciliationRecordID = record.recordID
+            job.expectedTargetSHA256 = record.targetSHA256
+            job.expectedTargetSize = record.targetSize
+            job.sourceModifiedAt = record.sourceModifiedAt
+            job.targetModifiedAt = record.targetModifiedAt
+        }
+    }
+
     func loadJobs() throws -> [RecordingUploadJob] {
         try loadLedger().jobs
     }
@@ -2981,24 +3106,43 @@ final class RecordingUploadJobStore {
     func ensureJob(
         for metadata: RecordingMetadata,
         settings: SecureMacConnectionSnapshot,
-        now: Date
+        now: Date,
+        creationTriggerSource: RecordingAudioSyncTriggerSource = .manualUploadButton
     ) throws -> RecordingUploadJob {
         if let existing = try loadJob(recordingID: metadata.id) {
             let existingTarget = existing.targetDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
             let currentTarget = settings.deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
             if !currentTarget.isEmpty, existingTarget == currentTarget {
+                if creationTriggerSource == .manualUploadButton,
+                   existing.creationTriggerSource != .manualUploadButton {
+                    var userOwnedJob = existing
+                    userOwnedJob.creationTriggerSource = .manualUploadButton
+                    userOwnedJob.updatedAt = now
+                    try saveJob(userOwnedJob)
+                    return userOwnedJob
+                }
                 return existing
             }
 
             // Upload proof is scoped to one paired receiver. A new or legacy-missing
             // target must restart metadata and audio from a clean job so the new Mac
             // cannot inherit another receiver's successful stages/session IDs.
-            let replacement = RecordingUploadJob.make(metadata: metadata, settings: settings, now: now)
+            let replacement = RecordingUploadJob.make(
+                metadata: metadata,
+                settings: settings,
+                now: now,
+                creationTriggerSource: creationTriggerSource
+            )
             try saveJob(replacement)
             return replacement
         }
 
-        let job = RecordingUploadJob.make(metadata: metadata, settings: settings, now: now)
+        let job = RecordingUploadJob.make(
+            metadata: metadata,
+            settings: settings,
+            now: now,
+            creationTriggerSource: creationTriggerSource
+        )
         try saveJob(job)
         return job
     }

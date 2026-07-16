@@ -39,6 +39,7 @@ struct MacStudyLibraryNavigationState: Equatable {
 }
 
 struct MacStudyLibraryView: View {
+    @ObservedObject var secureReceiverService: SecureReceiverService
     @ObservedObject var studyLibraryStore: StudyLibraryStore
     @ObservedObject var audioInboxStore: AudioInboxStore
     @ObservedObject var transcriptionCoordinator: TranscriptionCoordinator
@@ -170,6 +171,7 @@ struct MacStudyLibraryView: View {
                 isTranscribing: transcriptionCoordinator.isTranscribing(recordingID: detailItem.id),
                 isGeneratingNote: noteGenerationCoordinator.isGenerating(recordingID: detailItem.id),
                 statusMessage: statusMessage,
+                reconciliationDirectionText: secureReceiverService.reconciliationDirectionText(recordingID: detailItem.id),
                 onBack: {
                     navigationState.closeRecordingDetail()
                 },
@@ -195,6 +197,10 @@ struct MacStudyLibraryView: View {
                 },
                 onImportToChat: {
                     importRecordingToChat(detailItem)
+                },
+                canUploadToIPhone: secureReceiverService.canUploadSelectedVersionToIPhone(recordingID: detailItem.id),
+                onUploadToIPhone: {
+                    queueUploadToIPhone(detailItem)
                 },
                 onMoveToTrash: {
                     moveToTrashImmediately(detailItem)
@@ -318,6 +324,8 @@ struct MacStudyLibraryView: View {
                                             displaySyncState: displaySyncState,
                                             isTranscribing: transcriptionCoordinator.isTranscribing(recordingID: inboxItem.id),
                                             isGeneratingNote: noteGenerationCoordinator.isGenerating(recordingID: inboxItem.id),
+                                            canUploadToIPhone: secureReceiverService.canUploadSelectedVersionToIPhone(recordingID: inboxItem.id),
+                                            reconciliationDirectionText: secureReceiverService.reconciliationDirectionText(recordingID: inboxItem.id),
                                             onPlay: {
                                                 playRecording(inboxItem)
                                             },
@@ -329,6 +337,9 @@ struct MacStudyLibraryView: View {
                                             },
                                             onImportToChat: {
                                                 importStudyItemToChat(item.mergedWithCurrentInboxItem(inboxItem))
+                                            },
+                                            onUploadToIPhone: {
+                                                queueUploadToIPhone(inboxItem)
                                             },
                                             onOpenDetail: {
                                                 openDetail(inboxItem)
@@ -623,6 +634,18 @@ struct MacStudyLibraryView: View {
             NSWorkspace.shared.open(audioURL)
         } catch {
             operationErrorMessage = RokuricsCopy.text("无法打开录音文件", "Could not open audio file")
+        }
+    }
+
+    private func queueUploadToIPhone(_ item: MacRecordingInboxItem) {
+        statusMessage = RokuricsCopy.text("正在准备上传到 iPhone", "Preparing upload to iPhone")
+        Task {
+            do {
+                _ = try await secureReceiverService.queueUploadToIPhone(recordingID: item.id)
+                statusMessage = RokuricsCopy.text("已排队，iPhone 在线时将接收", "Queued; iPhone will receive when online")
+            } catch {
+                operationErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1240,10 +1263,13 @@ private struct MacStudyRecordingCard: View {
     let displaySyncState: CanonicalDisplaySyncState?
     let isTranscribing: Bool
     let isGeneratingNote: Bool
+    let canUploadToIPhone: Bool
+    let reconciliationDirectionText: String?
     let onPlay: () -> Void
     let onTranscribe: () -> Void
     let onGenerateNote: () -> Void
     let onImportToChat: () -> Void
+    let onUploadToIPhone: () -> Void
     let onOpenDetail: () -> Void
     let onRename: (String) -> Void
     let onDelete: () -> Void
@@ -1291,11 +1317,16 @@ private struct MacStudyRecordingCard: View {
                         .foregroundStyle(MacTheme.softText(for: colorScheme))
                         .lineLimit(1)
                 }
+                if let reconciliationDirectionText {
+                    Text(reconciliationDirectionText)
+                        .font(MacTypography.chineseCaption(size: 11, weight: .semibold))
+                        .foregroundStyle(MacTheme.softText(for: colorScheme))
+                }
             }
             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
 
             actionArea
-            .frame(width: 150, alignment: .trailing)
+            .frame(width: 190, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -1347,6 +1378,16 @@ private struct MacStudyRecordingCard: View {
                     tint: MacTheme.mint,
                     helpText: item.isNoteGenerated ? RokuricsCopy.text("重新总结", "Summarize Again") : noteHelpText,
                     action: onGenerateNote
+                )
+
+                MacStudyCardIconButton(
+                    systemImage: "square.and.arrow.up",
+                    isEnabled: displayAudioAvailable && canUploadToIPhone,
+                    tint: MacTheme.leaf,
+                    helpText: canUploadToIPhone
+                        ? RokuricsCopy.text("上传到 iPhone", "Upload to iPhone")
+                        : RokuricsCopy.text("请先同步，或当前应由 iPhone 提供版本", "Sync first, or iPhone is the selected source"),
+                    action: onUploadToIPhone
                 )
 
                 MacStudyCardIconButton(
@@ -1465,6 +1506,7 @@ private struct MacStudySheetCircularIconButton: View {
     let tint: Color
     let helpText: String
     let role: ButtonRole?
+    var isEnabled: Bool = true
     let action: () -> Void
 
     var body: some View {
@@ -1475,6 +1517,7 @@ private struct MacStudySheetCircularIconButton: View {
             role: role,
             action: action
         )
+        .disabled(!isEnabled)
     }
 }
 
@@ -1523,6 +1566,7 @@ private struct MacStudyRecordingDetailPage: View {
     let isTranscribing: Bool
     let isGeneratingNote: Bool
     let statusMessage: String?
+    let reconciliationDirectionText: String?
     let onBack: () -> Void
     let onSaveFiling: () -> Void
     let onCreateFilingValue: (StudyFolderLevel, String) -> Void
@@ -1531,6 +1575,8 @@ private struct MacStudyRecordingDetailPage: View {
     let onViewNote: () -> Void
     let onGenerateNote: () -> Void
     let onImportToChat: () -> Void
+    let canUploadToIPhone: Bool
+    let onUploadToIPhone: () -> Void
     let onMoveToTrash: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -1605,9 +1651,21 @@ private struct MacStudyRecordingDetailPage: View {
             VStack(alignment: .leading, spacing: 7) {
                 RokuricsPageTitle(text: item.title)
                 RokuricsPageSubtitle(text: "\(Self.dateFormatter.string(from: item.receivedAt)) · \(MacStudyLibraryViewDuration.text(item.duration))")
+                if let reconciliationDirectionText {
+                    RokuricsPageSubtitle(text: reconciliationDirectionText)
+                }
             }
 
             Spacer(minLength: 12)
+
+            MacStudySheetCircularIconButton(
+                systemImage: "square.and.arrow.up",
+                tint: MacTheme.leaf,
+                helpText: RokuricsCopy.text("上传到 iPhone", "Upload to iPhone"),
+                role: nil,
+                isEnabled: canUploadToIPhone,
+                action: onUploadToIPhone
+            )
 
             MacStudySheetCircularIconButton(
                 systemImage: "bubble.left.and.bubble.right",

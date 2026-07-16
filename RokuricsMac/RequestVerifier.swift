@@ -115,7 +115,7 @@ final class RequestVerifier {
             requiredUploadType: nil
         ),
         "/sync/inventory": PathRule(
-            maxBodyBytes: 1 * 1024 * 1024,
+            maxBodyBytes: 4 * 1024 * 1024,
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
         ),

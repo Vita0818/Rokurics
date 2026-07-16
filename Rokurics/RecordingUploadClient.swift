@@ -40,6 +40,11 @@ nonisolated struct RecordingUploadResumeContext: Equatable {
     var audioTotalBytes: Int64?
     var audioChunkSize: Int?
     var audioTotalSHA256: String?
+    var reconciliationRecordID: String? = nil
+    var expectedTargetSHA256: String? = nil
+    var expectedTargetSize: Int64? = nil
+    var sourceModifiedAt: Date? = nil
+    var targetModifiedAt: Date? = nil
 }
 
 struct ResumableAudioUploadStartRequest: Codable, Equatable {
@@ -50,6 +55,11 @@ struct ResumableAudioUploadStartRequest: Codable, Equatable {
     let chunkSize: Int
     let metadataHash: String?
     let uploadJobID: String?
+    var reconciliationRecordID: String? = nil
+    var expectedTargetSHA256: String? = nil
+    var expectedTargetSize: Int64? = nil
+    var sourceModifiedAt: Date? = nil
+    var targetModifiedAt: Date? = nil
 }
 
 struct ResumableAudioUploadStatusRequest: Codable, Equatable {
@@ -63,6 +73,7 @@ struct ResumableAudioUploadFinalizeRequest: Codable, Equatable {
     let sessionID: String
     let totalBytes: Int64
     let totalSHA256: String
+    var reconciliationRecordID: String? = nil
 }
 
 struct ResumableAudioUploadSessionResponse: Codable, Equatable {
@@ -324,6 +335,8 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
             )
             throw RecordingUploadError.fileTooLarge(limitBytes: Int(Self.resumableAudioMaxBytes))
         }
+        let useResumableTransfer = audioSize >= resumableThresholdBytes
+            || resumeContext?.reconciliationRecordID != nil
 
         let metadataResponse = try await uploadMetadataIfNeeded(
             metadata: metadata,
@@ -337,13 +350,13 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
             stage: "audioUploadDecisionMade",
             recordingID: metadata.id,
             eventResult: "success",
-            reasonCode: audioSize >= resumableThresholdBytes ? RecordingUploadMode.resumableChunks.rawValue : RecordingUploadMode.singleRequest.rawValue,
+            reasonCode: useResumableTransfer ? RecordingUploadMode.resumableChunks.rawValue : RecordingUploadMode.singleRequest.rawValue,
             uploadStatus: metadata.uploadStatus,
             fileExists: true,
             fileSize: audioSize,
             totalBytes: audioSize
         )
-        if audioSize >= resumableThresholdBytes {
+        if useResumableTransfer {
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "resumableAudioUploadSelected",
@@ -710,7 +723,12 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                     totalSHA256: totalSHA256,
                     chunkSize: normalizedChunkSize,
                     metadataHash: nil,
-                    uploadJobID: metadata.id
+                    uploadJobID: metadata.id,
+                    reconciliationRecordID: resumeContext?.reconciliationRecordID,
+                    expectedTargetSHA256: resumeContext?.expectedTargetSHA256,
+                    expectedTargetSize: resumeContext?.expectedTargetSize,
+                    sourceModifiedAt: resumeContext?.sourceModifiedAt,
+                    targetModifiedAt: resumeContext?.targetModifiedAt
                 )
             )
             guard startResponse.ok, let startedSessionID = startResponse.sessionID else {
@@ -842,7 +860,8 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 recordingID: metadata.id,
                 sessionID: activeSessionID,
                 totalBytes: audioSize,
-                totalSHA256: totalSHA256
+                totalSHA256: totalSHA256,
+                reconciliationRecordID: resumeContext?.reconciliationRecordID
             )
         )
         guard finalizeResponse.ok else {

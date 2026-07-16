@@ -1,5 +1,49 @@
 # TESTING
 
+## 2026-07-12 拆层修复验证
+
+源码验收至少覆盖：sync discovery 只请求一次 inventory；即使 plan 发现缺失 artifact/audio 或 deferred，也不得发起 artifact request/put/status、metadata apply、Store/file mutation 或 upload job；同步按稳定 ID + LWW 生成确定性 source/target record；只有 upload button 可消费 record 创建 job，retry drainer 只恢复按钮 job；双向传输均校验 source/target version、checksum/size、no-overwrite 和完成 proof。
+
+已运行并通过 iPhone generic simulator build、iOS `build-for-testing`（包含全部 iOS unit/UI test source 编译）、Mac Debug build、iOS targeted tests（read-only discovery、conflict completed、scheduler ownership、manual retry）和 Mac upload-store targeted test。iOS 完整 suite 曾执行 200 项；当时 6 项仍断言旧 full-sync 契约、2 项为模拟器 Keychain 环境问题，旧契约断言已更新。最终两次复跑均在进入测试前由 CoreSimulator 报“无法找到目标设备”，不属于应用测试失败。`git diff --check` 与 `git status --short` 作为交付检查仍必须执行。真机后续证据只需：同 Wi-Fi 配对后验证“立即同步”无文件进度/无内容流量，以及分别点击双端学习库上传按钮完成一个大文件往返。
+
+## 连接 / 同步 / 上传分层验收合同（2026-07-12）
+
+同步差异闭环的本地精确回归命令：
+
+```sh
+xcodebuild test -project Rokurics.xcodeproj -scheme Rokurics \
+  -destination 'platform=iOS Simulator,id=<available-simulator-id>' \
+  -only-testing:RokuricsTests/SyncReconciliationClosedLoopTests
+```
+
+该组当前 13 项，必须覆盖：双方都改仍由较新 `modifiedAt` 胜出、rename-only 无内容、hash 缺失/时间并列 deferred、tombstone delete-vs-modify/anti-resurrection、方向无关、跨重启持久标记、收敛清除、幂等/supersede/无关对象保留、有界存储、损坏 fail-closed、无标记不建 job、stale source 不上传、matching record 写 completion proof。
+
+以下是当前源码已经实施、后续不得回退的必测产品合同；旧 full-sync 测试必须禁用或改写为 discovery-only 断言，不能把旧内容传输行为解释为本节通过。
+
+连接层：
+
+- health/heartbeat 成功只更新 presence，不构建 inventory、不访问学习库文件、不计算 hash、不创建 upload job、不调用 apply/content route。
+- 连接失败只影响 Connection 状态；不得把历史 sync diff 或 upload completion 擦除。
+
+同步层：
+
+- 点击连接页“立即同步”只产生一对 inventory snapshot、一次 exchange/diff 和有界诊断；双端断言 metadata apply、artifact/audio bytes、placeholder/store mutation 和新 upload job 均为 0。
+- 同一 `syncRunID` 即使有多个对象、planner action 或诊断消费者，每端 inventory builder 调用次数也必须为 1。
+- 准备少量超大文件，先完成 checksum cache 预热；第二轮无变化同步必须全部 cache hit，不读取文件内容，耗时和网络 bytes 不随文件体积增长。修改其中一个文件后，只允许该文件 cache invalidation/off-main rehash。
+- inventory payload 只包含稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone 和有限协议字段；测试必须拒绝 `dataBase64`、audio bytes、完整 transcript/note/summary、附件正文和 provider response。
+- added、tombstoned deleted、hash-changed modified、same、same-time-different-hash conflict、peer-unknown deferred 均应由 completed sync 返回；conflict 不得令 sync failed。
+- peer absent 不得直接删除本地对象；只有有效 tombstone/版本事实可产生 deleted diff，且同步仍不得执行删除。
+- sync cancellation 只取消 inventory/diff 本身；presence 短暂 stale、Store publish、upload/apply 状态变化不得取消已在进行的独立 sync run。
+
+上传层：
+
+- 只有学习库内用户点击“上传”才能创建新的内容 transfer job；heartbeat、app activation、periodic/manual sync、列表/详情刷新和 Store publish 均断言不创建新 job。
+- 分别覆盖 iPhone -> Mac 与 Mac -> iPhone；两种方向都必须经过 checksum/size、no-overwrite、安全 route 和 finalize proof，并使用独立 upload job/run 状态。
+- upload failed/cancelled/conflict 不得把已完成的 sync diff 改成 failed；sync failed 也不得把已完成 upload 改写为失败。
+- upload retry 只能恢复用户已经创建且仍符合目标 peer/content contract 的 job，不得借 retry drainer 创建新的普通上传任务。
+
+UI 手动验收：连接页“立即同步”期间不得出现文件传输进度或学习库内容变化；完成后只展示 added/deleted/modified/conflict 等差异。进入学习库点击“上传”后才显示文件传输方向、进度、成功或失败。
+
 ## 2026-07-12 Development Diagnostics 验证
 
 构建：

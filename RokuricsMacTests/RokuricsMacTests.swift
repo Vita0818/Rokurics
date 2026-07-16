@@ -12,6 +12,51 @@ import Testing
 @testable import RokuricsMac
 
 struct RokuricsMacTests {
+    @Test func macToIPhoneUploadStorePersistsChunksAndRequiresMatchingAckProof() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac-to-iphone-upload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        let sourceURL = rootURL.appendingPathComponent("audio.m4a", isDirectory: false)
+        let audio = Data("explicit mac upload".utf8)
+        try audio.write(to: sourceURL)
+        let checksum = MacSecurityUtilities.sha256Hex(audio)
+        let store = MacToIPhoneUploadStore(rootURL: rootURL)
+
+        let offer = try store.enqueue(
+            recordingID: "mac-recording",
+            title: "Mac recording",
+            createdAt: Date(timeIntervalSince1970: 100),
+            duration: 3,
+            sourceURL: sourceURL,
+            targetDeviceID: "iphone-01",
+            checksum: checksum,
+            size: Int64(audio.count)
+        )
+        let restored = MacToIPhoneUploadStore(rootURL: rootURL)
+        let chunk = try restored.chunk(
+            transferID: offer.transferID,
+            targetDeviceID: "iphone-01",
+            offset: 0,
+            length: audio.count
+        )
+        let decodedChunk = chunk.dataBase64.flatMap { Data(base64Encoded: $0) }
+
+        #expect(restored.nextOffer(targetDeviceID: "iphone-01") == offer)
+        #expect(decodedChunk == audio)
+        #expect(chunk.chunkChecksum == checksum)
+        #expect(chunk.isFinalChunk == true)
+
+        try restored.acknowledge(MacToIPhoneUploadAckRequest(
+            transferID: offer.transferID,
+            deviceID: "iphone-01",
+            checksum: checksum,
+            size: Int64(audio.count),
+            completedAt: Date(timeIntervalSince1970: 200)
+        ))
+        #expect(restored.nextOffer(targetDeviceID: "iphone-01") == nil)
+    }
+
     @Test func cancelledMacSyncEventDebounceDoesNotContinueToDrain() async {
         let cancelledWait = Task {
             await MacLocalNetworkSyncDebounceDelay.wait(seconds: 10)

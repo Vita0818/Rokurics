@@ -2,6 +2,22 @@
 
 最近一次自查日期：2026-07-12
 
+## 2026-07-12 同步差异判定与待传输闭环已完成代码级收口
+
+项目现已确认三层产品定义：连接只做短握手与可信在线检查；连接页“立即同步”只交换学习库 inventory 的稳定标识、逻辑文件名、hash、byte size、业务修改时间、版本和 tombstone 等短字段，并完成差异发现、LWW 来源判定和逐对象待处理标记；学习库内用户点击“上传”后，才允许双向传输实际文件内容。同步不应用学习库内容、不创建 placeholder、不传 artifact/audio bytes，也不自动创建上传任务。
+
+共享 `SyncReconciliationPlanner` 现按稳定 `objectID` 对齐版本：较新的业务 `modifiedAt` 必然成为 source，即使双方都修改也仍按 LWW；相同 hash + 名称变化为 rename-only；相同 hash + 仅时间变化不重复传输；hash 不同且时间相同、或缺少必要 hash/size 时 deferred；tombstone 与 live version 同样按 LWW，较新 live 可恢复，较新 tombstone 可删除，时间并列不静默覆盖。请求方向不会改变 winner 或 record ID。
+
+双端各自使用 `SyncReconciliationStore` 将相关记录原子持久化到应用根目录的 `Sync/Reconciliation/records.json`。记录包含 source、target、expected hash/size/modifiedAt、difference、reason、状态和完成证明，不含文件 bytes、正文、绝对路径或密钥；存储有 schema version、4096 条默认上限、幂等替换、无关对象保留和损坏 fail-closed。下一轮 inventory 已收敛时只清除本轮已评估且一致的对象记录。
+
+iPhone -> Mac 与 Mac -> iPhone 上传入口均已改为消费 reconciliation record。来源端按钮才可创建任务；目标端显示等待接收。创建前校验来源版本，过期则写 `staleSourceVersion` 且不创建 job；上传协议携带 record ID 与目标旧版本 proof，接收端在替换前执行 target CAS、checksum/size 和 no-overwrite 校验；成功后写 `transferredAwaitingVerification` 完成证明，下一轮两端 inventory 一致后清除记录。稳定 recording ID 在 Mac -> iPhone 替换时保留，不再通过新 ID 制造重复对象。
+
+源码已按该产品定义拆层。`LocalNetworkSyncEngine.performTick` 现在只构建一次本端 runtime inventory snapshot、交换一次对端 inventory、执行一次 shared reconciliation plan，并持久化有界 run 摘要和逐对象 record；旧 canonical 二次 planner、shadow migration 和逐对象重算不再进入 active discovery。该路径不再调用 metadata apply、placeholder、artifact request/put、generated artifact download、缺失 audio upload、Store merge/save、retry/finalize 或文件内容完成证明。deferred 是成功同步得到的业务结果；成功终态不要求任何文件传输完成。旧 Git-backed apply 实现保留为不可达迁移参考，连接页、timer、heartbeat 和“立即同步”统一进入 content-read-only discovery。
+
+上传任务创建已收窄为学习库明确上传按钮：iPhone -> Mac 继续复用现有安全上传链路；retry drainer 只能恢复由按钮创建的 durable job。Mac -> iPhone 新增 Mac 学习库按钮、持久 `MacToIPhoneUploadStore`、heartbeat 小型 offer、iPhone 分块 pull 和独立 ACK；heartbeat 不携带文件 bytes，Mac 不反向拨号 iPhone。分块/ACK route 继续通过 TLS/HMAC/timestamp/nonce/body hash/`RequestVerifier`，目标端校验 chunk checksum、整文件 checksum/size 并 no-overwrite 落盘。
+
+hash cache 本身在问题日志中正常命中：iPhone 54 次、Mac 53 次，未见 miss/stale/recompute。修复保留该 cache，并通过单轮 snapshot 消除了 sync tick 内的重复内容 lookup。2026-07-12 最新验证：iOS `SyncReconciliationClosedLoopTests` 13 项全部通过，覆盖 LWW、rename-only、缺 hash、时间并列、删除/恢复、防复活、双端方向一致、跨重启、幂等/supersede/有界/损坏 fail-closed、缺标记拒绝、stale source 拒绝和完成 proof；iOS 测试构建随 targeted test 成功，Mac Debug build 成功。paired iPhone/Mac 真机往返和大文件体验证据仍未采集，不能据此声称真机已验证。
+
 ## 2026-07-12 开发会话日志收集与存储系统
 
 新增 `RokuricsShared/DevelopmentDiagnostics.swift`，在 DEBUG 构建中提供双端统一的开发会话日志。iPhone 进程生成 `test-*` 会话 ID，并通过可选 `X-Rokurics-Development-Session-ID` 请求头传给 Mac；Mac 收到后采用同一 ID。连接/同步事件由双端 `ConnectionDiagnosticsStore` 镜像，上传事件由 `UploadFlightRecorder` 镜像，`syncRunID` 与 `traceID` 继续作为子关联键。

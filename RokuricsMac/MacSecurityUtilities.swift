@@ -18,11 +18,11 @@ enum MacSecurityUtilities {
         return Data(bytes).base64URLEncodedString()
     }
 
-    static func sha256Hex(_ data: Data) -> String {
-        Data(SHA256.hash(data: data)).hexString
+    nonisolated static func sha256Hex(_ data: Data) -> String {
+        Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func sha256Hex(fileURL: URL, chunkByteCount: Int = 1024 * 1024) throws -> String {
+    nonisolated static func sha256Hex(fileURL: URL, chunkByteCount: Int = 1024 * 1024) throws -> String {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer {
             try? handle.close()
@@ -38,7 +38,7 @@ enum MacSecurityUtilities {
             hasher.update(data: data)
         }
 
-        return Data(hasher.finalize()).hexString
+        return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
     }
 
     static func hmacSHA256Base64URL(message: String, secretBase64URL: String) -> String? {

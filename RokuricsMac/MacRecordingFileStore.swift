@@ -965,20 +965,28 @@ final class MacRecordingFileStore {
 
     func startResumableAudioUpload(
         _ request: ResumableAudioUploadStartRequest,
-        sourceDevice: PairedDevice
+        sourceDevice: PairedDevice,
+        replacementAuthorized: Bool = false
     ) async throws -> ResumableAudioUploadSessionResponse {
         try ensureLibraryDirectories()
         try validateResumableRequest(recordingID: request.recordingID, totalBytes: request.totalBytes, chunkSize: request.chunkSize)
 
         let recordingResources = try recordingResources(for: request.recordingID)
-        if let completed = try await completedAudioResponseIfPresent(
-            recordingID: request.recordingID,
-            audioURL: recordingResources.audioURL,
-            receiveURL: recordingResources.receiveURL,
-            expectedChecksum: request.totalSHA256,
-            expectedFileSize: request.totalBytes
-        ) {
-            return completed
+        do {
+            if let completed = try await completedAudioResponseIfPresent(
+                recordingID: request.recordingID,
+                audioURL: recordingResources.audioURL,
+                receiveURL: recordingResources.receiveURL,
+                expectedChecksum: request.totalSHA256,
+                expectedFileSize: request.totalBytes
+            ) {
+                return completed
+            }
+        } catch MacRecordingFileStoreError.audioConflict {
+            guard replacementAuthorized,
+                  try await existingAudioMatchesExpectedTarget(request: request, audioURL: recordingResources.audioURL) else {
+                throw MacRecordingFileStoreError.audioConflict
+            }
         }
 
         try validateNewAudioUpload(
@@ -1109,7 +1117,8 @@ final class MacRecordingFileStore {
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
             expectedChecksum: request.totalSHA256,
-            expectedFileSize: nil
+            expectedFileSize: nil,
+            allowDifferentExisting: true
         ) {
             return completed
         }
@@ -1206,7 +1215,8 @@ final class MacRecordingFileStore {
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
             expectedChecksum: totalSHA256,
-            expectedFileSize: nil
+            expectedFileSize: nil,
+            allowDifferentExisting: true
         ) {
             return completed
         }
@@ -1310,7 +1320,8 @@ final class MacRecordingFileStore {
             audioURL: recordingResources.audioURL,
             receiveURL: recordingResources.receiveURL,
             expectedChecksum: request.totalSHA256,
-            expectedFileSize: request.totalBytes
+            expectedFileSize: request.totalBytes,
+            allowDifferentExisting: true
         ) {
             return completed
         }
@@ -1377,7 +1388,11 @@ final class MacRecordingFileStore {
             guard isInsideAudioInboxDirectory(recordingResources.audioURL) else {
                 throw MacRecordingFileStoreError.unsafeDestination
             }
-            try fileManager.moveItem(at: partURL, to: recordingResources.audioURL)
+            if fileManager.fileExists(atPath: recordingResources.audioURL.path) {
+                _ = try fileManager.replaceItemAt(recordingResources.audioURL, withItemAt: partURL)
+            } else {
+                try fileManager.moveItem(at: partURL, to: recordingResources.audioURL)
+            }
             var record = try loadReceiveRecord(at: recordingResources.receiveURL)
             record.updatedAt = Date()
             record.sourceDeviceID = sourceDevice.id
@@ -2204,7 +2219,8 @@ final class MacRecordingFileStore {
         audioURL: URL,
         receiveURL: URL,
         expectedChecksum: String,
-        expectedFileSize: Int64?
+        expectedFileSize: Int64?,
+        allowDifferentExisting: Bool = false
     ) async throws -> ResumableAudioUploadSessionResponse? {
         guard fileManager.fileExists(atPath: audioURL.path) else {
             return nil
@@ -2212,6 +2228,7 @@ final class MacRecordingFileStore {
 
         let existingFileSize = fileSize(at: audioURL)
         if let expectedFileSize, existingFileSize != expectedFileSize {
+            if allowDifferentExisting { return nil }
             throw MacRecordingFileStoreError.audioConflict
         }
 
@@ -2221,6 +2238,7 @@ final class MacRecordingFileStore {
             persistentCacheEnabled: false
         )
         guard MacSecurityUtilities.constantTimeEquals(existingChecksum, expectedChecksum) else {
+            if allowDifferentExisting { return nil }
             throw MacRecordingFileStoreError.audioConflict
         }
 
@@ -2254,6 +2272,24 @@ final class MacRecordingFileStore {
             receiveStatus: record.status,
             processingStatus: record.processingStatus
         )
+    }
+
+    private func existingAudioMatchesExpectedTarget(
+        request: ResumableAudioUploadStartRequest,
+        audioURL: URL
+    ) async throws -> Bool {
+        guard fileManager.fileExists(atPath: audioURL.path),
+              let expectedHash = request.expectedTargetSHA256,
+              let expectedSize = request.expectedTargetSize,
+              fileSize(at: audioURL) == expectedSize else {
+            return false
+        }
+        let currentHash = try await canonicalAudioChecksum(
+            fileURL: audioURL,
+            logicalToken: "recording-\(request.recordingID)-audio-cas",
+            persistentCacheEnabled: false
+        )
+        return MacSecurityUtilities.constantTimeEquals(currentHash, expectedHash)
     }
 
     private func generatedResumableSessionID(

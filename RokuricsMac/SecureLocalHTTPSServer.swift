@@ -86,6 +86,8 @@ struct RecordingUploadRouteHandler {
 
     let requestVerifier: RequestVerifier
     let recordingFileStore: MacRecordingFileStore
+    let reconciliationStore: SyncReconciliationStore
+    let studyLibraryStore: StudyLibraryStore
     let onRecordingAccepted: (String, SyncTriggerReason) -> Void
 
     func metadataUploadResponse(
@@ -311,7 +313,31 @@ struct RecordingUploadRouteHandler {
         case .accepted(let device):
             do {
                 let request = try Self.recordingMetadataDecoder.decode(ResumableAudioUploadStartRequest.self, from: body)
-                let response = try await recordingFileStore.startResumableAudioUpload(request, sourceDevice: device)
+                guard let reconciliationRecordID = request.reconciliationRecordID,
+                      let record = reconciliationStore.record(objectID: "recordingAudio:\(request.recordingID)"),
+                      record.recordID == reconciliationRecordID,
+                      record.sourceDeviceID == device.id,
+                      record.requiresContentTransfer,
+                      record.sourceSHA256?.lowercased() == request.totalSHA256.lowercased(),
+                      record.sourceSize == request.totalBytes,
+                      record.sourceModifiedAt == request.sourceModifiedAt,
+                      record.targetSHA256?.lowercased() == request.expectedTargetSHA256?.lowercased(),
+                      record.targetSize == request.expectedTargetSize,
+                      record.targetModifiedAt == request.targetModifiedAt else {
+                    return Self.errorResponse(statusCode: 409, reason: "Conflict", error: "sync_transfer_mark_mismatch")
+                }
+                if let expectedTargetModifiedAt = request.targetModifiedAt {
+                    guard let currentTargetModifiedAt = studyLibraryStore.item(recordingID: request.recordingID)?.updatedAt,
+                          Int64(expectedTargetModifiedAt.timeIntervalSince1970) == Int64(currentTargetModifiedAt.timeIntervalSince1970) else {
+                        return Self.errorResponse(statusCode: 409, reason: "Conflict", error: "sync_target_version_stale")
+                    }
+                }
+                let response = try await recordingFileStore.startResumableAudioUpload(
+                    request,
+                    sourceDevice: device,
+                    replacementAuthorized: true
+                )
+                try? reconciliationStore.update(recordID: reconciliationRecordID, status: .transferring, transferID: response.sessionID)
                 onRecordingAccepted(request.recordingID, .syncStatusRefreshRequested)
                 return Self.jsonResponse(statusCode: 200, reason: "OK", body: response)
             } catch let error as MacRecordingFileStoreError {
@@ -1567,6 +1593,8 @@ final class SecureLocalHTTPSServer {
     private let requestVerifier: RequestVerifier
     private let receivedFileStore: ReceivedFileStore
     private let recordingFileStore: MacRecordingFileStore
+    private let macToIPhoneUploadStore: MacToIPhoneUploadStore
+    private let syncReconciliationStore: SyncReconciliationStore
     private let studyLibraryStore: StudyLibraryStore
     private let gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?
     private let deviceConnectionStatusStore: DeviceConnectionStatusStore
@@ -1624,6 +1652,8 @@ final class SecureLocalHTTPSServer {
         requestVerifier: RequestVerifier,
         receivedFileStore: ReceivedFileStore,
         recordingFileStore: MacRecordingFileStore,
+        macToIPhoneUploadStore: MacToIPhoneUploadStore? = nil,
+        syncReconciliationStore: SyncReconciliationStore? = nil,
         studyLibraryStore: StudyLibraryStore,
         gitBackedStudyMetadataStore: GitBackedStudyMetadataStore?,
         deviceConnectionStatusStore: DeviceConnectionStatusStore,
@@ -1676,6 +1706,10 @@ final class SecureLocalHTTPSServer {
         self.requestVerifier = requestVerifier
         self.receivedFileStore = receivedFileStore
         self.recordingFileStore = recordingFileStore
+        self.macToIPhoneUploadStore = macToIPhoneUploadStore
+            ?? MacToIPhoneUploadStore(rootURL: recordingFileStore.libraryRootURL)
+        self.syncReconciliationStore = syncReconciliationStore
+            ?? SyncReconciliationStore(rootURL: recordingFileStore.libraryRootURL)
         self.studyLibraryStore = studyLibraryStore
         self.gitBackedStudyMetadataStore = gitBackedStudyMetadataStore
         self.deviceConnectionStatusStore = deviceConnectionStatusStore
@@ -1944,6 +1978,8 @@ final class SecureLocalHTTPSServer {
         RecordingUploadRouteHandler(
             requestVerifier: requestVerifier,
             recordingFileStore: recordingFileStore,
+            reconciliationStore: syncReconciliationStore,
+            studyLibraryStore: studyLibraryStore,
             onRecordingAccepted: onRecordingAccepted
         )
     }
@@ -2501,6 +2537,14 @@ final class SecureLocalHTTPSServer {
         case ("POST", "/connection/probe"):
             Task { @MainActor [weak self] in
                 self?.handleConnectionProbeRequest(request, on: connection)
+            }
+        case ("POST", "/upload/mac-to-iphone/chunk"):
+            Task(priority: .utility) { [weak self] in
+                await self?.handleMacToIPhoneUploadChunkRequest(request, on: connection)
+            }
+        case ("POST", "/upload/mac-to-iphone/ack"):
+            Task(priority: .utility) { [weak self] in
+                await self?.handleMacToIPhoneUploadAckRequest(request, on: connection)
             }
         case ("POST", "/sync/device-status"):
             Task(priority: .utility) { [weak self] in
@@ -3193,6 +3237,9 @@ final class SecureLocalHTTPSServer {
            var heartbeatResponse = decodedHeartbeatResponse {
             let heartbeatRequest = try? await Self.decodeSyncBodyOffMain(ConnectionHeartbeatRequest.self, from: request.body)
             if let heartbeatRequest {
+                heartbeatResponse.macToIPhoneUploadOffer = macToIPhoneUploadStore.nextOffer(
+                    targetDeviceID: heartbeatRequest.deviceID
+                )
                 consumePeerSyncRunStatus(
                     heartbeatRequest.syncRunStatus,
                     deviceID: heartbeatRequest.deviceID
@@ -3361,6 +3408,67 @@ final class SecureLocalHTTPSServer {
             )
         }
         sendRouteResponse(response, on: connection)
+    }
+
+    private func handleMacToIPhoneUploadChunkRequest(_ request: HTTPRequest, on connection: NWConnection) async {
+        switch await requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let chunkRequest = try await Self.decodeSyncBodyOffMain(MacToIPhoneUploadChunkRequest.self, from: request.body)
+                guard chunkRequest.deviceID == device.id else {
+                    sendError(statusCode: 400, reason: "Bad Request", error: "device_id_mismatch", on: connection)
+                    return
+                }
+                let response = try macToIPhoneUploadStore.chunk(
+                    transferID: chunkRequest.transferID,
+                    targetDeviceID: device.id,
+                    offset: chunkRequest.offset,
+                    length: chunkRequest.length
+                )
+                sendJSON(statusCode: 200, reason: "OK", body: response, on: connection)
+            } catch {
+                sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
+            }
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
+    }
+
+    private func handleMacToIPhoneUploadAckRequest(_ request: HTTPRequest, on connection: NWConnection) async {
+        switch await requestVerifier.verify(method: request.method, path: request.path, headers: request.headers, body: request.body) {
+        case .accepted(let device):
+            do {
+                let ack = try await Self.decodeSyncBodyOffMain(MacToIPhoneUploadAckRequest.self, from: request.body)
+                guard ack.deviceID == device.id else {
+                    sendError(statusCode: 400, reason: "Bad Request", error: "device_id_mismatch", on: connection)
+                    return
+                }
+                let offer = try macToIPhoneUploadStore.acknowledge(ack)
+                if let recordID = offer.reconciliationRecordID {
+                    try? syncReconciliationStore.update(
+                        recordID: recordID,
+                        status: .transferredAwaitingVerification,
+                        transferID: offer.transferID,
+                        proof: SyncReconciliationCompletionProof(
+                            transferID: offer.transferID,
+                            verifiedSHA256: ack.checksum,
+                            verifiedSize: ack.size,
+                            verifiedAt: ack.completedAt
+                        )
+                    )
+                }
+                sendJSON(
+                    statusCode: 200,
+                    reason: "OK",
+                    body: MacToIPhoneUploadAckResponse(ok: true, transferID: ack.transferID, disposition: "completed", error: nil),
+                    on: connection
+                )
+            } catch {
+                sendError(statusCode: 400, reason: "Bad Request", error: error.localizedDescription, on: connection)
+            }
+        case .rejected(let reason):
+            sendError(statusCode: 400, reason: "Bad Request", error: reason, on: connection)
+        }
     }
 
     @MainActor
@@ -4112,7 +4220,8 @@ final class SecureLocalHTTPSServer {
     func localNetworkSyncInventoryResponseForVerifiedDevice(
         _ device: PairedDevice,
         syncRunID: String? = nil,
-        requestEnvelope: CanonicalStatusExchangeEnvelope? = nil
+        requestEnvelope: CanonicalStatusExchangeEnvelope? = nil,
+        peerInventory: LocalNetworkSyncInventory? = nil
     ) async -> LocalNetworkSyncInventoryResponse {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "inventory")
         await consumeCanonicalStatusExchangeEnvelope(
@@ -4154,6 +4263,29 @@ final class SecureLocalHTTPSServer {
         }
         emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         let inventory = await makeLocalNetworkSyncInventory(shadowTrigger: "sync-inventory", shadowSyncRunID: syncRunID, sourceKind: .inventoryRequest)
+        if let peerInventory {
+            let reconciliationPlan = await Task.detached(priority: .utility) {
+                SyncReconciliationPlanner().plan(
+                    local: inventory.syncCoreInventory,
+                    peer: peerInventory.syncCoreInventory,
+                    syncRunID: syncRunID
+                )
+            }.value
+            do {
+                try syncReconciliationStore.apply(
+                    plan: reconciliationPlan,
+                    localDeviceID: inventory.device.deviceID,
+                    syncRunID: syncRunID
+                )
+            } catch {
+                return LocalNetworkSyncInventoryResponse(
+                    ok: false,
+                    inventory: nil,
+                    statusExchangeEnvelope: nil,
+                    error: "reconciliation_persistence_failed"
+                )
+            }
+        }
         await produceCanonicalStatusFactsFromInventory(inventory, device: device, syncRunID: syncRunID)
         let responseEnvelope = await makeOutgoingCanonicalStatusExchangeEnvelope(
             destinationNodeID: nil,
@@ -5314,7 +5446,8 @@ final class SecureLocalHTTPSServer {
                 body: await localNetworkSyncInventoryResponseForVerifiedDevice(
                     device,
                     syncRunID: syncRunID,
-                    requestEnvelope: inventoryRequest?.statusExchangeEnvelope
+                    requestEnvelope: inventoryRequest?.statusExchangeEnvelope,
+                    peerInventory: inventoryRequest?.localInventory
                 ),
                 on: connection
             )
@@ -5690,6 +5823,21 @@ final class SecureLocalHTTPSServer {
                 response: response
             )
         }
+        if response.statusCode == 200,
+           let finalizeRequest = try? Self.syncJSONDecoder.decode(ResumableAudioUploadFinalizeRequest.self, from: requestBody),
+           let recordID = finalizeRequest.reconciliationRecordID {
+            try? syncReconciliationStore.update(
+                recordID: recordID,
+                status: .transferredAwaitingVerification,
+                transferID: finalizeRequest.sessionID,
+                proof: SyncReconciliationCompletionProof(
+                    transferID: finalizeRequest.sessionID,
+                    verifiedSHA256: finalizeRequest.totalSHA256,
+                    verifiedSize: finalizeRequest.totalBytes,
+                    verifiedAt: Date()
+                )
+            )
+        }
     }
 
     private func produceMacTransferFinalizeProofFactIfPresent(
@@ -5819,7 +5967,9 @@ final class SecureLocalHTTPSServer {
              "/upload-recording-audio-session/status",
              "/upload-recording-audio-session/finalize":
             return 256 * 1024
-        case "/sync/apply", "/sync/apply-metadata":
+        case "/upload/mac-to-iphone/chunk", "/upload/mac-to-iphone/ack":
+            return 64 * 1024
+        case "/sync/inventory", "/sync/apply", "/sync/apply-metadata":
             return 4 * 1024 * 1024
         case "/sync/start", "/sync/start-ack":
             return 64 * 1024

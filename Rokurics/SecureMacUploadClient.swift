@@ -484,6 +484,32 @@ final class SecureMacUploadClient: ObservableObject {
         )
     }
 
+    func pullMacToIPhoneUploadChunk(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadChunkRequest
+    ) async throws -> MacToIPhoneUploadChunkResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/upload/mac-to-iphone/chunk",
+            body: request,
+            requestTimeout: 10,
+            resourceTimeout: 20
+        )
+    }
+
+    func acknowledgeMacToIPhoneUpload(
+        settings: SecureMacConnectionSnapshot,
+        request: MacToIPhoneUploadAckRequest
+    ) async throws -> MacToIPhoneUploadAckResponse {
+        try await postSignedJSON(
+            settings: settings,
+            path: "/upload/mac-to-iphone/ack",
+            body: request,
+            requestTimeout: 5,
+            resourceTimeout: 8
+        )
+    }
+
     func sendConnectionProbe(
         settings: SecureMacConnectionSnapshot,
         request: ConnectionProbeRequest,
@@ -561,6 +587,7 @@ final class SecureMacUploadClient: ObservableObject {
                 deviceID: localInventory.device.deviceID,
                 generatedAt: Date(),
                 localInventoryHash: localInventory.inventoryHash,
+                localInventory: localInventory,
                 syncRunID: syncRunID,
                 statusExchangeEnvelope: statusExchangeEnvelope
             ),
