@@ -1,0 +1,14 @@
+{
+  "activeSyncRunID" : "7DCB7639-D3BE-4B0D-8536-76EC7C9E05B2",
+  "deviceID" : "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6",
+  "failedChanges" : 2,
+  "lastError" : "sync_control_plane_timeout",
+  "lastPulledAt" : "2026-07-12T12:02:26Z",
+  "lastPushedAt" : "2026-07-15T15:02:01Z",
+  "lastRemoteManifestHash" : "09430bc0734c31c8a013f842e03d29124a1a096af3f0e37698f363541f8d04f0",
+  "lastSuccessfulSyncAt" : "2026-07-15T15:02:01Z",
+  "pendingLocalChanges" : 2,
+  "pendingUploads" : 3,
+  "syncControlPlaneState" : "failed",
+  "syncControlPlaneUpdatedAt" : "2026-07-17T14:09:34Z"
+}

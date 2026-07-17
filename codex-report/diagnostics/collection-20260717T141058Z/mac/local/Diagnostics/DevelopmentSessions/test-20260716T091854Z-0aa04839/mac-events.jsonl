@@ -1,0 +1,3 @@
+{"details":{"dominantSubphase":"projectionRebuildMs","errorCategory":"explicitRefresh","totalMs":"1"},"event":"subphaseMeasured","node":"Mac","schemaVersion":1,"sessionID":"test-20260716T091854Z-0aa04839","severity":"info","subsystem":"connectionSync","timestamp":"2026-07-16T09:18:54Z"}
+{"details":{"host":"macbook-pro.local","port":"8793"},"event":"appLaunch","node":"Mac","schemaVersion":1,"sessionID":"test-20260716T091854Z-0aa04839","severity":"info","subsystem":"connectionSync","timestamp":"2026-07-16T09:18:54Z"}
+{"details":{"host":"macbook-pro.local","port":"8793"},"event":"appBecameActive","node":"Mac","schemaVersion":1,"sessionID":"test-20260716T091854Z-0aa04839","severity":"info","subsystem":"connectionSync","timestamp":"2026-07-16T09:18:54Z"}

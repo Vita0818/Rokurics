@@ -1,0 +1,182 @@
+{
+  "files": [
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/application-support-diagnostics/DevelopmentSessions/test-20260712T115036Z-70986853/iphone-events.jsonl",
+      "validLines": 10546
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/application-support-diagnostics/DevelopmentSessions/test-20260715T150056Z-f5344efe/iphone-events.jsonl",
+      "validLines": 2713
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/application-support-diagnostics/DevelopmentSessions/test-20260717T140818Z-2a34b412/iphone-events.jsonl",
+      "validLines": 1857
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/application-support-diagnostics/connection-diagnostics.jsonl",
+      "validLines": 215
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/documents-diagnostics/canonical-shadow.jsonl",
+      "validLines": 177
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/documents-diagnostics/upload-trace.jsonl",
+      "validLines": 13635
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "iphone/documents-diagnostics/upload-trace.jsonl.1",
+      "validLines": 49582
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260712T115019Z-aefc14ae/mac-events.jsonl",
+      "validLines": 23
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260712T115036Z-70986853/mac-events.jsonl",
+      "validLines": 24833
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260715T150056Z-f5344efe/mac-events.jsonl",
+      "validLines": 4884
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260715T150117Z-2c227e35/mac-events.jsonl",
+      "validLines": 19
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T080008Z-8e218626/mac-events.jsonl",
+      "validLines": 18
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T080009Z-7c526fff/mac-events.jsonl",
+      "validLines": 18
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T080037Z-36e96860/mac-events.jsonl",
+      "validLines": 18
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091853Z-7ea64c4d/mac-events.jsonl",
+      "validLines": 32
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091854Z-0aa04839/mac-events.jsonl",
+      "validLines": 3
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091854Z-14a99f6e/mac-events.jsonl",
+      "validLines": 20
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091854Z-745cc29b/mac-events.jsonl",
+      "validLines": 17
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091854Z-7f40bdcc/mac-events.jsonl",
+      "validLines": 6
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T091854Z-f837f217/mac-events.jsonl",
+      "validLines": 13
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T092022Z-300fd9a5/mac-events.jsonl",
+      "validLines": 30
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T092050Z-a573b473/mac-events.jsonl",
+      "validLines": 18
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260716T092252Z-af62f38d/mac-events.jsonl",
+      "validLines": 18
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260717T140724Z-b62dfdc2/mac-events.jsonl",
+      "validLines": 49
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/DevelopmentSessions/test-20260717T140818Z-2a34b412/mac-events.jsonl",
+      "validLines": 1989
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/canonical-shadow.jsonl",
+      "validLines": 124
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/Diagnostics/connection-diagnostics.jsonl",
+      "validLines": 247
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/system/upload-trace.jsonl",
+      "validLines": 8772
+    },
+    {
+      "invalidLineCount": 0,
+      "invalidLines": [],
+      "path": "mac/local/system/upload-trace.jsonl.1",
+      "validLines": 12782
+    }
+  ],
+  "filesChecked": 29,
+  "invalidLines": 0,
+  "schemaVersion": 1,
+  "validLines": 132658
+}

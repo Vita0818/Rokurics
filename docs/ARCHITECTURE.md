@@ -1,20 +1,36 @@
 # ARCHITECTURE
 
-最近自查日期：2026-07-12
+最近自查日期：2026-07-17
+
+## 2026-07-17 conflict execution plan 与 durable run 终态
+
+同步 discovery plan 与本轮可执行 metadata plan 现在是两个明确层次。完整 plan 保留所有 actions 与 `conflictActions`，用于 reconciliation、run summary、诊断和调用方展示；`/sync/apply-metadata` 只消费由 `conflictIsolatedExecutionPlan` 从完整 plan 派生的执行 plan。隔离算法对 folder、item、recording、artifact 的所有权和引用关系做闭包，凡依赖图触及 conflict 的 action 都不执行，互不相关的 action 不受影响。这样历史 conflict 不会混入新录音的 metadata shell，同时不丢失 conflict 事实，也不改变接收端真实 partial failure 必须失败的合同。
+
+tick 与 scheduler 内部使用三态结果：`completed` 表示本轮 inventory/diff/必要 apply 完成；`retryableFailure` 表示可在现有 durable FIFO 中等待下一次触发；`terminalObsolete(errorCode: "stale_sync_run")` 表示 Mac 已 supersede 该相关 run。两处 durable consumer 对 terminal-obsolete 执行持久终止消费与 bounded dedupe，不记同步成功，也不进入 retry/backoff。该分类只接受 `SecureMacUploadError.serverRejected` 的精确规范化错误码；普通网络错误、其他 server reject 和 metadata apply 错误不能借此逃逸重试/失败语义。
+
+## 2026-07-16 correlated run 排序与目标端 metadata-only 卡片恢复
+
+Mac manual sync 的 `syncStartSignal.syncRunID` 是一次跨端 correlated run 的身份，不是普通 `syncRequested` hint。iPhone heartbeat 的处理顺序固定为：验证 response -> 持久化 correlated run -> 发布 heartbeat success/online -> scheduler drain -> 成功入队后发送同 ID ACK。同一 heartbeat 的 generic `syncRequested`、`enqueueRunSyncSoon` 或 `requestFullInventory` 只作为相同 run 的合并提示，不能另建无 ID run。correlated drain 必须把该原始 ID 直接传给 inventory tick，不能调用普通 manual path 生成新 ID，也不能向 Mac 二次发送 `/sync/start`。
+
+iPhone 的手动 coordinator 与 AppService scheduler 共用 `LocalNetworkSyncRunExecutionGate`。correlated/manual/event run 串行等待；手动 follow-up 每轮 release/reacquire，不能越过已经等待的 correlated run；foreground/timer 自动 tick 只 `tryAcquire`，gate 忙即跳过。App 激活或 pairing/connection-intent 改变会建立 heartbeat freshness floor；持久的旧 online 状态只可用于展示，只有 `lastSuccessfulHeartbeatAt >= activationStartedAt` 才能启动 scheduler、retry drainer 或即时 event drain。取得 gate 后还会重新验证 active/presence/freshness。scheduler handler 返回真实 tick 成败，durable request 只有成功才进入 completed dedupe；失败回到 FIFO 队首，等待下一次 heartbeat/状态/显式事件，不以固定短间隔自旋。周期 scheduler 启动后先等待一个完整 interval，foreground work 由显式路径负责。
+
+Inventory transport 的幂等键为已验证 device ID + `syncRunID` + peer inventory hash。客户端短暂断线/超时只重试一次同一 snapshot/run；Mac 对同 key 的并发请求先 join 单一 in-flight build，完成后再写入有界 response cache，并且只在 active control-plane run 仍匹配时复用。签名、timestamp、nonce、body hash 与 `RequestVerifier` 每次请求仍先执行，in-flight/cache 都不绕过安全验证，也不允许 superseded run 复活。JSON response 以 Network.framework final message 完整关闭连接。
+
+目标端可见性复用原有数据与 UI 链路：iPhone 的 `uploadLocalMetadataIfNeeded` 针对当前 `plan.uploadMetadataActions` 构造 action-scoped manifest，经既有 `/sync/apply-metadata` 到达 `StudyLibraryStore.applySyncManifest`；Mac 写入 receiver-local `syncedMetadataOnly` 后，项目进入 `effectiveStudyItems`，由现有 `MacStudyRecordingCard` 渲染，缺少本地音频时继续使用 `StudyRecordingTransferProgressView`。这条链路不从 reconciliation ledger 在 View 层另建 projection/section/card，不传输文件 bytes，也不创建 placeholder 或 upload job。
 
 ## 双端交换产品契约：连接、同步、上传（2026-07-12）
 
-本节是 iPhone 与 Mac 双端交换的产品级权威定义。本文及其他项目文档中较早的 `fullSync`、canonical sync、metadata apply、artifact download、audio bootstrap 等历史描述，只用于记录历史实现，不得覆盖本节对“连接”“同步”“上传”的定义。2026-07-12 源码已按本节完成拆层；真机运行只用于补充体验与网络证据，不是源码修复未完成项，见 `CURRENT_STATE.md` 和 `SYNC_STATE_AUDIT.md`。
+本节是 iPhone 与 Mac 双端交换的产品级权威定义。本文及其他项目文档中较早的 `fullSync`、canonical sync、bulk metadata apply、artifact download、audio bootstrap 等历史描述，只用于记录历史实现，不得覆盖本节对“连接”“同步”“上传”的定义。当前唯一 apply 例外是为既有 metadata-only 卡片发送一次 action-scoped metadata shell；它不是内容传输。真机运行只用于补充体验与网络证据，见 `CURRENT_STATE.md` 和 `SYNC_STATE_AUDIT.md`。
 
 | 层次 | 用户入口/触发 | 允许交换的内容 | 允许的副作用 | 成功含义 |
 | --- | --- | --- | --- | --- |
 | 连接（Connection） | 配对后的连接检查、heartbeat | 建立可信通信所需的短握手、身份、能力和在线状态字段 | 更新连接/presence 状态 | 两端可以在现有 TLS pinning、HMAC、timestamp、nonce、body hash 和 `RequestVerifier` 边界内通信 |
-| 同步（Sync） | 连接页“立即同步” | 学习库 inventory：稳定对象/文件标识、逻辑文件名、内容 hash、byte size、业务修改时间、版本、tombstone/删除标记及计算 diff 所需的最小字段 | 更新 sync run、快照、差异结果和逐对象 reconciliation record；不写学习库内容 | 按稳定 ID 和 LWW 产出差异、source、target 与待传输/待更新标记 |
+| 同步（Sync） | 连接页“立即同步” | 学习库 inventory，以及当前 plan 所需的 action-scoped metadata shell | 更新 sync run、快照、差异结果、逐对象 reconciliation record，并在接收端保存 metadata-only item | 按稳定 ID 和 LWW 产出差异，并使目标端既有卡片可见；不代表内容已接收 |
 | 上传（Upload / Content Transfer） | 用户在来源端学习库对同步选定版本点击“上传” | 实际文件 bytes，以及完成该次内容传输所必需的校验、分块、续传和 finalize 字段 | 消费 reconciliation record，将内容从 source 传到 target，并在校验成功后落盘和写完成证明 | 目标端已接收并校验同步层选定的版本；下一轮一致性同步清除标记 |
 
 连接层不得扫描学习库、构建 inventory、计算文件 hash、读写学习库对象或创建上传任务。连接成功只证明可通信，不证明同步成功，也不证明任一文件存在于对端。
 
-同步层对学习库内容是只读发现过程，不是数据应用过程；仅 reconciliation ledger 属于允许的同步状态写入：
+同步层对文件内容保持只读；允许的对象级写入只有 reconciliation ledger 与 receiver-local metadata-only shell：
 
 - 每端每个 `syncRunID` 至多构建一个一致性 inventory snapshot，并只执行一次业务 diff；同一轮中的响应和汇总诊断必须复用结果，不得再跑 canonical/legacy 双 planner、shadow migration，也不得为每个对象或 artifact 重建全库 inventory。
 - 文件未变化时必须复用持久 checksum cache；cache key 至少受稳定逻辑标识、byte size、业务/文件修改事实、内容版本、算法和 schema 约束。只有 cache miss 或已证实失效的条目才允许离主线程重新读取内容计算 hash。
@@ -22,15 +38,15 @@
 - diff 必须先按稳定 `objectID` 对齐，再把新增、删除、内容 hash 不同、rename-only、相同、时间并列和信息不足分别表示。稳定 ID 相同即为同一业务对象，名称和内容变化都只是版本变化。
 - 两端版本可比较时统一采用业务 `modifiedAt` 的 Last-Write-Wins：较新端为 source、较旧端为 target；即使双方都修改也不因此自动成为 conflict。hash 不同且时间相同，或内容对象缺 hash/size 时必须 deferred，禁止静默覆盖。删除必须依赖 tombstone/版本事实，不能仅凭某端暂时缺少对象就执行删除。
 - 双端对同一对 inventory 必须运行同一 `SyncReconciliationPlanner`，得到方向无关的确定性 record ID、source、target、expected hash/size/modifiedAt 和 reason。两端分别把相关记录原子写入 `Sync/Reconciliation/records.json`；存储有 schema version、上限和损坏 fail-closed 行为，不保存文件内容、绝对路径或凭据。
-- 同步不得调用 metadata apply、artifact request/put、recording audio upload/download、学习库/内容文件写入、placeholder 创建、学习库 merge/save、物理删除、上传 retry drainer 或内容 finalize。
-- conflict 是成功同步得到的一类差异结果，不是同步传输失败。同步失败只表示连接/鉴权、inventory 构建、协议解码/校验或 diff 计算本身未能完成。
-- “立即同步”完成后只能展示或持久化差异与待处理标记；不得自动传输文件或执行这些差异。
+- 同步唯一允许的 apply 是针对当前 `plan.uploadMetadataActions` 的单次 `/sync/apply-metadata`；manifest 必须 action-scoped，只含必要 recording/item/folder metadata 关系。仍禁止 artifact request/put、recording audio upload/download、placeholder、物理删除、upload job、retry drainer 和内容 finalize。
+- conflict 是成功同步得到的一类差异结果，不是内容传输失败。连接/鉴权、inventory、协议、diff，以及本轮 scoped metadata shell 的构造、鉴权或 apply 失败可令当前 sync run 失败；独立 artifact/audio/finalize 失败不得覆盖已完成的 sync。
+- “立即同步”完成后可以让目标端既有 metadata-only 卡片出现；不得自动传输文件或把该卡片当作 audio available/completed proof。
 
-上传层是独立的双向内容传输状态机。产品文案沿用“上传”，但架构含义是用户明确触发的 selected-content transfer，并不限定为 iPhone -> Mac。按钮只能读取当前设备为 `sourceDeviceID` 的有效 reconciliation record；目标端只显示等待接收，不得反向猜测方向。创建 job 前必须对来源 hash/size/modifiedAt 做 CAS 校验，job 必须保存 record ID 和目标旧版本 proof；目标端安装前再次校验 expected target，完成 checksum/size/finalize 后将记录推进为 `transferredAwaitingVerification`。来源版本已改变则标记 `staleSourceVersion` 并要求重同步。上传失败不得把已经成功产出 diff 的同步改写为失败。
+上传层是独立的双向内容传输状态机。产品文案沿用“上传”，但架构含义是用户明确触发的 selected-content transfer，并不限定为 iPhone -> Mac。按钮只能读取当前设备为 `sourceDeviceID` 的有效 reconciliation record；目标端 metadata-only item 只进入既有卡片，不得反向猜测方向或声称内容已到达。创建 job 前必须对来源 hash/size/modifiedAt 做 CAS 校验，job 必须保存 record ID 和目标旧版本 proof；目标端安装前再次校验 expected target，完成 checksum/size/finalize 后将记录推进为 `transferredAwaitingVerification`。来源版本已改变则标记 `staleSourceVersion` 并要求重同步。上传失败不得把已经成功产出 diff 的同步改写为失败。
 
 Mac -> iPhone 仍保持网络拓扑为 iPhone client -> Mac HTTPS server：Mac 按钮创建 durable offer，已验证 heartbeat 只携带 transfer ID、方向、对象 ID、hash、size 等短 descriptor；iPhone 收到后通过独立 `/upload/mac-to-iphone/chunk` 拉取内容并以 `/upload/mac-to-iphone/ack` 提交最终 checksum/size proof。此设计不是 Mac 反向连接，也不属于 sync payload。
 
-UI 语义必须固定：连接页“立即同步”只运行 inventory exchange + diff；学习库内“上传”才允许运行文件内容传输。后台 heartbeat、app activation、列表/详情刷新、周期 tick 和普通同步均不得代替用户点击学习库“上传”而创建新的内容传输任务。
+UI 语义必须固定：连接页“立即同步”运行 inventory exchange、diff 和必要的 scoped metadata-shell apply，可以使既有 metadata-only 录音卡片出现；学习库内“上传”才允许运行文件内容传输。后台 heartbeat、app activation、列表/详情刷新、周期 tick 和普通同步均不得代替用户点击学习库“上传”而创建新的内容传输任务，也不得新增平行的 pending UI。
 
 ## 2026-07-12 开发诊断架构
 

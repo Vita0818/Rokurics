@@ -1038,7 +1038,22 @@ struct RokuricsMacTests {
             transcriptMarkdownRelativePath: nil,
             transcriptionError: nil
         )
-        let completed = makeInboxItem(transcriptionStatus: "notStarted", transcriptionError: nil, hasAudio: true)
+        let completed = MacRecordingInboxItem(
+            id: "incoming-audio-completed",
+            title: "已接收",
+            receivedAt: Date(timeIntervalSince1970: 12),
+            duration: 5,
+            fileSize: 2048,
+            sourceDeviceName: "iPhone",
+            audioChecksum: String(repeating: "a", count: 64),
+            transcriptionStatus: "notStarted",
+            noteStatus: "notGenerated",
+            receiveStatus: "completed",
+            hasAudio: true,
+            transcriptRelativePath: nil,
+            transcriptMarkdownRelativePath: nil,
+            transcriptionError: nil
+        )
         let explicitProgressItem = MacRecordingInboxItem(
             id: "incoming-audio-transfer",
             title: "接收中",
@@ -1068,7 +1083,7 @@ struct RokuricsMacTests {
         #expect(item.localNetworkReceiveTransferProgress?.state == .transferring)
         #expect(item.localNetworkReceiveTransferProgress?.isVisibleInActionArea == true)
         #expect(item.localNetworkReceiveTransferProgress?.totalBytes == 2048)
-        #expect(item.localNetworkReceiveTransferProgress?.statusText == "正在接收")
+        #expect(item.localNetworkReceiveTransferProgress?.statusText == RokuricsCopy.text("正在接收", "Receiving"))
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.state == .transferring)
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.progressFraction == 0.5)
         #expect(explicitProgressItem.localNetworkReceiveTransferProgress?.receivedBytes == 1024)
@@ -4797,6 +4812,12 @@ struct RokuricsMacTests {
         let uploadHandler = RecordingUploadRouteHandler(
             requestVerifier: requestVerifier,
             recordingFileStore: recordingStore,
+            reconciliationStore: SyncReconciliationStore(rootURL: recordingStore.libraryRootURL),
+            studyLibraryStore: StudyLibraryStore(
+                rootURL: recordingStore.libraryRootURL,
+                recordingFileStore: recordingStore,
+                listenForInboxChanges: false
+            ),
             onRecordingAccepted: { recordingID, reason in
                 acceptedRecordingIDs.append(recordingID)
                 acceptedReasons.append(reason)
@@ -5194,6 +5215,12 @@ struct RokuricsMacTests {
         let uploadHandler = RecordingUploadRouteHandler(
             requestVerifier: requestVerifier,
             recordingFileStore: recordingStore,
+            reconciliationStore: SyncReconciliationStore(rootURL: recordingStore.libraryRootURL),
+            studyLibraryStore: StudyLibraryStore(
+                rootURL: recordingStore.libraryRootURL,
+                recordingFileStore: recordingStore,
+                listenForInboxChanges: false
+            ),
             onRecordingAccepted: { _, _ in Issue.record("unpaired upload must not be accepted") }
         )
         let unpairedDevice = PairedDevice(
@@ -6495,6 +6522,12 @@ struct RokuricsMacTests {
         let handler = RecordingUploadRouteHandler(
             requestVerifier: verifier,
             recordingFileStore: store,
+            reconciliationStore: SyncReconciliationStore(rootURL: store.libraryRootURL),
+            studyLibraryStore: StudyLibraryStore(
+                rootURL: store.libraryRootURL,
+                recordingFileStore: store,
+                listenForInboxChanges: false
+            ),
             onRecordingAccepted: { _, _ in }
         )
         return (handler, store, rootURL, device)

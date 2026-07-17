@@ -1537,6 +1537,34 @@ final class SecureLocalHTTPSServer {
         case invalid(String)
     }
 
+    private struct SyncInventoryResponseCacheKey: Hashable {
+        let deviceID: String
+        let syncRunID: String
+    }
+
+    private struct CachedSyncInventoryResponse {
+        let peerInventoryHash: String?
+        let response: LocalNetworkSyncInventoryResponse
+    }
+
+    private struct InFlightSyncInventoryResponse {
+        let id: UUID
+        let peerInventoryHash: String?
+        let state: InFlightSyncInventoryResponseState
+        let task: Task<LocalNetworkSyncInventoryResponse, Never>
+    }
+
+    @MainActor
+    private final class InFlightSyncInventoryResponseState {
+        var didEstablishControlPlane = false
+    }
+
+    private enum SyncInventoryResponseCacheLookup {
+        case miss
+        case hit(LocalNetworkSyncInventoryResponse)
+        case inventoryMismatch
+    }
+
     private struct HealthResponse: Encodable {
         let ok: Bool
         let service: String
@@ -1631,6 +1659,7 @@ final class SecureLocalHTTPSServer {
     private let onUploadAccepted: UploadAcceptedHandler
     private let onRecordingAccepted: RecordingAcceptedHandler
     private let onConnectionDiagnostic: ConnectionDiagnosticHandler
+    private let onSyncInventoryResponseBuildStarted: (@MainActor @Sendable () async -> Void)?
     private let queue = DispatchQueue(label: "RokuricsMac.SecureLocalHTTPSServer")
     private let backgroundWriteQueue = DispatchQueue(label: "RokuricsMac.SecureLocalHTTPSServer.BackgroundWrite", qos: .utility)
     private let maxHeaderBytes = 16 * 1024
@@ -1641,6 +1670,10 @@ final class SecureLocalHTTPSServer {
     private var listener: NWListener?
     private var activeConnections: [UUID: NWConnection] = [:]
     private var deferredStatusExchangeRunSyncSoonDeviceIDs: Set<String> = []
+    private var syncInventoryResponseCache: [SyncInventoryResponseCacheKey: CachedSyncInventoryResponse] = [:]
+    private var syncInventoryResponseCacheOrder: [SyncInventoryResponseCacheKey] = []
+    private var inFlightSyncInventoryResponses: [SyncInventoryResponseCacheKey: InFlightSyncInventoryResponse] = [:]
+    private let maximumSyncInventoryResponseCacheEntries = 32
     private let listenerStateLock = NSLock()
     private var listenerIsReady = false
     private var listenerActivePort: Int?
@@ -1689,7 +1722,8 @@ final class SecureLocalHTTPSServer {
         canonicalAudioUploadCutoverExecutor: MacAudioUploadCutoverExecutor? = nil,
         canonicalStatusTruthRuntime: CanonicalStatusTruthRuntime? = nil,
         canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
-        canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil
+        canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil,
+        onSyncInventoryResponseBuildStarted: (@MainActor @Sendable () async -> Void)? = nil
     ) {
         let resolvedStatusTruthRuntime = canonicalStatusTruthRuntime ?? CanonicalStatusTruthRuntime()
         let resolvedConnectionRuntime = canonicalConnectionRuntime ?? CanonicalConnectionRuntime(
@@ -1749,6 +1783,7 @@ final class SecureLocalHTTPSServer {
         self.onUploadAccepted = onUploadAccepted
         self.onRecordingAccepted = onRecordingAccepted
         self.onConnectionDiagnostic = onConnectionDiagnostic
+        self.onSyncInventoryResponseBuildStarted = onSyncInventoryResponseBuildStarted
         studyLibraryStore.setCanonicalReadRuntimeConfiguration(canonicalReadRuntimeConfiguration)
     }
 
@@ -4221,7 +4256,132 @@ final class SecureLocalHTTPSServer {
         _ device: PairedDevice,
         syncRunID: String? = nil,
         requestEnvelope: CanonicalStatusExchangeEnvelope? = nil,
-        peerInventory: LocalNetworkSyncInventory? = nil
+        peerInventory: LocalNetworkSyncInventory? = nil,
+        peerInventoryHash: String? = nil
+    ) async -> LocalNetworkSyncInventoryResponse {
+        let normalizedPeerInventoryHash = Self.normalizedInventoryHash(peerInventoryHash)
+        let computedPeerInventoryHash = peerInventory.flatMap { Self.normalizedInventoryHash($0.inventoryHash) }
+        if let normalizedPeerInventoryHash,
+           !Self.isValidInventoryHash(normalizedPeerInventoryHash) {
+            return syncRunInventoryMismatchResponse()
+        }
+        if let normalizedPeerInventoryHash,
+           let computedPeerInventoryHash,
+           normalizedPeerInventoryHash != computedPeerInventoryHash {
+            return syncRunInventoryMismatchResponse()
+        }
+        let resolvedPeerInventoryHash = computedPeerInventoryHash ?? normalizedPeerInventoryHash
+        if let cacheKey = syncInventoryResponseCacheKey(deviceID: device.id, syncRunID: syncRunID) {
+            switch syncInventoryResponseCacheLookup(
+                key: cacheKey,
+                peerInventoryHash: resolvedPeerInventoryHash
+            ) {
+            case .miss:
+                break
+            case .hit(let cachedResponse):
+                emitConnectionDiagnostic(
+                    phase: "syncInventoryResponseCacheHit",
+                    listenerState: "ready",
+                    activePort: activePort,
+                    requestDeviceIDPrefix: device.idPrefix,
+                    syncRunID: syncRunID
+                )
+                return cachedResponse
+            case .inventoryMismatch:
+                emitConnectionDiagnostic(
+                    phase: "syncInventoryResponseCacheRejected",
+                    listenerState: "ready",
+                    activePort: activePort,
+                    requestDeviceIDPrefix: device.idPrefix,
+                    syncRunID: syncRunID,
+                    errorCode: "sync_run_inventory_mismatch"
+                )
+                return syncRunInventoryMismatchResponse()
+            }
+        }
+        if let cacheKey = syncInventoryResponseCacheKey(deviceID: device.id, syncRunID: syncRunID) {
+            if let inFlightResponse = inFlightSyncInventoryResponses[cacheKey] {
+                let syncState = syncStateStore.state
+                if inFlightResponse.state.didEstablishControlPlane,
+                   syncState.activeSyncRunID != cacheKey.syncRunID
+                    || syncState.syncControlPlaneState?.isSyncProgressActive != true {
+                    emitConnectionDiagnostic(
+                        phase: "syncInventoryResponseInFlightRejected",
+                        listenerState: "ready",
+                        activePort: activePort,
+                        requestDeviceIDPrefix: device.idPrefix,
+                        syncRunID: syncRunID,
+                        errorCode: "stale_sync_run"
+                    )
+                    return syncRunStaleResponse()
+                }
+                guard inFlightResponse.peerInventoryHash == resolvedPeerInventoryHash else {
+                    emitConnectionDiagnostic(
+                        phase: "syncInventoryResponseInFlightRejected",
+                        listenerState: "ready",
+                        activePort: activePort,
+                        requestDeviceIDPrefix: device.idPrefix,
+                        syncRunID: syncRunID,
+                        errorCode: "sync_run_inventory_mismatch"
+                    )
+                    return syncRunInventoryMismatchResponse()
+                }
+                emitConnectionDiagnostic(
+                    phase: "syncInventoryResponseInFlightJoined",
+                    listenerState: "ready",
+                    activePort: activePort,
+                    requestDeviceIDPrefix: device.idPrefix,
+                    syncRunID: syncRunID
+                )
+                return await inFlightResponse.task.value
+            }
+
+            let inFlightID = UUID()
+            let inFlightState = InFlightSyncInventoryResponseState()
+            let responseTask = Task { @MainActor [self] in
+                let response = await buildLocalNetworkSyncInventoryResponse(
+                    device,
+                    syncRunID: syncRunID,
+                    requestEnvelope: requestEnvelope,
+                    peerInventory: peerInventory,
+                    inFlightState: inFlightState
+                )
+                cacheSyncInventoryResponse(
+                    response,
+                    key: cacheKey,
+                    peerInventoryHash: resolvedPeerInventoryHash
+                )
+                return response
+            }
+            inFlightSyncInventoryResponses[cacheKey] = InFlightSyncInventoryResponse(
+                id: inFlightID,
+                peerInventoryHash: resolvedPeerInventoryHash,
+                state: inFlightState,
+                task: responseTask
+            )
+            let response = await responseTask.value
+            if inFlightSyncInventoryResponses[cacheKey]?.id == inFlightID {
+                inFlightSyncInventoryResponses.removeValue(forKey: cacheKey)
+            }
+            return response
+        }
+
+        return await buildLocalNetworkSyncInventoryResponse(
+            device,
+            syncRunID: syncRunID,
+            requestEnvelope: requestEnvelope,
+            peerInventory: peerInventory,
+            inFlightState: nil
+        )
+    }
+
+    @MainActor
+    private func buildLocalNetworkSyncInventoryResponse(
+        _ device: PairedDevice,
+        syncRunID: String?,
+        requestEnvelope: CanonicalStatusExchangeEnvelope?,
+        peerInventory: LocalNetworkSyncInventory?,
+        inFlightState: InFlightSyncInventoryResponseState?
     ) async -> LocalNetworkSyncInventoryResponse {
         _ = markDeviceOnline(device: device, displayName: device.deviceName, syncStatus: "inventory")
         await consumeCanonicalStatusExchangeEnvelope(
@@ -4257,10 +4417,12 @@ final class SecureLocalHTTPSServer {
                     error: "stale_sync_run"
                 )
             }
+            inFlightState?.didEstablishControlPlane = true
             emitConnectionDiagnostic(phase: "manualSyncRequestedInventoryObserved", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID, errorCategory: "manualSyncRequestConsumedCount=1")
             emitConnectionDiagnostic(phase: "manualSyncRequestedConsumedByPeer", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID, errorCategory: "manualSyncRequestConsumedCount=1")
             emitConnectionDiagnostic(phase: "manualSyncTickStarted", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         }
+        await onSyncInventoryResponseBuildStarted?()
         emitConnectionDiagnostic(phase: "localInventoryBuilt", listenerState: "ready", activePort: activePort, requestDeviceIDPrefix: device.idPrefix, syncRunID: syncRunID)
         let inventory = await makeLocalNetworkSyncInventory(shadowTrigger: "sync-inventory", shadowSyncRunID: syncRunID, sourceKind: .inventoryRequest)
         if let peerInventory {
@@ -4294,11 +4456,101 @@ final class SecureLocalHTTPSServer {
             syncRunID: syncRunID,
             routePath: "/sync/inventory"
         )
-        return LocalNetworkSyncInventoryResponse(
+        let response = LocalNetworkSyncInventoryResponse(
             ok: true,
             inventory: inventory,
             statusExchangeEnvelope: responseEnvelope,
             error: nil
+        )
+        return response
+    }
+
+    private nonisolated static func normalizedInventoryHash(_ value: String?) -> String? {
+        guard let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
+    }
+
+    private nonisolated static func isValidInventoryHash(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+        }
+    }
+
+    @MainActor
+    private func syncInventoryResponseCacheKey(
+        deviceID: String,
+        syncRunID: String?
+    ) -> SyncInventoryResponseCacheKey? {
+        guard let normalizedSyncRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalizedSyncRunID.isEmpty else {
+            return nil
+        }
+        return SyncInventoryResponseCacheKey(
+            deviceID: deviceID,
+            syncRunID: normalizedSyncRunID
+        )
+    }
+
+    @MainActor
+    private func syncInventoryResponseCacheLookup(
+        key: SyncInventoryResponseCacheKey,
+        peerInventoryHash: String?
+    ) -> SyncInventoryResponseCacheLookup {
+        guard syncStateStore.state.activeSyncRunID == key.syncRunID,
+              syncStateStore.state.syncControlPlaneState?.isSyncProgressActive == true,
+              let cached = syncInventoryResponseCache[key] else {
+            return .miss
+        }
+        guard cached.peerInventoryHash == peerInventoryHash else {
+            return .inventoryMismatch
+        }
+        return .hit(cached.response)
+    }
+
+    @MainActor
+    private func cacheSyncInventoryResponse(
+        _ response: LocalNetworkSyncInventoryResponse,
+        key: SyncInventoryResponseCacheKey,
+        peerInventoryHash: String?
+    ) {
+        guard response.ok else {
+            return
+        }
+        syncInventoryResponseCache[key] = CachedSyncInventoryResponse(
+            peerInventoryHash: peerInventoryHash,
+            response: response
+        )
+        syncInventoryResponseCacheOrder.removeAll { $0 == key }
+        syncInventoryResponseCacheOrder.append(key)
+        if syncInventoryResponseCacheOrder.count > maximumSyncInventoryResponseCacheEntries {
+            let evictedKeys = syncInventoryResponseCacheOrder.prefix(
+                syncInventoryResponseCacheOrder.count - maximumSyncInventoryResponseCacheEntries
+            )
+            for evictedKey in evictedKeys {
+                syncInventoryResponseCache.removeValue(forKey: evictedKey)
+            }
+            syncInventoryResponseCacheOrder.removeFirst(evictedKeys.count)
+        }
+    }
+
+    private nonisolated func syncRunInventoryMismatchResponse() -> LocalNetworkSyncInventoryResponse {
+        LocalNetworkSyncInventoryResponse(
+            ok: false,
+            inventory: nil,
+            statusExchangeEnvelope: nil,
+            error: "sync_run_inventory_mismatch"
+        )
+    }
+
+    private nonisolated func syncRunStaleResponse() -> LocalNetworkSyncInventoryResponse {
+        LocalNetworkSyncInventoryResponse(
+            ok: false,
+            inventory: nil,
+            statusExchangeEnvelope: nil,
+            error: "stale_sync_run"
         )
     }
 
@@ -5447,7 +5699,8 @@ final class SecureLocalHTTPSServer {
                     device,
                     syncRunID: syncRunID,
                     requestEnvelope: inventoryRequest?.statusExchangeEnvelope,
-                    peerInventory: inventoryRequest?.localInventory
+                    peerInventory: inventoryRequest?.localInventory,
+                    peerInventoryHash: inventoryRequest?.localInventoryHash
                 ),
                 on: connection
             )
@@ -5938,15 +6191,40 @@ final class SecureLocalHTTPSServer {
         let header = "HTTP/1.1 \(statusCode) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
         var response = Data(header.utf8)
         response.append(bodyData)
+        let connectionQueue = queue
 
-        connection.send(content: response, completion: .contentProcessed { error in
-            if let error {
-                print("[RokuricsHTTPS] response failed: \(error)")
-            } else {
-                print("[RokuricsHTTPS] response sent")
+        connection.send(
+            content: response,
+            contentContext: .finalMessage,
+            isComplete: true,
+            completion: .contentProcessed { error in
+                if let error {
+                    let nsError = error as NSError
+                    print("[RokuricsHTTPS] response failed: domain=\(nsError.domain) code=\(nsError.code)")
+                    DevelopmentDiagnostics.record(
+                        node: .Mac,
+                        subsystem: "secureHTTP",
+                        event: "httpsResponseSendFailed",
+                        severity: .error,
+                        details: [
+                            "statusCode": String(statusCode),
+                            "bodyBytes": String(bodyData.count),
+                            "errorDomain": nsError.domain,
+                            "errorCode": String(nsError.code)
+                        ]
+                    )
+                    connection.cancel()
+                } else {
+                    print("[RokuricsHTTPS] response sent")
+                    // `.finalMessage` + `isComplete` lets Network.framework flush the
+                    // HTTP response before the short cancellation fallback releases
+                    // the retained connection.
+                    connectionQueue.asyncAfter(deadline: .now() + 0.5) {
+                        connection.cancel()
+                    }
+                }
             }
-            connection.cancel()
-        })
+        )
     }
 
     private static func normalizedHeaders(_ headers: [String: String]) -> [String: String] {

@@ -1,18 +1,34 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-07-12
+最近一次自查日期：2026-07-17
+
+## 2026-07-17 历史冲突隔离与失效 run 终止消费
+
+本轮只修同步内核，不新增或改写 Mac UI。`LocalNetworkSyncEngine` 仍保留完整 discovery plan 作为本轮差异结果、reconciliation 依据和诊断摘要；在发送 action-scoped metadata shell 前，另由既有 `conflictIsolatedExecutionPlan` 生成可执行 plan。任何与 conflict 处于同一 folder/item/recording/artifact 依赖闭包的 metadata action 都从本次 apply 中排除，conflict 本身继续作为成功 diff 返回；与历史 conflict 无关的新录音仍可独立物化到 Mac 的既有学习库卡片。真实 manifest 构造、传输、验证或 Store apply 失败仍会使本轮失败，没有被降级为成功。
+
+同步 tick 现在显式返回 `completed`、`retryableFailure` 或 `terminalObsolete`。只有已通过现有安全链路返回的精确 server reject `stale_sync_run` 会进入 terminal-obsolete：这表示该 `syncRunID` 已被 Mac 的更新 run 取代。两条 durable drain 路径都会将它从 in-flight 终止消费并写入有界 completed-ID 去重集合，不再放回 pending、增加失败退避或被后续 heartbeat 重试；但也不会写 `lastSuccessfulSyncAt` 或伪装成同步成功。网络、鉴权、解码、metadata partial failure 等其他错误仍按 retryable failure 回到 pending。
+
+本轮没有修改 route、payload/schema、TLS/HMAC/pinning/nonce/body hash、`RequestVerifier`、上传触发规则或任何 View。iOS `build-for-testing` 已通过；5 个新增测试与 5 个关键回归测试在 iPhone 17 / iOS 26.5 Simulator 上实际执行，结果 10/10 通过。paired iPhone/Mac 真机复测仍需重新构建并安装 iPhone App 后进行。
+
+## 2026-07-16 同步 run 竞态、瞬断恢复与 Mac 现有录音卡片恢复
+
+7 月 15 日首个失败已定位为同一设备上的同步 owner 竞争：Mac 通过 heartbeat 下发带 `syncRunID` 的 start signal 时，iPhone 的 foreground/timer tick 可能先创建另一轮，令前一轮 inventory 到达 Mac 时被判为 `stale_sync_run`；另有一次 `/sync/inventory` 响应结束阶段的短连接丢失。当前两条 heartbeat consumer 都会先把 correlated run 持久排队，再发布 online 并 ACK；同一响应中的 generic/status hint 只合并到该 run。correlated drain 原样复用 Mac 给出的 ID 执行 inventory，不再生成第二个 ID，也不会二次调用 `/sync/start`。App 每次激活或配对/连接意图变化后，旧的 online 快照不能启动 scheduler、retry drainer 或即时队列，必须等本轮新 heartbeat 成功。手动 coordinator 与 AppService scheduler 还共享单一 FIFO run execution gate，手动 follow-up 每轮释放并重新排队；foreground/timer 在 gate 忙时直接跳过，periodic 首 tick 延后一个完整 interval，correlated run 可替换无 ID generic hint 且优先于普通事件。持久 run 只有在 inventory tick 真实成功后才完成；等 gate 时转后台、掉线或执行失败都会回到队首，并等待下一次 heartbeat/状态或显式事件触发，不做热循环重试。
+
+`/sync/inventory` 客户端只对 `NSURLErrorNetworkConnectionLost` 与 `NSURLErrorTimedOut` 做一次有界重试，复用相同 local inventory 与 `syncRunID`；取消、安全错误、解码错误和 server reject 不重试。Mac 对已验证的相同 device/run/peer-inventory-hash 同时提供 in-flight 合并与有界 completed-response cache：并发或随后重试返回完全相同响应，只构建一次 inventory、只 apply 一次 reconciliation；进行中或已完成请求的 hash 改变/无效返回 `sync_run_inventory_mismatch`，已被新 run supersede 时返回 `stale_sync_run`。HTTPS JSON response 使用 final message 完整结束，并记录真实网络错误 domain/code。
+
+7 月 15 日第二个文件其实已被 reconciliation 发现；真正断点是 active sync 不再发送原有的 action-scoped metadata manifest，导致 Mac `StudyLibraryStore` 没有形成带 receiver-local `syncedMetadataOnly` 的 metadata shell，既有学习库列表没有数据可渲染。当前仅恢复针对 `plan.uploadMetadataActions` 的单次 `/sync/apply-metadata`：Mac 继续沿 `StudyLibraryStore.applySyncManifest` -> `effectiveStudyItems` -> `MacStudyRecordingCard` -> `StudyRecordingTransferProgressView` 的原有链路显示缺少本地音频的录音。未新增 View projection、section、card 或文案；同步不传 audio/artifact bytes，不创建 placeholder、upload job，也不执行内容 retry/finalize。实际音频仍必须由 iPhone 来源端学习库明确点击“上传”才传输。
 
 ## 2026-07-12 同步差异判定与待传输闭环已完成代码级收口
 
-项目现已确认三层产品定义：连接只做短握手与可信在线检查；连接页“立即同步”只交换学习库 inventory 的稳定标识、逻辑文件名、hash、byte size、业务修改时间、版本和 tombstone 等短字段，并完成差异发现、LWW 来源判定和逐对象待处理标记；学习库内用户点击“上传”后，才允许双向传输实际文件内容。同步不应用学习库内容、不创建 placeholder、不传 artifact/audio bytes，也不自动创建上传任务。
+项目现已确认三层产品定义：连接只做短握手与可信在线检查；连接页“立即同步”交换学习库 inventory 的稳定标识、逻辑文件名、hash、byte size、业务修改时间、版本和 tombstone 等短字段，完成差异发现、LWW 来源判定和逐对象待处理标记，并且只允许应用当前 plan 的 action-scoped metadata shell，以物化目标端既有 metadata-only 卡片；学习库内用户点击“上传”后，才允许双向传输实际文件内容。同步不创建 placeholder、不传 artifact/audio bytes，也不自动创建上传任务。
 
 共享 `SyncReconciliationPlanner` 现按稳定 `objectID` 对齐版本：较新的业务 `modifiedAt` 必然成为 source，即使双方都修改也仍按 LWW；相同 hash + 名称变化为 rename-only；相同 hash + 仅时间变化不重复传输；hash 不同且时间相同、或缺少必要 hash/size 时 deferred；tombstone 与 live version 同样按 LWW，较新 live 可恢复，较新 tombstone 可删除，时间并列不静默覆盖。请求方向不会改变 winner 或 record ID。
 
 双端各自使用 `SyncReconciliationStore` 将相关记录原子持久化到应用根目录的 `Sync/Reconciliation/records.json`。记录包含 source、target、expected hash/size/modifiedAt、difference、reason、状态和完成证明，不含文件 bytes、正文、绝对路径或密钥；存储有 schema version、4096 条默认上限、幂等替换、无关对象保留和损坏 fail-closed。下一轮 inventory 已收敛时只清除本轮已评估且一致的对象记录。
 
-iPhone -> Mac 与 Mac -> iPhone 上传入口均已改为消费 reconciliation record。来源端按钮才可创建任务；目标端显示等待接收。创建前校验来源版本，过期则写 `staleSourceVersion` 且不创建 job；上传协议携带 record ID 与目标旧版本 proof，接收端在替换前执行 target CAS、checksum/size 和 no-overwrite 校验；成功后写 `transferredAwaitingVerification` 完成证明，下一轮两端 inventory 一致后清除记录。稳定 recording ID 在 Mac -> iPhone 替换时保留，不再通过新 ID 制造重复对象。
+iPhone -> Mac 与 Mac -> iPhone 上传入口均已改为消费 reconciliation record。来源端按钮才可创建任务；目标端 metadata-only item 进入既有 `MacStudyRecordingCard`，但不得据此显示音频已存在或传输已完成。创建前校验来源版本，过期则写 `staleSourceVersion` 且不创建 job；上传协议携带 record ID 与目标旧版本 proof，接收端在替换前执行 target CAS、checksum/size 和 no-overwrite 校验；成功后写 `transferredAwaitingVerification` 完成证明，下一轮两端 inventory 一致后清除记录。稳定 recording ID 在 Mac -> iPhone 替换时保留，不再通过新 ID 制造重复对象。
 
-源码已按该产品定义拆层。`LocalNetworkSyncEngine.performTick` 现在只构建一次本端 runtime inventory snapshot、交换一次对端 inventory、执行一次 shared reconciliation plan，并持久化有界 run 摘要和逐对象 record；旧 canonical 二次 planner、shadow migration 和逐对象重算不再进入 active discovery。该路径不再调用 metadata apply、placeholder、artifact request/put、generated artifact download、缺失 audio upload、Store merge/save、retry/finalize 或文件内容完成证明。deferred 是成功同步得到的业务结果；成功终态不要求任何文件传输完成。旧 Git-backed apply 实现保留为不可达迁移参考，连接页、timer、heartbeat 和“立即同步”统一进入 content-read-only discovery。
+源码已按该产品定义拆层。`LocalNetworkSyncEngine.performTick` 现在只构建一次本端 runtime inventory snapshot、交换一次对端 inventory、执行一次 shared reconciliation plan，并持久化有界 run 摘要和逐对象 record；旧 canonical 二次 planner、shadow migration 和逐对象重算不再进入 active discovery。仅当 `uploadMetadataActions` 非空时，路径发送一次 action-scoped metadata manifest，让接收端既有 Store 保存 receiver-local metadata-only shell；placeholder、artifact request/put、generated artifact download、缺失 audio upload、upload job、retry/finalize 和文件内容完成证明仍不进入 sync。deferred 是成功同步得到的业务结果；成功终态不要求任何文件传输完成。
 
 上传任务创建已收窄为学习库明确上传按钮：iPhone -> Mac 继续复用现有安全上传链路；retry drainer 只能恢复由按钮创建的 durable job。Mac -> iPhone 新增 Mac 学习库按钮、持久 `MacToIPhoneUploadStore`、heartbeat 小型 offer、iPhone 分块 pull 和独立 ACK；heartbeat 不携带文件 bytes，Mac 不反向拨号 iPhone。分块/ACK route 继续通过 TLS/HMAC/timestamp/nonce/body hash/`RequestVerifier`，目标端校验 chunk checksum、整文件 checksum/size 并 no-overwrite 落盘。
 

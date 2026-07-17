@@ -1,8 +1,31 @@
 # TESTING
 
+## 2026-07-17 历史冲突隔离与 stale run 终止消费验证
+
+本轮先以 iOS Simulator `build-for-testing` 编译生产代码和全部 iOS 测试源码，结果通过。随后使用 Xcode JSON enumeration 取得包含末尾 `()` 的 Swift Testing 正式标识，避免 `-only-testing` 安静筛成 0 项；在 iPhone 17 / iOS 26.5 Simulator 上实际执行 10 项，结果包确认 `totalTestCount=10`、`passedTests=10`、`failedTests=0`、`skippedTests=0`。
+
+新增覆盖：durable queue 跨重启终止消费 obsolete run、scheduler 保留 terminal disposition、heartbeat durable signal 收到 `stale_sync_run` 后不再重试、engine 不记录失败退避/成功时间、历史 conflict 不进入无关新录音的 metadata shell。回归覆盖：普通 handler 失败仍回到 pending、Mac metadata partial failure 仍不记成功、缺录音时仍发送既有 scoped metadata shell，以及 conflict dependency closure 的正常与 fail-closed 路径。
+
+本轮未运行全量 test suite、Mac build 或 paired-device 真机测试。由于 iPhone 同步生产代码已改变，真机复测必须重新构建并安装 iPhone App；本轮没有修改 Mac App 生产代码或 UI，因此只验证这两个修复时不要求因本轮改动单独重装 Mac App。
+
+## 2026-07-16 心跳关联同步与 Mac 现有 metadata-only 卡片验证
+
+本轮回归覆盖 7 月 15 日两类故障：Mac 发出带 `syncRunID` 的同步请求后，iPhone 必须先可靠持久化该 run、再发布 online、ACK，并使用原始 run ID 执行 inventory；不得生成新 run ID 或再次发送 `/sync/start`。同一 inventory 请求发生 `networkConnectionLost` / `timedOut` 时最多尝试 2 次且复用同一 run ID；Mac 对相同 device/run/body 的已完成或并发请求必须复用同一响应，changed hash 与 superseded run 仍 fail closed。失败的 durable run 返回 pending，等待下一次成功 heartbeat/status/activation 触发，不允许热循环。
+
+Mac 可见性回归必须验证既有链路而不是另建 UI：iPhone 发送 action-scoped metadata shell，Mac `StudyLibraryStore` 保存 receiver-local `syncedMetadataOnly` item，该 item 进入 `effectiveStudyItems` 并由现有 `MacStudyRecordingCard` 渲染；缺音频时使用现有 `StudyRecordingTransferProgressView`。不得新增 projection/section/card，不得传 artifact/audio bytes、创建 placeholder 或 upload job；实际音频传输仍由用户在 iPhone 学习库点击“上传”触发。
+
+本轮实际本地验证：
+
+- iOS `build-for-testing` 通过；metadata-shell 正向/失败语义 2 项，以及 scheduler、durable queue、heartbeat ordering、关联 run、inventory transient retry 12 项，共 14/14 定向测试通过。
+- Mac `build-for-testing` 通过；`macAppliesIPhoneMetadataOnlyRecordingWithoutPretendingAudioExists`、`macBusinessEqualMetadataOnlyMarkerPersistsAndClearsAcrossRefresh`、`missingIncomingAudioUsesTransferProgressModelInActionArea`、`iPhoneMetadataPushAppliesToMacStoreAndCreatesGitCommit` 与 `localNetworkSyncApplyMetadataMergesStudyMetadataWithoutTouchingAudio` 共 5/5 通过。
+- 两端构建仍有仓库既有 Swift 6 actor-isolation、deprecated API 等 warning，本轮没有新增编译错误。
+- 这些是本地构建和模拟器/本机测试证据，不等于 paired 真机链路已经通过。
+
+真机验收必须重新构建并安装 iPhone 与 Mac 两端应用；旧安装包不包含本次两端源码修复。配对后至少验证：首次立即同步不出现 `stale_sync_run`；临时断连后的 inventory 使用同一 run ID 恢复且不重复执行；iPhone 新增录音后，Mac 出现原有录音卡片且音频仍不可用，在 iPhone 点击上传后才完成接收。不得以固定“待接收”文案作为验收条件。
+
 ## 2026-07-12 拆层修复验证
 
-源码验收至少覆盖：sync discovery 只请求一次 inventory；即使 plan 发现缺失 artifact/audio 或 deferred，也不得发起 artifact request/put/status、metadata apply、Store/file mutation 或 upload job；同步按稳定 ID + LWW 生成确定性 source/target record；只有 upload button 可消费 record 创建 job，retry drainer 只恢复按钮 job；双向传输均校验 source/target version、checksum/size、no-overwrite 和完成 proof。
+源码验收至少覆盖：sync discovery 只请求一次 inventory；有 `uploadMetadataActions` 时只允许一次 action-scoped metadata-shell apply，无 action 时为 0；即使 plan 发现缺失 artifact/audio 或 deferred，也不得发起 artifact request/put/status、audio transfer、placeholder 或 upload job。同步按稳定 ID + LWW 生成确定性 source/target record；只有 upload button 可消费 record 创建 job，retry drainer 只恢复按钮 job；双向传输均校验 source/target version、checksum/size、no-overwrite 和完成 proof。
 
 已运行并通过 iPhone generic simulator build、iOS `build-for-testing`（包含全部 iOS unit/UI test source 编译）、Mac Debug build、iOS targeted tests（read-only discovery、conflict completed、scheduler ownership、manual retry）和 Mac upload-store targeted test。iOS 完整 suite 曾执行 200 项；当时 6 项仍断言旧 full-sync 契约、2 项为模拟器 Keychain 环境问题，旧契约断言已更新。最终两次复跑均在进入测试前由 CoreSimulator 报“无法找到目标设备”，不属于应用测试失败。`git diff --check` 与 `git status --short` 作为交付检查仍必须执行。真机后续证据只需：同 Wi-Fi 配对后验证“立即同步”无文件进度/无内容流量，以及分别点击双端学习库上传按钮完成一个大文件往返。
 
@@ -18,7 +41,7 @@ xcodebuild test -project Rokurics.xcodeproj -scheme Rokurics \
 
 该组当前 13 项，必须覆盖：双方都改仍由较新 `modifiedAt` 胜出、rename-only 无内容、hash 缺失/时间并列 deferred、tombstone delete-vs-modify/anti-resurrection、方向无关、跨重启持久标记、收敛清除、幂等/supersede/无关对象保留、有界存储、损坏 fail-closed、无标记不建 job、stale source 不上传、matching record 写 completion proof。
 
-以下是当前源码已经实施、后续不得回退的必测产品合同；旧 full-sync 测试必须禁用或改写为 discovery-only 断言，不能把旧内容传输行为解释为本节通过。
+以下是当前源码已经实施、后续不得回退的必测产品合同；旧 full-sync 的自动内容传输测试必须禁用或改写，metadata-shell 测试只可验证 scoped manifest 与既有 metadata-only 卡片，不能把旧 artifact/audio 传输行为解释为本节通过。
 
 连接层：
 
@@ -27,7 +50,7 @@ xcodebuild test -project Rokurics.xcodeproj -scheme Rokurics \
 
 同步层：
 
-- 点击连接页“立即同步”只产生一对 inventory snapshot、一次 exchange/diff 和有界诊断；双端断言 metadata apply、artifact/audio bytes、placeholder/store mutation 和新 upload job 均为 0。
+- 点击连接页“立即同步”只产生一对 inventory snapshot、一次 exchange/diff、必要时一次 action-scoped metadata-shell apply 和有界诊断；`uploadMetadataActions` 非空时 metadata apply 为 1、为空时为 0，artifact/audio bytes、placeholder 和新 upload job 始终为 0。
 - 同一 `syncRunID` 即使有多个对象、planner action 或诊断消费者，每端 inventory builder 调用次数也必须为 1。
 - 准备少量超大文件，先完成 checksum cache 预热；第二轮无变化同步必须全部 cache hit，不读取文件内容，耗时和网络 bytes 不随文件体积增长。修改其中一个文件后，只允许该文件 cache invalidation/off-main rehash。
 - inventory payload 只包含稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone 和有限协议字段；测试必须拒绝 `dataBase64`、audio bytes、完整 transcript/note/summary、附件正文和 provider response。
@@ -42,7 +65,7 @@ xcodebuild test -project Rokurics.xcodeproj -scheme Rokurics \
 - upload failed/cancelled/conflict 不得把已完成的 sync diff 改成 failed；sync failed 也不得把已完成 upload 改写为失败。
 - upload retry 只能恢复用户已经创建且仍符合目标 peer/content contract 的 job，不得借 retry drainer 创建新的普通上传任务。
 
-UI 手动验收：连接页“立即同步”期间不得出现文件传输进度或学习库内容变化；完成后只展示 added/deleted/modified/conflict 等差异。进入学习库点击“上传”后才显示文件传输方向、进度、成功或失败。
+UI 手动验收：连接页“立即同步”可以使现有 metadata-only 录音卡片出现，但不得显示 audio available/completed，也不得产生文件 bytes 或新 upload job。进入学习库点击“上传”后，现有卡片的实际内容传输状态才可推进。
 
 ## 2026-07-12 Development Diagnostics 验证
 

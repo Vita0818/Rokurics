@@ -1699,6 +1699,7 @@ final class SecureMacUploadClient: ObservableObject {
             if let pinningError = pinnedSession.context.currentPinningError {
                 throw pinningError
             }
+            let nsError = error as NSError
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "secureRequestFailed",
@@ -1706,7 +1707,8 @@ final class SecureMacUploadClient: ObservableObject {
                 eventResult: "fail",
                 reasonCode: "network_or_decode_error",
                 httpPath: path,
-                errorDomain: "SecureMacUploadClient",
+                errorDomain: nsError.domain,
+                errorCode: String(nsError.code),
                 safeErrorMessage: error.localizedDescription
             )
             throw error

@@ -86,6 +86,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     private var lastUncorrelatedHeartbeatSyncQueuedAt: Date?
     private var lastUncorrelatedHeartbeatSyncCompletedAt: Date?
     private let heartbeatRequestedSyncDebounceInterval: TimeInterval = 5
+    private let localNetworkSyncRunExecutionGate: LocalNetworkSyncRunExecutionGate
 
     init(
         connectionStore: any SecureMacConnectionSnapshotProviding,
@@ -113,6 +114,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         canonicalStatusExchangeRuntime: CanonicalStatusExchangeRuntime? = nil,
         canonicalConnectionRuntime: CanonicalConnectionRuntime? = nil,
         durableSignalQueueFileURL: URL? = nil,
+        localNetworkSyncRunExecutionGate: LocalNetworkSyncRunExecutionGate? = nil,
         heartbeatInterval: TimeInterval = 3,
         syncInterval: TimeInterval = 240
     ) {
@@ -182,6 +184,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         self.canonicalConnectionRuntime = resolvedConnectionRuntime
         self.heartbeatRequestedSyncQueue = recoveredDurableSignalQueue
         self.heartbeatRequestedSyncQueueFileURL = resolvedDurableSignalQueueFileURL
+        self.localNetworkSyncRunExecutionGate = localNetworkSyncRunExecutionGate ?? .shared
         self.presenceHeartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: presenceHeartbeatClient ?? resolvedClient,
@@ -257,7 +260,8 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         carrier: CanonicalStatusExchangeCarrier,
         deviceID: String,
         syncRunID: String?,
-        source: String
+        source: String,
+        coalescedCorrelatedSyncRunID: String? = nil
     ) async -> CanonicalStatusExchangeReceiveResult {
         let result = await canonicalStatusExchangeRuntime.consumeIncomingEnvelope(envelope, carrier: carrier)
         guard envelope != nil else {
@@ -313,7 +317,16 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         for action in result.requestedActions {
             switch action {
             case .enqueueRunSyncSoon:
-                handleHeartbeatSyncRequestedHint(syncRunID: syncRunID, hintReceivedAt: Date())
+                if let coalescedCorrelatedSyncRunID {
+                    diagnosticsStore.record(
+                        phase: "syncRequestedHintCoalescedWithCorrelatedRun",
+                        deviceID: deviceID,
+                        syncRunID: coalescedCorrelatedSyncRunID,
+                        result: "enqueueRunSyncSoon"
+                    )
+                } else {
+                    handleHeartbeatSyncRequestedHint(syncRunID: syncRunID, hintReceivedAt: Date())
+                }
             case .requestLightweightAudioProof:
                 diagnosticsStore.record(
                     phase: "peerProofUnavailable",
@@ -328,7 +341,16 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                     syncRunID: syncRunID,
                     result: "requestOnly"
                 )
-                handleHeartbeatSyncRequestedHint(syncRunID: syncRunID, hintReceivedAt: Date())
+                if let coalescedCorrelatedSyncRunID {
+                    diagnosticsStore.record(
+                        phase: "syncRequestedHintCoalescedWithCorrelatedRun",
+                        deviceID: deviceID,
+                        syncRunID: coalescedCorrelatedSyncRunID,
+                        result: "requestFullInventory"
+                    )
+                } else {
+                    handleHeartbeatSyncRequestedHint(syncRunID: syncRunID, hintReceivedAt: Date())
+                }
             }
         }
         return result
@@ -391,8 +413,10 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     func stopMonitoring() {
         heartbeatTask?.cancel()
         syncTask?.cancel()
+        heartbeatRequestedSyncTask?.cancel()
         heartbeatTask = nil
         syncTask = nil
+        heartbeatRequestedSyncTask = nil
     }
 
     func refreshPairingState() {
@@ -485,13 +509,25 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncRequested: response.syncRequested == true || response.syncStartSignal != nil,
                 observedAt: Date()
             )
-            await consumeCanonicalStatusExchangeEnvelope(
-                response.statusExchangeEnvelope,
-                carrier: .heartbeat,
-                deviceID: snapshot.deviceID,
-                syncRunID: response.syncStartSignal?.syncRunID,
-                source: "device-status"
-            )
+
+            let reliablyQueuedSyncStartSignal: Bool?
+            if let syncStartSignal = response.syncStartSignal {
+                diagnosticsStore.record(
+                    phase: "syncStartSignalReceived",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncStartSignal.syncRunID,
+                    result: syncStartSignal.reason
+                )
+                // Persist the correlated run before publishing online. The
+                // online publisher can start automatic discovery immediately.
+                reliablyQueuedSyncStartSignal = handleHeartbeatSyncRequestedHint(
+                    syncRunID: syncStartSignal.syncRunID,
+                    hintReceivedAt: Date(),
+                    allowCorrelatedRunBeforeOnline: true
+                )
+            } else {
+                reliablyQueuedSyncStartSignal = nil
+            }
 
             failureCount = 0
             syncState = syncStateStore.state
@@ -501,9 +537,77 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 lastSyncAt: syncState.lastSuccessfulSyncAt,
                 lastSyncStatus: syncState.lastError ?? connectionStatus.lastSyncStatus
             ))
-            if response.syncRequested || response.syncStartSignal != nil {
+            diagnosticsStore.record(
+                phase: "heartbeatMarkedOnline",
+                deviceID: snapshot.deviceID,
+                syncRunID: response.syncStartSignal?.syncRunID,
+                result: "online"
+            )
+            if heartbeatRequestedSyncQueue.hasPendingRequests {
+                scheduleHeartbeatRequestedSyncDrainIfNeeded()
+            }
+            await consumeCanonicalStatusExchangeEnvelope(
+                response.statusExchangeEnvelope,
+                carrier: .heartbeat,
+                deviceID: snapshot.deviceID,
+                syncRunID: response.syncStartSignal?.syncRunID,
+                source: "device-status",
+                coalescedCorrelatedSyncRunID: response.syncStartSignal?.syncRunID
+            )
+
+            if let syncStartSignal = response.syncStartSignal {
+                if reliablyQueuedSyncStartSignal == true {
+                    do {
+                        let ack = try await localNetworkSyncClient.sendLocalNetworkSyncStartAck(
+                            settings: snapshot,
+                            request: LocalNetworkSyncStartAckRequest(
+                                syncRunID: syncStartSignal.syncRunID,
+                                deviceID: snapshot.deviceID,
+                                platform: .iPhone,
+                                acknowledgedAt: Date(),
+                                disposition: "ack"
+                            )
+                        )
+                        guard ack.ok, ack.syncRunID == syncStartSignal.syncRunID else {
+                            throw SecureMacUploadError.serverRejected(ack.error ?? "sync_start_ack_failed")
+                        }
+                        diagnosticsStore.record(
+                            phase: "syncStartAckSent",
+                            deviceID: snapshot.deviceID,
+                            syncRunID: syncStartSignal.syncRunID,
+                            result: "ack"
+                        )
+                    } catch {
+                        // ACK loss must not turn an otherwise successful
+                        // heartbeat offline. The Mac can safely redeliver.
+                        diagnosticsStore.record(
+                            phase: "syncStartAckFailed",
+                            deviceID: snapshot.deviceID,
+                            syncRunID: syncStartSignal.syncRunID,
+                            errorCode: "sync_start_ack_failed",
+                            errorMessage: error.localizedDescription
+                        )
+                    }
+                } else {
+                    diagnosticsStore.record(
+                        phase: "syncStartAckDeferredQueueRejected",
+                        deviceID: snapshot.deviceID,
+                        syncRunID: syncStartSignal.syncRunID,
+                        result: "redeliveryRequired",
+                        errorCode: "sync_signal_not_queued"
+                    )
+                }
+                if response.syncRequested {
+                    diagnosticsStore.record(
+                        phase: "syncRequestedHintCoalescedWithCorrelatedRun",
+                        deviceID: snapshot.deviceID,
+                        syncRunID: syncStartSignal.syncRunID,
+                        result: "syncRequested"
+                    )
+                }
+            } else if response.syncRequested {
                 handleHeartbeatSyncRequestedHint(
-                    syncRunID: response.syncStartSignal?.syncRunID,
+                    syncRunID: nil,
                     hintReceivedAt: Date()
                 )
             }
@@ -579,7 +683,10 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         return await performSync(trigger: "manual")
     }
 
-    private func performLocalNetworkManualSync(snapshot: SecureMacConnectionSnapshot) async -> StudyLibrarySyncApplyResult? {
+    private func performLocalNetworkManualSync(
+        snapshot: SecureMacConnectionSnapshot,
+        reportsSuccess: Bool = false
+    ) async -> StudyLibrarySyncApplyResult? {
         guard let recordingManager else {
             diagnosticsStore.record(
                 phase: "syncSkippedReason",
@@ -603,6 +710,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
         }
 
         isSyncing = true
+        var didCompleteRun = false
         defer {
             isSyncing = false
             syncState = syncStateStore.state
@@ -610,31 +718,27 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
 
         repeat {
             pendingManualLocalNetworkSync = false
-            let audioFileStore = recordingManager.audioFileStore
-            let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioFileStore)
+            let waitedForAnotherRun = await localNetworkSyncRunExecutionGate.acquire()
+            guard !Task.isCancelled else {
+                localNetworkSyncRunExecutionGate.release()
+                diagnosticsStore.record(
+                    phase: "syncExecutionGateCancelled",
+                    deviceID: snapshot.deviceID,
+                    result: "manual",
+                    errorCode: "cancelled"
+                )
+                return nil
+            }
+            if waitedForAnotherRun {
+                diagnosticsStore.record(
+                    phase: "syncExecutionGateWaitCompleted",
+                    deviceID: snapshot.deviceID,
+                    result: "manual"
+                )
+            }
             let syncRunID = UUID().uuidString
             refreshCanonicalKernelSwitchConfiguration(syncRunID: syncRunID)
-            let engine = LocalNetworkSyncEngine(
-                connectionStore: connectionStore,
-                audioFileStore: audioFileStore,
-                studyLibraryStore: studyLibraryStore,
-                recordingManager: recordingManager,
-                uploadCoordinator: uploadCoordinator,
-                uploadJobStore: uploadJobStore,
-                client: localNetworkSyncClient,
-                connectionStatusStore: statusStore,
-                diagnosticsStore: diagnosticsStore,
-                canonicalLibraryMetadataDebugPilotConfiguration: canonicalLibraryMetadataDebugPilotConfiguration,
-                canonicalSyncRuntimeConfiguration: canonicalSyncRuntimeConfiguration,
-                canonicalApplyRuntimeConfiguration: canonicalApplyRuntimeConfiguration,
-                canonicalKernelSwitchResultProvider: canonicalKernelSwitchResultProvider,
-                canonicalStatusTruthRuntime: canonicalStatusTruthRuntime,
-                canonicalStatusExchangeRuntime: canonicalStatusExchangeRuntime,
-                canonicalRecordingMetadataCutoverExecutor: canonicalRecordingMetadataCutoverExecutor,
-                canonicalGeneratedArtifactCutoverExecutor: canonicalGeneratedArtifactCutoverExecutor,
-                canonicalLibraryMetadataCutoverExecutor: canonicalLibraryMetadataCutoverExecutor,
-                canonicalTombstoneConflictCutoverExecutor: canonicalTombstoneConflictCutoverExecutor
-            )
+            let engine = makeLocalNetworkSyncEngine(recordingManager: recordingManager)
             syncStateStore.recordControlPlane(
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
@@ -686,9 +790,11 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncStateStore.recordFailure(deviceID: snapshot.deviceID, error: error.localizedDescription)
                 diagnosticsStore.record(phase: "syncStartFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_start_failed", errorMessage: error.localizedDescription)
                 refreshConnectionStatusFromStore()
+                localNetworkSyncRunExecutionGate.release()
                 return nil
             }
             let plan = await engine.performTick(trigger: "manual", bypassBackoff: true, syncRunID: syncRunID)
+            didCompleteRun = didCompleteRun || plan != nil
             syncStateStore.recordControlPlane(
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
@@ -700,8 +806,160 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 state: plan == nil ? .failed : .completed
             )
             refreshConnectionStatusFromStore()
+            // Give an already-waiting correlated peer run its FIFO turn before
+            // a manual follow-up iteration attempts to acquire the gate again.
+            localNetworkSyncRunExecutionGate.release()
         } while pendingManualLocalNetworkSync
-        return nil
+        return reportsSuccess && didCompleteRun ? StudyLibrarySyncApplyResult() : nil
+    }
+
+    private func performPeerRequestedLocalNetworkSync(
+        snapshot: SecureMacConnectionSnapshot,
+        syncRunID: String
+    ) async -> LocalNetworkSyncTickDisposition {
+        guard let recordingManager, uploadCoordinator != nil else {
+            diagnosticsStore.record(
+                phase: "heartbeatSyncRequestedTickFailed",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                errorCode: "local_network_executor_unavailable"
+            )
+            return .retryableFailure
+        }
+        guard !isSyncing else {
+            diagnosticsStore.record(
+                phase: "heartbeatSyncRequestedTickAlreadyRunning",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                errorCode: "already_in_flight"
+            )
+            return .retryableFailure
+        }
+
+        isSyncing = true
+        defer {
+            isSyncing = false
+            syncState = syncStateStore.state
+            if pendingManualLocalNetworkSync {
+                pendingManualLocalNetworkSync = false
+                Task { @MainActor [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    _ = await self.performLocalNetworkManualSync(
+                        snapshot: self.connectionStore.snapshot
+                    )
+                }
+            }
+        }
+
+        let waitedForAnotherRun = await localNetworkSyncRunExecutionGate.acquire()
+        defer { localNetworkSyncRunExecutionGate.release() }
+        guard !Task.isCancelled else {
+            diagnosticsStore.record(
+                phase: "syncExecutionGateCancelled",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "peer-requested",
+                errorCode: "cancelled"
+            )
+            return .retryableFailure
+        }
+        if waitedForAnotherRun {
+            diagnosticsStore.record(
+                phase: "syncExecutionGateWaitCompleted",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                result: "peer-requested"
+            )
+        }
+        let currentSnapshot = connectionStore.snapshot
+        let now = Date()
+        guard currentSnapshot.isPaired,
+              currentSnapshot.deviceID == snapshot.deviceID,
+              userWantsConnection,
+              UIApplication.shared.applicationState != .background,
+              statusStore.status(for: snapshot.deviceID, now: now)?
+                .presenceSnapshot(now: now).isOnline == true else {
+            diagnosticsStore.record(
+                phase: "peerRequestedSyncDeferredAfterExecutionGateWait",
+                deviceID: snapshot.deviceID,
+                syncRunID: syncRunID,
+                errorCode: "peer_or_presence_changed"
+            )
+            return .retryableFailure
+        }
+
+        refreshCanonicalKernelSwitchConfiguration(syncRunID: syncRunID)
+        let engine = makeLocalNetworkSyncEngine(recordingManager: recordingManager)
+        syncStateStore.recordControlPlane(
+            deviceID: snapshot.deviceID,
+            syncRunID: syncRunID,
+            state: .syncStartAcked
+        )
+        LocalNetworkSyncProgressStore.shared.record(
+            deviceID: snapshot.deviceID,
+            syncRunID: syncRunID,
+            state: .syncStartAcked
+        )
+        diagnosticsStore.record(
+            phase: "peerRequestedSyncRunClaimed",
+            deviceID: snapshot.deviceID,
+            syncRunID: syncRunID,
+            result: "reusedCorrelatedRunID"
+        )
+        let result = await engine.performTickResult(
+            trigger: "manual-peer-sync-requested",
+            bypassBackoff: true,
+            syncRunID: syncRunID
+        )
+        let terminalState: LocalNetworkSyncControlPlaneState = switch result.disposition {
+        case .completed:
+            .completed
+        case .retryableFailure:
+            .failed
+        case .terminalObsolete:
+            .cancelled
+        }
+        syncStateStore.recordControlPlane(
+            deviceID: snapshot.deviceID,
+            syncRunID: syncRunID,
+            state: terminalState
+        )
+        LocalNetworkSyncProgressStore.shared.record(
+            deviceID: snapshot.deviceID,
+            syncRunID: syncRunID,
+            state: terminalState
+        )
+        refreshConnectionStatusFromStore()
+        return result.disposition
+    }
+
+    private func makeLocalNetworkSyncEngine(
+        recordingManager: RecordingManager
+    ) -> LocalNetworkSyncEngine {
+        let audioFileStore = recordingManager.audioFileStore
+        return LocalNetworkSyncEngine(
+            connectionStore: connectionStore,
+            audioFileStore: audioFileStore,
+            studyLibraryStore: studyLibraryStore,
+            recordingManager: recordingManager,
+            uploadCoordinator: uploadCoordinator,
+            uploadJobStore: RecordingUploadJobStore(audioFileStore: audioFileStore),
+            client: localNetworkSyncClient,
+            connectionStatusStore: statusStore,
+            diagnosticsStore: diagnosticsStore,
+            canonicalLibraryMetadataDebugPilotConfiguration: canonicalLibraryMetadataDebugPilotConfiguration,
+            canonicalSyncRuntimeConfiguration: canonicalSyncRuntimeConfiguration,
+            canonicalApplyRuntimeConfiguration: canonicalApplyRuntimeConfiguration,
+            canonicalKernelSwitchResultProvider: canonicalKernelSwitchResultProvider,
+            canonicalStatusTruthRuntime: canonicalStatusTruthRuntime,
+            canonicalStatusExchangeRuntime: canonicalStatusExchangeRuntime,
+            canonicalRecordingMetadataCutoverExecutor: canonicalRecordingMetadataCutoverExecutor,
+            canonicalGeneratedArtifactCutoverExecutor: canonicalGeneratedArtifactCutoverExecutor,
+            canonicalLibraryMetadataCutoverExecutor: canonicalLibraryMetadataCutoverExecutor,
+            canonicalTombstoneConflictCutoverExecutor: canonicalTombstoneConflictCutoverExecutor
+        )
     }
 
     private func refreshCanonicalKernelSwitchConfiguration(syncRunID: String? = nil) {
@@ -736,7 +994,8 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     private func handleHeartbeatSyncRequestedHint(
         syncRunID: String?,
         hintReceivedAt: Date,
-        now: Date = Date()
+        now: Date = Date(),
+        allowCorrelatedRunBeforeOnline: Bool = false
     ) -> Bool {
         let snapshot = connectionStore.snapshot
         diagnosticsStore.record(
@@ -770,6 +1029,8 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             )
             return false
         }
+        let normalizedRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isCorrelatedRun = normalizedRunID?.isEmpty == false
         if UIApplication.shared.applicationState == .background {
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickDeferredBackground",
@@ -780,7 +1041,8 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             return false
         }
         if let presence = statusStore.status(for: snapshot.deviceID, now: now)?.presenceSnapshot(now: now),
-           !presence.isOnline {
+           !presence.isOnline,
+           !(allowCorrelatedRunBeforeOnline && isCorrelatedRun) {
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickDeferredOffline",
                 deviceID: snapshot.deviceID,
@@ -790,8 +1052,6 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
             )
             return false
         }
-        let normalizedRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isCorrelatedRun = normalizedRunID?.isEmpty == false
         if !isCorrelatedRun,
            let lastQueuedAt = lastUncorrelatedHeartbeatSyncQueuedAt,
            now.timeIntervalSince(lastQueuedAt) < heartbeatRequestedSyncDebounceInterval {
@@ -886,6 +1146,9 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
     private func drainHeartbeatRequestedSyncQueue() async {
         defer { heartbeatRequestedSyncTask = nil }
         while let request = heartbeatRequestedSyncQueue.peek() {
+            guard !Task.isCancelled else {
+                return
+            }
             if isSyncing {
                 diagnosticsStore.record(
                     phase: "heartbeatSyncRequestedTickAlreadyRunning",
@@ -926,26 +1189,43 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 latencyMs: latencyMs
             )
             let completedAt = Date()
-            let succeeded = await runHeartbeatRequestedSync(syncRunID: request.syncRunID)
+            let disposition = await runHeartbeatRequestedSync(syncRunID: request.syncRunID)
             let finishedAt = Date()
             let durationMs = max(0, finishedAt.timeIntervalSince(completedAt) * 1_000)
-            heartbeatRequestedSyncQueue.markFinished(request)
+            switch disposition {
+            case .completed:
+                heartbeatRequestedSyncQueue.markFinished(request)
+            case .retryableFailure:
+                _ = heartbeatRequestedSyncQueue.returnToPending(request)
+            case .terminalObsolete:
+                heartbeatRequestedSyncQueue.markTerminallyConsumed(request)
+            }
             if request.syncRunID != nil {
                 do {
                     try heartbeatRequestedSyncQueue.writePersistentState(
                         to: heartbeatRequestedSyncQueueFileURL
                     )
                 } catch {
+                    let persistenceOperation: String
+                    switch disposition {
+                    case .completed:
+                        persistenceOperation = "finish"
+                    case .retryableFailure:
+                        persistenceOperation = "returnToPending"
+                    case .terminalObsolete:
+                        persistenceOperation = "terminalConsume"
+                    }
                     diagnosticsStore.record(
                         phase: "heartbeatSyncRequestedTickQueuePersistenceFailed",
                         deviceID: connectionStore.snapshot.deviceID,
                         syncRunID: request.syncRunID,
-                        result: "operation=finish",
+                        result: "operation=\(persistenceOperation)",
                         errorCode: "sync_signal_queue_persist_failed"
                     )
                 }
             }
-            if succeeded {
+            switch disposition {
+            case .completed:
                 if request.syncRunID == nil {
                     lastUncorrelatedHeartbeatSyncCompletedAt = finishedAt
                 }
@@ -956,7 +1236,7 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                     result: "immediateSyncCompletedCount=1,immediateSyncDurationMs=\(Int(durationMs))",
                     latencyMs: durationMs
                 )
-            } else {
+            case .retryableFailure:
                 diagnosticsStore.record(
                     phase: "heartbeatSyncRequestedTickFailed",
                     deviceID: connectionStore.snapshot.deviceID,
@@ -965,18 +1245,43 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                     latencyMs: durationMs,
                     errorCode: "immediate_sync_failed"
                 )
+                diagnosticsStore.record(
+                    phase: "heartbeatSyncRequestedTickRetainedAfterFailedExecution",
+                    deviceID: connectionStore.snapshot.deviceID,
+                    syncRunID: request.syncRunID,
+                    result: "pendingForRetry",
+                    errorCode: "sync_tick_not_completed"
+                )
+                return
+            case .terminalObsolete(let errorCode):
+                diagnosticsStore.record(
+                    phase: "heartbeatSyncRequestedTickDiscardedTerminal",
+                    deviceID: connectionStore.snapshot.deviceID,
+                    syncRunID: request.syncRunID,
+                    result: "terminalConsumed",
+                    latencyMs: durationMs,
+                    errorCode: errorCode
+                )
             }
         }
     }
 
-    private func runHeartbeatRequestedSync(syncRunID: String?) async -> Bool {
+    private func runHeartbeatRequestedSync(
+        syncRunID: String?
+    ) async -> LocalNetworkSyncTickDisposition {
         if let heartbeatRequestedSyncHandler {
             return await heartbeatRequestedSyncHandler(syncRunID)
-        }
-        if runtimeConfiguration.gitBackedSyncEnabled {
-            return await performSync(trigger: "manual-sync-requested") != nil
+                ? .completed
+                : .retryableFailure
         }
         let snapshot = connectionStore.snapshot
+        let normalizedSyncRunID = syncRunID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedSyncRunID, !normalizedSyncRunID.isEmpty {
+            return await performPeerRequestedLocalNetworkSync(
+                snapshot: snapshot,
+                syncRunID: normalizedSyncRunID
+            )
+        }
         guard recordingManager != nil, uploadCoordinator != nil else {
             diagnosticsStore.record(
                 phase: "heartbeatSyncRequestedTickFailed",
@@ -984,10 +1289,12 @@ final class StudyLibrarySyncCoordinator: ObservableObject {
                 syncRunID: syncRunID,
                 errorCode: "local_network_executor_unavailable"
             )
-            return false
+            return .retryableFailure
         }
-        _ = await performLocalNetworkManualSync(snapshot: snapshot)
-        return true
+        return (await performLocalNetworkManualSync(
+            snapshot: snapshot,
+            reportsSuccess: true
+        )) != nil ? .completed : .retryableFailure
     }
 
     func recordSignedRequestSucceeded(settings: SecureMacConnectionSnapshot, now: Date = Date()) {
@@ -1811,6 +2118,24 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                 observedAt: receivedAt
             )
             let latencyMilliseconds = max(0, receivedAt.timeIntervalSince(now) * 1_000)
+            let reliablyQueuedSyncStartSignal: Bool?
+            if let syncStartSignal = response.syncStartSignal {
+                diagnosticsStore.record(
+                    phase: "syncStartSignalReceived",
+                    deviceID: snapshot.deviceID,
+                    heartbeatSequence: requestSequence,
+                    responseSequence: response.receivedSequenceNumber,
+                    syncRunID: syncStartSignal.syncRunID,
+                    result: syncStartSignal.reason
+                )
+                // Persist the correlated run before publishing presence as
+                // online. The online publisher starts the scheduler, so doing
+                // this afterwards lets foreground/timer runs supersede the
+                // Mac-requested run before it reaches /sync/inventory.
+                reliablyQueuedSyncStartSignal = await onSyncRequested?(syncStartSignal.syncRunID) ?? false
+            } else {
+                reliablyQueuedSyncStartSignal = nil
+            }
             let status = statusStore.recordHeartbeatSuccess(
                 deviceID: snapshot.deviceID,
                 displayName: displayName,
@@ -1868,28 +2193,42 @@ final class LocalNetworkHeartbeatMonitor: ObservableObject {
                     diagnosticsStore.record(phase: "statusFactRejected", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: exchangeResult?.reason, errorCode: exchangeResult?.stale == true ? "stale_status_envelope" : "status_fact_rejected")
                 }
                 if exchangeResult?.requestedActions.contains(.enqueueRunSyncSoon) == true {
-                    _ = await onSyncRequested?(nil)
+                    if response.syncStartSignal == nil {
+                        _ = await onSyncRequested?(nil)
+                    } else {
+                        diagnosticsStore.record(
+                            phase: "syncRequestedHintCoalescedWithCorrelatedRun",
+                            deviceID: snapshot.deviceID,
+                            heartbeatSequence: requestSequence,
+                            responseSequence: response.receivedSequenceNumber,
+                            syncRunID: response.syncStartSignal?.syncRunID,
+                            result: "enqueueRunSyncSoon"
+                        )
+                    }
                 }
                 if exchangeResult?.requestedActions.contains(.requestLightweightAudioProof) == true {
                     diagnosticsStore.record(phase: "peerProofUnavailable", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: "sendAudioProofRequestObserved")
                 }
                 if exchangeResult?.requestedActions.contains(.requestFullInventory) == true {
                     diagnosticsStore.record(phase: "fullInventoryRequested", deviceID: snapshot.deviceID, heartbeatSequence: requestSequence, requestPath: "/connection/heartbeat", responseSequence: response.receivedSequenceNumber, result: "requestOnly")
-                    _ = await onSyncRequested?(nil)
+                    if response.syncStartSignal == nil {
+                        _ = await onSyncRequested?(nil)
+                    } else {
+                        diagnosticsStore.record(
+                            phase: "syncRequestedHintCoalescedWithCorrelatedRun",
+                            deviceID: snapshot.deviceID,
+                            heartbeatSequence: requestSequence,
+                            responseSequence: response.receivedSequenceNumber,
+                            syncRunID: response.syncStartSignal?.syncRunID,
+                            result: "requestFullInventory"
+                        )
+                    }
                 }
             }
             if let syncStartSignal = response.syncStartSignal {
-                diagnosticsStore.record(
-                    phase: "syncStartSignalReceived",
-                    deviceID: snapshot.deviceID,
-                    heartbeatSequence: requestSequence,
-                    responseSequence: response.receivedSequenceNumber,
-                    syncRunID: syncStartSignal.syncRunID,
-                    result: syncStartSignal.reason
-                )
                 // ACK only after the bounded local run queue has reliably
                 // accepted this run (or proves it is already tracked).
-                let reliablyQueued = await onSyncRequested?(syncStartSignal.syncRunID) ?? false
+                let reliablyQueued = reliablyQueuedSyncStartSignal == true
                 if reliablyQueued {
                     do {
                         let ack = try await client.sendLocalNetworkSyncStartAck(
@@ -4171,6 +4510,67 @@ private enum LocalNetworkSyncExecutionError: LocalizedError {
     }
 }
 
+enum LocalNetworkSyncInventoryRetryPolicy {
+    static let maximumAttemptCount = 2
+
+    static func isRetryable(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else {
+            return false
+        }
+        return nsError.code == NSURLErrorNetworkConnectionLost
+            || nsError.code == NSURLErrorTimedOut
+    }
+}
+
+enum LocalNetworkSyncTickDisposition: Equatable {
+    case completed
+    case retryableFailure
+    case terminalObsolete(errorCode: String)
+
+    var didComplete: Bool {
+        self == .completed
+    }
+
+    var terminalErrorCode: String? {
+        guard case .terminalObsolete(let errorCode) = self else {
+            return nil
+        }
+        return errorCode
+    }
+}
+
+struct LocalNetworkSyncTickResult {
+    var plan: LocalNetworkSyncDiffPlan?
+    var disposition: LocalNetworkSyncTickDisposition
+
+    static func completed(_ plan: LocalNetworkSyncDiffPlan) -> LocalNetworkSyncTickResult {
+        LocalNetworkSyncTickResult(plan: plan, disposition: .completed)
+    }
+
+    static var retryableFailure: LocalNetworkSyncTickResult {
+        LocalNetworkSyncTickResult(plan: nil, disposition: .retryableFailure)
+    }
+
+    static func terminalObsolete(errorCode: String) -> LocalNetworkSyncTickResult {
+        LocalNetworkSyncTickResult(
+            plan: nil,
+            disposition: .terminalObsolete(errorCode: errorCode)
+        )
+    }
+}
+
+enum LocalNetworkSyncTerminalRunErrorClassifier {
+    static func terminalObsoleteErrorCode(for error: Error) -> String? {
+        guard let uploadError = error as? SecureMacUploadError,
+              case .serverRejected(let reason) = uploadError else {
+            return nil
+        }
+        let normalized = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == "stale_sync_run" ? normalized : nil
+    }
+}
+
 @MainActor
 final class LocalNetworkSyncEngine {
     private static let maxSmallArtifactUploadBytes: Int64 = 4 * 1024 * 1024
@@ -4351,6 +4751,20 @@ final class LocalNetworkSyncEngine {
         bypassBackoff: Bool = false,
         syncRunID providedSyncRunID: String? = nil
     ) async -> LocalNetworkSyncDiffPlan? {
+        await performTickResult(
+            trigger: trigger,
+            now: now,
+            bypassBackoff: bypassBackoff,
+            syncRunID: providedSyncRunID
+        ).plan
+    }
+
+    func performTickResult(
+        trigger: String,
+        now: Date = Date(),
+        bypassBackoff: Bool = false,
+        syncRunID providedSyncRunID: String? = nil
+    ) async -> LocalNetworkSyncTickResult {
         let snapshot = connectionStore.snapshot
         let syncRunID = providedSyncRunID ?? UUID().uuidString
         if providedSyncRunID == nil {
@@ -4366,7 +4780,7 @@ final class LocalNetworkSyncEngine {
                 result: "alreadyInFlight",
                 errorCode: "already_in_flight"
             )
-            return nil
+            return .retryableFailure
         }
         if !bypassBackoffForTrigger,
            let nextAllowedSyncAt = stateStore.state.nextAllowedSyncAt,
@@ -4385,14 +4799,14 @@ final class LocalNetworkSyncEngine {
                 result: "backoff",
                 errorCode: "backoff"
             )
-            return nil
+            return .retryableFailure
         }
 
         guard snapshot.isPaired else {
             diagnosticsStore.record(phase: "syncSkippedOffline", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "not_paired")
             diagnosticsStore.record(phase: "syncSkippedReason", deviceID: snapshot.deviceID, syncRunID: syncRunID, result: "not_paired", errorCode: "not_paired")
             stateStore.recordFailure(code: "not_paired", message: "Mac is not paired.", at: now)
-            return nil
+            return .retryableFailure
         }
         if (connectionStore as? SecureMacConnectionIntentProviding)?.userConnectionIntent == .disconnectedByUser {
             diagnosticsStore.record(
@@ -4413,7 +4827,7 @@ final class LocalNetworkSyncEngine {
                 message: "User does not want a local network connection.",
                 at: now
             )
-            return nil
+            return .retryableFailure
         }
         if let connectionStatusStore {
             guard let status = connectionStatusStore.status(for: snapshot.deviceID, now: now),
@@ -4439,7 +4853,7 @@ final class LocalNetworkSyncEngine {
                     message: "Mac presence is \(presence).",
                     at: now
                 )
-                return nil
+                return .retryableFailure
             }
         }
         if let status = connectionStatusStore?.status(for: snapshot.deviceID, now: now),
@@ -4458,7 +4872,7 @@ final class LocalNetworkSyncEngine {
                 message: status.lastError ?? "Mac connection is not available for sync.",
                 at: now
             )
-            return nil
+            return .retryableFailure
         }
 
         isSyncing = true
@@ -4485,11 +4899,10 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 result: "objectCount=\(localInventory.objects.count),recordings:\(localInventory.recordings.count),items:\(localInventory.studyItems.count),artifacts:\(localInventory.artifacts.count)"
             )
-            let peerResponse = try await client.fetchLocalNetworkSyncInventory(
+            let peerResponse = try await fetchPeerInventoryWithRetry(
                 settings: snapshot,
                 localInventory: localInventory,
-                syncRunID: syncRunID,
-                statusExchangeEnvelope: nil
+                syncRunID: syncRunID
             )
             guard peerResponse.ok, let peerInventory = peerResponse.inventory else {
                 throw SecureMacUploadError.serverRejected(peerResponse.error ?? "sync_inventory_missing")
@@ -4559,6 +4972,27 @@ final class LocalNetworkSyncEngine {
                 conflictCount: plan.conflictActions.count,
                 at: now
             )
+            let metadataExecution = Self.conflictIsolatedExecutionPlan(
+                plan,
+                localInventory: localInventory,
+                peerInventory: peerInventory
+            )
+            let isolatedUploadMetadataCount = plan.uploadMetadataActions.count
+                - metadataExecution.plan.uploadMetadataActions.count
+            if isolatedUploadMetadataCount > 0 {
+                diagnosticsStore.record(
+                    phase: "conflictExecutionActionsIsolated",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "isolatedUploadMetadata=\(isolatedUploadMetadataCount),conflicts=\(plan.conflictActions.count)"
+                )
+            }
+            try await uploadLocalMetadataIfNeeded(
+                localInventory: localInventory,
+                plan: metadataExecution.plan,
+                settings: snapshot,
+                syncRunID: syncRunID
+            )
             stateStore.recordSuccess(
                 peerDeviceID: peerInventory.device.deviceID,
                 localInventoryHash: localInventory.inventoryHash,
@@ -4577,8 +5011,25 @@ final class LocalNetworkSyncEngine {
             diagnosticsStore.record(phase: "syncTickCompleted", deviceID: snapshot.deviceID, syncRunID: syncRunID)
             diagnosticsStore.record(phase: "syncRunCompleted", deviceID: snapshot.deviceID, syncRunID: syncRunID)
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .completed)
-            return plan
+            return .completed(plan)
         } catch {
+            if let terminalErrorCode = LocalNetworkSyncTerminalRunErrorClassifier
+                .terminalObsoleteErrorCode(for: error) {
+                diagnosticsStore.record(
+                    phase: "syncRunDiscardedTerminal",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "terminalObsolete",
+                    errorCode: terminalErrorCode
+                )
+                recordControlPlane(
+                    deviceID: snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    state: .cancelled
+                )
+                stateStore.recordActiveTransfers([])
+                return .terminalObsolete(errorCode: terminalErrorCode)
+            }
             diagnosticsStore.record(phase: "syncTickFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_discovery_failed", errorMessage: error.localizedDescription)
             diagnosticsStore.record(phase: "syncRunFailed", deviceID: snapshot.deviceID, syncRunID: syncRunID, errorCode: "sync_discovery_failed", errorMessage: error.localizedDescription)
             recordControlPlane(deviceID: snapshot.deviceID, syncRunID: syncRunID, state: .failed)
@@ -4588,7 +5039,61 @@ final class LocalNetworkSyncEngine {
                 syncRunID: syncRunID,
                 at: now
             )
-            return nil
+            return .retryableFailure
+        }
+    }
+
+    private func fetchPeerInventoryWithRetry(
+        settings: SecureMacConnectionSnapshot,
+        localInventory: LocalNetworkSyncInventory,
+        syncRunID: String
+    ) async throws -> LocalNetworkSyncInventoryResponse {
+        var attempt = 1
+        while true {
+            do {
+                let response = try await client.fetchLocalNetworkSyncInventory(
+                    settings: settings,
+                    localInventory: localInventory,
+                    syncRunID: syncRunID,
+                    statusExchangeEnvelope: nil
+                )
+                if attempt > 1, response.ok, response.inventory != nil {
+                    diagnosticsStore.record(
+                        phase: "syncInventoryFetchRetrySucceeded",
+                        deviceID: settings.deviceID,
+                        requestPath: "/sync/inventory",
+                        syncRunID: syncRunID,
+                        result: "attempt=\(attempt)"
+                    )
+                }
+                return response
+            } catch {
+                let nsError = error as NSError
+                let retryable = LocalNetworkSyncInventoryRetryPolicy.isRetryable(error)
+                guard retryable, attempt < LocalNetworkSyncInventoryRetryPolicy.maximumAttemptCount else {
+                    if retryable, attempt > 1 {
+                        diagnosticsStore.record(
+                            phase: "syncInventoryFetchRetryExhausted",
+                            deviceID: settings.deviceID,
+                            requestPath: "/sync/inventory",
+                            syncRunID: syncRunID,
+                            result: "attempt=\(attempt),errorDomain=\(nsError.domain)",
+                            errorCode: String(nsError.code)
+                        )
+                    }
+                    throw error
+                }
+                diagnosticsStore.record(
+                    phase: "syncInventoryFetchRetryScheduled",
+                    deviceID: settings.deviceID,
+                    requestPath: "/sync/inventory",
+                    syncRunID: syncRunID,
+                    result: "attempt=\(attempt),nextAttempt=\(attempt + 1),errorDomain=\(nsError.domain)",
+                    errorCode: String(nsError.code)
+                )
+                attempt += 1
+                try await Task.sleep(nanoseconds: 150_000_000)
+            }
         }
     }
 
@@ -11501,7 +12006,9 @@ enum LocalNetworkSyncStartGate {
         isActive: Bool,
         snapshot: SecureMacConnectionSnapshot,
         status: DeviceConnectionStatus?,
-        userConnectionIntent: UserConnectionIntent = .wantsConnected
+        userConnectionIntent: UserConnectionIntent = .wantsConnected,
+        activationStartedAt: Date? = nil,
+        now: Date = Date()
     ) -> Bool {
         guard isActive, snapshot.isPaired, userConnectionIntent == .wantsConnected else {
             return false
@@ -11510,17 +12017,90 @@ enum LocalNetworkSyncStartGate {
               status?.presenceState != .securityError else {
             return false
         }
-        return status?.presenceSnapshot().isOnline == true
+        guard status?.presenceSnapshot(now: now).isOnline == true else {
+            return false
+        }
+        guard let activationStartedAt else {
+            return true
+        }
+        return status?.lastSuccessfulHeartbeatAt.map { $0 >= activationStartedAt } == true
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncActivationState {
+    private(set) var isActive = false
+    private(set) var startedAt: Date?
+
+    func activate(at date: Date = Date()) {
+        isActive = true
+        startedAt = date
+    }
+
+    func requireFreshHeartbeat(since date: Date = Date()) {
+        guard isActive else {
+            return
+        }
+        startedAt = date
+    }
+
+    func suspend() {
+        isActive = false
+        startedAt = nil
+    }
+}
+
+@MainActor
+final class LocalNetworkSyncRunExecutionGate {
+    static let shared = LocalNetworkSyncRunExecutionGate()
+
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    var queuedWaiterCount: Int { waiters.count }
+
+    /// Returns true when this caller had to wait behind another owner.
+    func acquire() async -> Bool {
+        guard isHeld else {
+            isHeld = true
+            return false
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        return true
+    }
+
+    func tryAcquire() -> Bool {
+        guard !isHeld else {
+            return false
+        }
+        isHeld = true
+        return true
+    }
+
+    func release() {
+        guard isHeld else {
+            return
+        }
+        guard !waiters.isEmpty else {
+            isHeld = false
+            return
+        }
+        waiters.removeFirst().resume()
     }
 }
 
 @MainActor
 final class LocalNetworkSyncScheduler {
-    typealias TickHandler = @MainActor (String, String?) async -> Void
+    typealias TickHandler = @MainActor (String, String?) async -> Bool
+    typealias DispositionTickHandler = @MainActor (
+        String,
+        String?
+    ) async -> LocalNetworkSyncTickDisposition
     typealias InFlightHandler = @MainActor (String) -> Void
 
     private let interval: TimeInterval
-    private let tickHandler: TickHandler
+    private let dispositionTickHandler: DispositionTickHandler
     private let inFlightHandler: InFlightHandler?
     private var periodicTask: Task<Void, Never>?
     private var pendingRequestAfterCurrentRun: (trigger: String, syncRunID: String?)?
@@ -11536,22 +12116,47 @@ final class LocalNetworkSyncScheduler {
     ) {
         self.interval = LocalNetworkSyncInterval.normalized(interval)
         self.inFlightHandler = onInFlightRequestQueued
-        self.tickHandler = tickHandler
+        dispositionTickHandler = { trigger, syncRunID in
+            (await tickHandler(trigger, syncRunID)) ? .completed : .retryableFailure
+        }
+    }
+
+    init(
+        interval: TimeInterval = 60,
+        onInFlightRequestQueued: InFlightHandler? = nil,
+        dispositionTickHandler: @escaping DispositionTickHandler
+    ) {
+        self.interval = LocalNetworkSyncInterval.normalized(interval)
+        self.inFlightHandler = onInFlightRequestQueued
+        self.dispositionTickHandler = dispositionTickHandler
     }
 
     convenience init(engine: LocalNetworkSyncEngine, interval: TimeInterval = 60) {
-        self.init(interval: interval) { trigger, syncRunID in
-            _ = await engine.performTick(trigger: trigger, syncRunID: syncRunID)
-        }
+        self.init(
+            interval: interval,
+            dispositionTickHandler: { trigger, syncRunID in
+                await engine.performTickResult(
+                    trigger: trigger,
+                    syncRunID: syncRunID
+                ).disposition
+            }
+        )
     }
 
     @discardableResult
     func foregroundTick() async -> Bool {
-        await runTickIfPossible(trigger: "foreground")
+        (await runTickIfPossible(trigger: "foreground")).didComplete
     }
 
     @discardableResult
     func requestTick(trigger: String = "manual", syncRunID: String? = nil) async -> Bool {
+        (await requestTickDisposition(trigger: trigger, syncRunID: syncRunID)).didComplete
+    }
+
+    func requestTickDisposition(
+        trigger: String = "manual",
+        syncRunID: String? = nil
+    ) async -> LocalNetworkSyncTickDisposition {
         await runTickIfPossible(trigger: trigger, syncRunID: syncRunID)
     }
 
@@ -11564,8 +12169,10 @@ final class LocalNetworkSyncScheduler {
                 guard let self else {
                     return
                 }
+                guard await LocalNetworkSyncDebounceDelay.wait(seconds: self.interval) else {
+                    return
+                }
                 self.scheduleTick(trigger: "timer")
-                try? await Task.sleep(nanoseconds: UInt64(self.interval * 1_000_000_000))
             }
         }
     }
@@ -11588,25 +12195,74 @@ final class LocalNetworkSyncScheduler {
     }
 
     @discardableResult
-    private func runTickIfPossible(trigger: String, syncRunID: String? = nil) async -> Bool {
+    private func runTickIfPossible(
+        trigger: String,
+        syncRunID: String? = nil
+    ) async -> LocalNetworkSyncTickDisposition {
         if isTickInFlight {
-            pendingRequestAfterCurrentRun = (trigger, syncRunID)
-            inFlightHandler?(trigger)
-            return false
+            let candidate = (trigger: trigger, syncRunID: syncRunID)
+            var didQueueCandidate = false
+            // Foreground and timer ticks are opportunistic. Queuing either
+            // behind an active run can create a new run immediately before a
+            // durable, correlated request is drained.
+            if Self.priority(of: candidate) >= 2 {
+                if let pendingRequestAfterCurrentRun {
+                    if Self.priority(of: candidate) > Self.priority(of: pendingRequestAfterCurrentRun) {
+                        self.pendingRequestAfterCurrentRun = candidate
+                        didQueueCandidate = true
+                    }
+                } else {
+                    pendingRequestAfterCurrentRun = candidate
+                    didQueueCandidate = true
+                }
+            }
+            if didQueueCandidate {
+                inFlightHandler?(trigger)
+            }
+            return .retryableFailure
         }
 
         isTickInFlight = true
         var nextRequest: (trigger: String, syncRunID: String?)? = (trigger, syncRunID)
+        var requestedTickDisposition: LocalNetworkSyncTickDisposition = .retryableFailure
+        var isRequestedTick = true
         defer {
             isTickInFlight = false
             pendingRequestAfterCurrentRun = nil
         }
         while let currentRequest = nextRequest {
             pendingRequestAfterCurrentRun = nil
-            await tickHandler(currentRequest.trigger, currentRequest.syncRunID)
+            let disposition = await dispositionTickHandler(
+                currentRequest.trigger,
+                currentRequest.syncRunID
+            )
+            if isRequestedTick {
+                requestedTickDisposition = disposition
+                isRequestedTick = false
+            }
             nextRequest = pendingRequestAfterCurrentRun
         }
-        return true
+        return requestedTickDisposition
+    }
+
+    private static func priority(of request: (trigger: String, syncRunID: String?)) -> Int {
+        let trigger = request.trigger.lowercased()
+        if trigger.contains("manualpeersyncrequested") || trigger == "manual-sync-requested" {
+            return request.syncRunID == nil ? 4 : 5
+        }
+        if trigger.hasPrefix("event-driven:") {
+            return 3
+        }
+        if trigger.contains("manual") {
+            return 2
+        }
+        if trigger == "foreground" {
+            return 1
+        }
+        if trigger == "timer" {
+            return 0
+        }
+        return 2
     }
 }
 
@@ -11722,6 +12378,10 @@ struct LocalNetworkSyncDurableSignalQueue {
                   !completedRunIDs.contains(normalizedRunID) else {
                 return .duplicate
             }
+            // A correlated run from the Mac carries stronger causality than an
+            // earlier generic "sync soon" hint. Keeping the nil request ahead
+            // of it can create a fresh run that supersedes the correlated one.
+            pending.removeAll { $0.syncRunID == nil }
         } else if pending.contains(where: { $0.syncRunID == nil }) || hasUncorrelatedRequestInFlight {
             return .duplicate
         }
@@ -11793,6 +12453,43 @@ struct LocalNetworkSyncDurableSignalQueue {
         while completedRunIDOrder.count > maximumCompletedRunIDCount {
             completedRunIDs.remove(completedRunIDOrder.removeFirst())
         }
+    }
+
+    /// Removes an obsolete correlated run from the durable queue and keeps
+    /// its run ID in the bounded dedupe history. This is terminal consumption,
+    /// not a successful synchronization.
+    mutating func markTerminallyConsumed(_ request: Request) {
+        markFinished(request)
+    }
+
+    /// Moves a failed in-flight request back to the head of the queue. A
+    /// correlated run must remain durable until its inventory tick actually
+    /// succeeds; merely starting the scheduler is not completion.
+    @discardableResult
+    mutating func returnToPending(_ request: Request) -> Bool {
+        if let syncRunID = request.syncRunID {
+            guard inFlightRunIDs.remove(syncRunID) != nil else {
+                return false
+            }
+            inFlight.removeAll { $0.syncRunID == syncRunID }
+            guard !pendingRunIDs.contains(syncRunID),
+                  !completedRunIDs.contains(syncRunID) else {
+                return false
+            }
+            pending.insert(request, at: 0)
+            pendingRunIDs.insert(syncRunID)
+            return true
+        }
+
+        guard hasUncorrelatedRequestInFlight else {
+            return false
+        }
+        inFlight.removeAll { $0 == request }
+        hasUncorrelatedRequestInFlight = false
+        if !pending.contains(where: { $0.syncRunID == nil }) {
+            pending.insert(request, at: 0)
+        }
+        return true
     }
 
     func persistentState() -> PersistentState {
@@ -11904,7 +12601,9 @@ final class LocalNetworkSyncAppService: ObservableObject {
     private let scheduler: LocalNetworkSyncScheduler
     private let heartbeatMonitor: LocalNetworkHeartbeatMonitor
     private let macToIPhoneUploadReceiver: MacToIPhoneUploadReceiver
-    private var isActive = false
+    private let activationState: LocalNetworkSyncActivationState
+    private var isActive: Bool { activationState.isActive }
+    private var activationStartedAt: Date? { activationState.startedAt }
     private var retryDrainTask: Task<Void, Never>?
     private var uploadLedgerObserver: NSObjectProtocol?
     private var syncEventObserver: NSObjectProtocol?
@@ -11935,7 +12634,11 @@ final class LocalNetworkSyncAppService: ObservableObject {
         durableSyncSignalQueue.hasPendingRequests || !pendingSyncEventReasons.isEmpty
     }
 
-    init(interval: TimeInterval = 60, durableSignalQueueFileURL: URL? = nil) {
+    init(
+        interval: TimeInterval = 60,
+        durableSignalQueueFileURL: URL? = nil,
+        syncRunExecutionGate: LocalNetworkSyncRunExecutionGate? = nil
+    ) {
         let audioFileStore = AudioFileStore()
         let recordingManager = RecordingManager(fileStore: audioFileStore)
         let connectionStore = SecureMacConnectionStore()
@@ -11964,6 +12667,8 @@ final class LocalNetworkSyncAppService: ObservableObject {
             enforcesReconciliationMarks: true
         )
         let kernelSwitchResult = kernelSwitchResultProvider()
+        let resolvedSyncRunExecutionGate = syncRunExecutionGate ?? .shared
+        let activationState = LocalNetworkSyncActivationState()
         let eventTickContextStore = LocalNetworkSyncEventTickContextStore()
         let localNetworkSyncStateStore = LocalNetworkSyncStateStore()
         let macToIPhoneUploadReceiver = MacToIPhoneUploadReceiver(
@@ -11994,6 +12699,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
         self.durableSyncSignalQueue = recoveredDurableSignalQueue
         self.durableSyncSignalQueueFileURL = resolvedDurableSignalQueueFileURL
         self.syncEventTickContextStore = eventTickContextStore
+        self.activationState = activationState
         let heartbeatMonitor = LocalNetworkHeartbeatMonitor(
             connectionStore: connectionStore,
             client: secureClient,
@@ -12049,8 +12755,71 @@ final class LocalNetworkSyncAppService: ObservableObject {
                         result: "followUpSyncQueuedCount=1"
                     )
                 }
+            },
+            dispositionTickHandler: { trigger, syncRunID in
+            if trigger == "foreground" || trigger == "timer" {
+                guard resolvedSyncRunExecutionGate.tryAcquire() else {
+                    ConnectionDiagnosticsStore.shared.record(
+                        phase: "syncAutomaticTickSkippedExecutionGateBusy",
+                        deviceID: connectionStore.snapshot.deviceID,
+                        syncRunID: syncRunID,
+                        result: trigger,
+                        errorCode: "execution_gate_busy"
+                    )
+                    return .retryableFailure
+                }
+            } else {
+                let waitedForAnotherRun = await resolvedSyncRunExecutionGate.acquire()
+                if waitedForAnotherRun {
+                    ConnectionDiagnosticsStore.shared.record(
+                        phase: "syncExecutionGateWaitCompleted",
+                        deviceID: connectionStore.snapshot.deviceID,
+                        syncRunID: syncRunID,
+                        result: trigger
+                    )
+                }
             }
-        ) { trigger, syncRunID in
+            defer { resolvedSyncRunExecutionGate.release() }
+            guard !Task.isCancelled else {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncExecutionGateCancelled",
+                    deviceID: connectionStore.snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: trigger,
+                    errorCode: "cancelled"
+                )
+                return .retryableFailure
+            }
+            // A durable request may have waited behind another owner while the
+            // app moved to the background or the fresh heartbeat expired.
+            // Revalidate after acquiring the shared gate so it is never marked
+            // complete without a real inventory attempt.
+            connectionStore.refreshFromStorage()
+            let executionSnapshot = connectionStore.snapshot
+            let executionNow = Date()
+            let executionStatus = connectionStatusStore.status(
+                for: executionSnapshot.deviceID,
+                now: executionNow
+            )
+            guard LocalNetworkSyncStartGate.canRun(
+                isActive: activationState.isActive,
+                snapshot: executionSnapshot,
+                status: executionStatus,
+                userConnectionIntent: connectionStore.userConnectionIntent,
+                activationStartedAt: activationState.startedAt,
+                now: executionNow
+            ) else {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncTickDeferredAfterExecutionGateWait",
+                    deviceID: executionSnapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: trigger,
+                    errorCode: activationState.isActive
+                        ? "presence_or_fresh_heartbeat_required"
+                        : "app_inactive"
+                )
+                return .retryableFailure
+            }
             if Self.isEventDrivenTrigger(trigger) {
                 let context = syncRunID.flatMap { eventTickContextStore.context(for: $0) }
                 let startedAt = Date()
@@ -12075,25 +12844,64 @@ final class LocalNetworkSyncAppService: ObservableObject {
                         latencyMs: startLatencyMs
                     )
                 }
-                let plan = await engine.performTick(trigger: trigger, syncRunID: syncRunID)
+                let tickResult = await engine.performTickResult(
+                    trigger: trigger,
+                    syncRunID: syncRunID
+                )
+                let plan = tickResult.plan
+                let terminalErrorCode = tickResult.disposition.terminalErrorCode
                 let finishedAt = Date()
                 let durationMs = max(0, finishedAt.timeIntervalSince(startedAt) * 1_000)
                 let completeLatencyMs = context.map { max(0, finishedAt.timeIntervalSince($0.firstReceivedAt) * 1_000) }
                 ConnectionDiagnosticsStore.shared.record(
-                    phase: plan == nil ? "syncEventImmediateTickFailed" : "syncEventImmediateTickCompleted",
+                    phase: plan != nil
+                        ? "syncEventImmediateTickCompleted"
+                        : terminalErrorCode == nil
+                            ? "syncEventImmediateTickFailed"
+                            : "syncEventImmediateTickDiscardedTerminal",
                     deviceID: connectionStore.snapshot.deviceID,
                     syncRunID: syncRunID,
                     result: Self.eventTickMetricsSummary(
                         completed: plan == nil ? 0 : 1,
-                        failed: plan == nil ? 1 : 0,
+                        failed: plan == nil && terminalErrorCode == nil ? 1 : 0,
                         durationMs: Int(durationMs),
                         reasons: context?.reasonsSummary ?? Self.redactedTriggerSummary(trigger),
                         coalescedReasonCount: context?.coalescedReasonCount ?? 0
                     ),
                     latencyMs: completeLatencyMs ?? durationMs,
-                    errorCode: plan == nil ? "immediate_sync_failed" : nil
+                    errorCode: terminalErrorCode ?? (plan == nil ? "immediate_sync_failed" : nil)
                 )
                 if context?.reasons.contains(.manualPeerSyncRequested) == true {
+                    if terminalErrorCode == nil {
+                        ConnectionDiagnosticsStore.shared.record(
+                            phase: plan == nil ? "heartbeatSyncRequestedTickFailed" : "heartbeatSyncRequestedTickCompleted",
+                            deviceID: connectionStore.snapshot.deviceID,
+                            syncRunID: syncRunID,
+                            result: "\(plan == nil ? "immediateSyncFailedCount" : "immediateSyncCompletedCount")=1,immediateSyncDurationMs=\(Int(durationMs))",
+                            latencyMs: durationMs,
+                            errorCode: plan == nil ? "immediate_sync_failed" : nil
+                        )
+                    }
+                }
+                if let syncRunID {
+                    eventTickContextStore.removeContext(for: syncRunID)
+                }
+                return tickResult.disposition
+            } else if trigger == "manual-sync-requested" {
+                let startedAt = Date()
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickStarted",
+                    deviceID: connectionStore.snapshot.deviceID,
+                    syncRunID: syncRunID,
+                    result: "immediateSyncStartedCount=1"
+                )
+                let tickResult = await engine.performTickResult(
+                    trigger: trigger,
+                    syncRunID: syncRunID
+                )
+                let plan = tickResult.plan
+                let durationMs = max(0, Date().timeIntervalSince(startedAt) * 1_000)
+                if tickResult.disposition.terminalErrorCode == nil {
                     ConnectionDiagnosticsStore.shared.record(
                         phase: plan == nil ? "heartbeatSyncRequestedTickFailed" : "heartbeatSyncRequestedTickCompleted",
                         deviceID: connectionStore.snapshot.deviceID,
@@ -12103,31 +12911,14 @@ final class LocalNetworkSyncAppService: ObservableObject {
                         errorCode: plan == nil ? "immediate_sync_failed" : nil
                     )
                 }
-                if let syncRunID {
-                    eventTickContextStore.removeContext(for: syncRunID)
-                }
-            } else if trigger == "manual-sync-requested" {
-                let startedAt = Date()
-                ConnectionDiagnosticsStore.shared.record(
-                    phase: "heartbeatSyncRequestedTickStarted",
-                    deviceID: connectionStore.snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "immediateSyncStartedCount=1"
-                )
-                let plan = await engine.performTick(trigger: trigger, syncRunID: syncRunID)
-                let durationMs = max(0, Date().timeIntervalSince(startedAt) * 1_000)
-                ConnectionDiagnosticsStore.shared.record(
-                    phase: plan == nil ? "heartbeatSyncRequestedTickFailed" : "heartbeatSyncRequestedTickCompleted",
-                    deviceID: connectionStore.snapshot.deviceID,
-                    syncRunID: syncRunID,
-                    result: "\(plan == nil ? "immediateSyncFailedCount" : "immediateSyncCompletedCount")=1,immediateSyncDurationMs=\(Int(durationMs))",
-                    latencyMs: durationMs,
-                    errorCode: plan == nil ? "immediate_sync_failed" : nil
-                )
+                return tickResult.disposition
             } else {
-                _ = await engine.performTick(trigger: trigger, syncRunID: syncRunID)
+                return await engine.performTickResult(
+                    trigger: trigger,
+                    syncRunID: syncRunID
+                ).disposition
             }
-        }
+        })
         self.scheduler = scheduler
         self.heartbeatMonitor.onSyncRequested = { [weak self] syncRunID in
             guard let self else {
@@ -12223,7 +13014,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
 
     func activate() {
         connectionStore.refreshFromStorage()
-        isActive = true
+        activationState.activate()
         ConnectionDiagnosticsStore.shared.record(phase: "appBecameActive", deviceID: connectionStore.snapshot.deviceID)
         ConnectionDiagnosticsStore.shared.record(
             phase: "userConnectionIntentLoaded",
@@ -12231,9 +13022,6 @@ final class LocalNetworkSyncAppService: ObservableObject {
             result: connectionStore.userConnectionIntent.rawValue
         )
         startPairedServicesIfPossible()
-        if hasPendingImmediateSyncEvents {
-            queueImmediateSync(reason: .appForegroundedWithPendingChanges)
-        }
     }
 
     func requestUploadLedgerTick() {
@@ -12287,6 +13075,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
             scheduler.stop()
             return
         }
+        activationState.requireFreshHeartbeat()
         startPairedServicesIfPossible()
     }
 
@@ -12328,11 +13117,15 @@ final class LocalNetworkSyncAppService: ObservableObject {
 
     private func startSchedulerIfOnline() {
         let snapshot = connectionStore.snapshot
+        let now = Date()
+        let status = connectionStatusStore.status(for: snapshot.deviceID, now: now)
         guard LocalNetworkSyncStartGate.canRun(
             isActive: isActive,
             snapshot: snapshot,
-            status: connectionStatusStore.status(for: snapshot.deviceID),
-            userConnectionIntent: connectionStore.userConnectionIntent
+            status: status,
+            userConnectionIntent: connectionStore.userConnectionIntent,
+            activationStartedAt: activationStartedAt,
+            now: now
         ) else {
             scheduler.stop()
             retryDrainTask?.cancel()
@@ -12343,6 +13136,12 @@ final class LocalNetworkSyncAppService: ObservableObject {
                     deviceID: snapshot.deviceID,
                     errorCode: "user_does_not_want_connection"
                 )
+            } else if isWaitingForFreshActivationHeartbeat(status: status) {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncSchedulerDeferredUntilFreshHeartbeat",
+                    deviceID: snapshot.deviceID,
+                    errorCode: "fresh_activation_heartbeat_required"
+                )
             } else {
                 ConnectionDiagnosticsStore.shared.record(phase: "syncSkippedOffline", deviceID: snapshot.deviceID, errorCode: "presence_not_online")
             }
@@ -12351,7 +13150,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
 
         guard !scheduler.isRunning else {
             if hasPendingImmediateSyncEvents {
-                queueImmediateSync(reason: .appForegroundedWithPendingChanges)
+                scheduleImmediateSyncEventDrain(now: Date())
             }
             return
         }
@@ -12359,11 +13158,12 @@ final class LocalNetworkSyncAppService: ObservableObject {
         scheduler.startPeriodicTicks()
         startRetryDrainerIfNeeded()
         ConnectionDiagnosticsStore.shared.record(phase: "syncSchedulerStarted", deviceID: connectionStore.snapshot.deviceID)
-        Task {
-            await scheduler.foregroundTick()
-        }
         if hasPendingImmediateSyncEvents {
-            queueImmediateSync(reason: .appForegroundedWithPendingChanges)
+            scheduleImmediateSyncEventDrain(now: Date())
+        } else {
+            Task {
+                await scheduler.foregroundTick()
+            }
         }
     }
 
@@ -12385,11 +13185,14 @@ final class LocalNetworkSyncAppService: ObservableObject {
     private func drainRetryJobsIfPossible() async {
         connectionStore.refreshFromStorage()
         let snapshot = connectionStore.snapshot
+        let now = Date()
         guard LocalNetworkSyncStartGate.canRun(
             isActive: isActive,
             snapshot: snapshot,
-            status: connectionStatusStore.status(for: snapshot.deviceID),
-            userConnectionIntent: connectionStore.userConnectionIntent
+            status: connectionStatusStore.status(for: snapshot.deviceID, now: now),
+            userConnectionIntent: connectionStore.userConnectionIntent,
+            activationStartedAt: activationStartedAt,
+            now: now
         ) else {
             return
         }
@@ -12592,17 +13395,23 @@ final class LocalNetworkSyncAppService: ObservableObject {
             return true
         }
 
+        let status = connectionStatusStore.status(for: snapshot.deviceID, now: now)
         guard LocalNetworkSyncStartGate.canRun(
             isActive: isActive,
             snapshot: snapshot,
-            status: connectionStatusStore.status(for: snapshot.deviceID, now: now),
-            userConnectionIntent: connectionStore.userConnectionIntent
+            status: status,
+            userConnectionIntent: connectionStore.userConnectionIntent,
+            activationStartedAt: activationStartedAt,
+            now: now
         ) else {
+            let waitingForFreshHeartbeat = isWaitingForFreshActivationHeartbeat(status: status)
             let errorCode = connectionStore.userConnectionIntent == .disconnectedByUser
                 ? "user_does_not_want_connection"
-                : "presence_not_online"
+                : waitingForFreshHeartbeat ? "fresh_activation_heartbeat_required" : "presence_not_online"
             ConnectionDiagnosticsStore.shared.record(
-                phase: "syncEventImmediateTickDeferredOffline",
+                phase: waitingForFreshHeartbeat
+                    ? "syncEventImmediateTickDeferredFreshHeartbeat"
+                    : "syncEventImmediateTickDeferredOffline",
                 deviceID: snapshot.deviceID,
                 syncRunID: syncRunID,
                 result: "reason=\(reason.rawValue),deferredOfflineCount=1",
@@ -12660,19 +13469,29 @@ final class LocalNetworkSyncAppService: ObservableObject {
         let previewReasons = durablePreview == nil
             ? Self.reasonSummary(pendingSyncEventReasons)
             : SyncTriggerReason.manualPeerSyncRequested.rawValue
+        let status = connectionStatusStore.status(for: snapshot.deviceID, now: now)
         guard LocalNetworkSyncStartGate.canRun(
             isActive: isActive,
             snapshot: snapshot,
-            status: connectionStatusStore.status(for: snapshot.deviceID, now: now),
-            userConnectionIntent: connectionStore.userConnectionIntent
+            status: status,
+            userConnectionIntent: connectionStore.userConnectionIntent,
+            activationStartedAt: activationStartedAt,
+            now: now
         ) else {
-            let phase = isActive ? "syncEventImmediateTickDeferredOffline" : "syncEventImmediateTickDeferredBackground"
+            let waitingForFreshHeartbeat = isWaitingForFreshActivationHeartbeat(status: status)
+            let phase = !isActive
+                ? "syncEventImmediateTickDeferredBackground"
+                : waitingForFreshHeartbeat
+                    ? "syncEventImmediateTickDeferredFreshHeartbeat"
+                    : "syncEventImmediateTickDeferredOffline"
             ConnectionDiagnosticsStore.shared.record(
                 phase: phase,
                 deviceID: snapshot.deviceID,
                 syncRunID: previewSyncRunID,
                 result: "reasons=\(previewReasons)",
-                errorCode: isActive ? "presence_not_online" : "app_inactive"
+                errorCode: !isActive
+                    ? "app_inactive"
+                    : waitingForFreshHeartbeat ? "fresh_activation_heartbeat_required" : "presence_not_online"
             )
             return
         }
@@ -12687,12 +13506,12 @@ final class LocalNetworkSyncAppService: ObservableObject {
             scheduleImmediateSyncEventDrain(now: now)
             return
         }
-        if durablePreview != nil, scheduler.isTickInFlight {
+        if scheduler.isTickInFlight {
             ConnectionDiagnosticsStore.shared.record(
                 phase: "heartbeatSyncRequestedTickAlreadyRunning",
                 deviceID: snapshot.deviceID,
                 syncRunID: previewSyncRunID,
-                result: "pendingInDurableQueue",
+                result: durablePreview == nil ? "pendingEventQueue" : "pendingInDurableQueue",
                 errorCode: "already_running"
             )
             scheduleImmediateSyncEventDrain(now: now)
@@ -12753,14 +13572,84 @@ final class LocalNetworkSyncAppService: ObservableObject {
             syncRunID: syncRunID,
             result: "immediateSyncQueuedCount=1,reasons=\(reasonsSummary),eventTriggerReceivedCount=\(receivedCount),eventTriggerCoalescedCount=\(coalescedCount)"
         )
-        _ = await scheduler.requestTick(trigger: "event-driven:\(reasonsSummary)", syncRunID: syncRunID)
-        if let durableRequest {
-            durableSyncSignalQueue.markFinished(durableRequest)
-            if durableRequest.syncRunID != nil {
-                persistDurableSyncSignalQueue(operation: "finish", syncRunID: durableRequest.syncRunID)
+        let tickDisposition = await scheduler.requestTickDisposition(
+            trigger: "event-driven:\(reasonsSummary)",
+            syncRunID: syncRunID
+        )
+        switch tickDisposition {
+        case .completed:
+            if let durableRequest {
+                durableSyncSignalQueue.markFinished(durableRequest)
+                if durableRequest.syncRunID != nil {
+                    persistDurableSyncSignalQueue(
+                        operation: "finish",
+                        syncRunID: durableRequest.syncRunID
+                    )
+                }
+            }
+        case .terminalObsolete(let errorCode):
+            if let durableRequest {
+                durableSyncSignalQueue.markTerminallyConsumed(durableRequest)
+                if durableRequest.syncRunID != nil {
+                    persistDurableSyncSignalQueue(
+                        operation: "terminalConsume",
+                        syncRunID: durableRequest.syncRunID
+                    )
+                }
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickDiscardedTerminal",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: durableRequest.syncRunID,
+                    result: "terminalConsumed",
+                    errorCode: errorCode
+                )
+            } else {
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncEventImmediateTickDiscardedTerminal",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: requestedSyncRunID,
+                    result: "reasons=\(reasonsSummary)",
+                    errorCode: errorCode
+                )
+            }
+        case .retryableFailure:
+            if let durableRequest {
+                _ = durableSyncSignalQueue.returnToPending(durableRequest)
+                if durableRequest.syncRunID != nil {
+                    persistDurableSyncSignalQueue(
+                        operation: "returnToPending",
+                        syncRunID: durableRequest.syncRunID
+                    )
+                }
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "heartbeatSyncRequestedTickRetainedAfterFailedExecution",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: durableRequest.syncRunID,
+                    result: "pendingForRetry",
+                    errorCode: "sync_tick_not_completed"
+                )
+            } else {
+                // Actor reentrancy can admit newer events while the tick awaits.
+                // Merge this failed batch back into that newer pending state.
+                pendingSyncEventReasons.formUnion(reasons)
+                pendingSyncEventRunID = requestedSyncRunID ?? pendingSyncEventRunID
+                if let pendingFirstReceivedAt = pendingSyncEventFirstReceivedAt {
+                    pendingSyncEventFirstReceivedAt = min(pendingFirstReceivedAt, firstReceivedAt)
+                } else {
+                    pendingSyncEventFirstReceivedAt = firstReceivedAt
+                }
+                pendingSyncEventReceivedCount += receivedCount
+                pendingSyncEventCoalescedCount += coalescedCount
+                ConnectionDiagnosticsStore.shared.record(
+                    phase: "syncEventImmediateTickRetainedAfterFailedExecution",
+                    deviceID: snapshot.deviceID,
+                    syncRunID: requestedSyncRunID,
+                    result: "reasons=\(reasonsSummary)",
+                    errorCode: "sync_tick_not_completed"
+                )
             }
         }
-        if hasPendingImmediateSyncEvents {
+        if tickDisposition != .retryableFailure, hasPendingImmediateSyncEvents {
             scheduleImmediateSyncEventDrain(now: Date())
         }
     }
@@ -12782,7 +13671,7 @@ final class LocalNetworkSyncAppService: ObservableObject {
     }
 
     func suspend() {
-        isActive = false
+        activationState.suspend()
         ConnectionDiagnosticsStore.shared.record(phase: "appBecameInactive", deviceID: connectionStore.snapshot.deviceID)
         heartbeatMonitor.suspend()
         scheduler.stop()
@@ -12790,6 +13679,13 @@ final class LocalNetworkSyncAppService: ObservableObject {
         retryDrainTask = nil
         syncEventDebounceTask?.cancel()
         syncEventDebounceTask = nil
+    }
+
+    private func isWaitingForFreshActivationHeartbeat(status: DeviceConnectionStatus?) -> Bool {
+        guard isActive, let activationStartedAt else {
+            return false
+        }
+        return status?.lastSuccessfulHeartbeatAt.map { $0 >= activationStartedAt } != true
     }
 
     private static func isEventDrivenTrigger(_ trigger: String) -> Bool {

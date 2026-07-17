@@ -1,0 +1,21 @@
+{
+  "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6" : {
+    "connectionStatusRevision" : 153,
+    "consecutiveFailureCount" : 0,
+    "deviceID" : "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6",
+    "displayName" : "iPhone",
+    "lastHeartbeatAt" : "2026-07-17T14:10:57Z",
+    "lastHeartbeatReceivedAt" : "2026-07-17T14:10:55Z",
+    "lastHeartbeatSentAt" : "2026-07-17T14:11:05Z",
+    "lastSeenAt" : "2026-07-17T14:10:57Z",
+    "lastSignedRequestSucceededAt" : "2026-07-17T14:10:57Z",
+    "lastSuccessfulHeartbeatAt" : "2026-07-17T14:10:55Z",
+    "lastSyncAt" : "2026-07-15T15:02:01Z",
+    "lastSyncStatus" : "iPhone 已开始同步",
+    "latencyMilliseconds" : 0,
+    "missedHeartbeatCount" : 0,
+    "monitoringMode" : "foregroundActive",
+    "presenceState" : "online",
+    "state" : "connected"
+  }
+}

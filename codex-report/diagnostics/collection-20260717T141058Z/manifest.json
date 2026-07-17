@@ -1,0 +1,11 @@
+{
+  "collectedAt": "2026-07-17T14:11:00.272212+00:00",
+  "collectionID": "collection-20260717T141058Z",
+  "contents": {
+    "iphone": "redacted diagnostics plus connection/sync state snapshots",
+    "mac": "redacted diagnostics plus connection/sync state snapshots"
+  },
+  "iphoneBundleIdentifier": "com.Vita0818.Rokurics",
+  "iphoneDeviceSelector": "0500EE97-8C87-5288-A945-9AA0664CF186",
+  "schemaVersion": 1
+}

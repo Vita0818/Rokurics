@@ -1,0 +1,18 @@
+{
+  "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6" : {
+    "connectionStatusRevision" : 87,
+    "consecutiveFailureCount" : 0,
+    "deviceID" : "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6",
+    "displayName" : "MacBook Pro",
+    "lastHeartbeatAt" : "2026-07-17T14:11:06Z",
+    "lastHeartbeatReceivedAt" : "2026-07-17T14:11:06Z",
+    "lastHeartbeatSentAt" : "2026-07-17T14:11:05Z",
+    "lastSeenAt" : "2026-07-17T14:11:06Z",
+    "lastSuccessfulHeartbeatAt" : "2026-07-17T14:11:06Z",
+    "latencyMilliseconds" : 300.2210855484009,
+    "missedHeartbeatCount" : 0,
+    "monitoringMode" : "foregroundActive",
+    "presenceState" : "online",
+    "state" : "connected"
+  }
+}

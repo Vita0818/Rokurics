@@ -1,0 +1,26 @@
+{
+  "activeSyncRunID" : "422237F6-23B1-41B0-871D-CC52915114B2",
+  "activeTransfers" : [
+
+  ],
+  "consecutiveFailureCount" : 47,
+  "controlPlaneState" : "failed",
+  "lastConflictCount" : 4,
+  "lastControlPlaneUpdatedAt" : "2026-07-17T14:11:06Z",
+  "lastErrorCode" : "sync_discovery_failed",
+  "lastErrorMessage" : "stale_sync_run",
+  "lastLocalInventoryHash" : "efaa3a8711c10a6ee1b99c35a3065a2f19ba5a508e03f5a39e1d1059ef953db0",
+  "lastPeerDeviceID" : "mac-d6c0ef1617bf4af1",
+  "lastPeerInventoryHash" : "ead134d39cecaf47392c8a1ec470d2e1b5a0533975018ab3411ac70d007da47e",
+  "lastPlanSummary" : "upload:59,download:70,conflict:4",
+  "lastSuccessfulSyncAt" : "2026-07-15T15:02:07Z",
+  "lastSyncAt" : "2026-07-17T14:11:06Z",
+  "lastSyncCompletedAt" : "2026-07-17T14:11:06Z",
+  "lastSyncStartedAt" : "2026-07-17T14:08:41Z",
+  "localDeviceID" : "iphone-b9667445-ccd4-4379-9032-a1c0cf5ae5e6",
+  "nextAllowedSyncAt" : "2026-07-17T14:21:06Z",
+  "peerDeviceID" : "mac-d6c0ef1617bf4af1",
+  "pendingDownloadCount" : 70,
+  "pendingUploadCount" : 59,
+  "version" : 1
+}

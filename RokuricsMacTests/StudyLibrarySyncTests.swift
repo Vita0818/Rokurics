@@ -920,6 +920,223 @@ struct StudyLibrarySyncTests {
     }
 
     @MainActor
+    @Test func localNetworkSyncInventoryRetryReturnsCachedResponseWithoutRebuildOrReconciliation() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let syncStateStore = StudyLibrarySyncStateStore(
+            rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)
+        )
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: syncStateStore,
+            runtimeConfiguration: .default,
+            onConnectionDiagnostic: diagnostics.append
+        )
+        let device = makePairedDevice(id: "iphone-idempotent")
+        let peerInventory = makePeerInventory(revision: "peer-revision-a")
+        let syncRunID = "inventory-idempotent-run"
+
+        let first = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: syncRunID,
+            peerInventory: peerInventory,
+            peerInventoryHash: peerInventory.inventoryHash
+        )
+        let reconciliationStore = SyncReconciliationStore(
+            rootURL: scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        )
+        let reconciliationAfterFirstResponse = reconciliationStore.snapshot()
+
+        let retry = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: syncRunID,
+            peerInventory: peerInventory,
+            peerInventoryHash: peerInventory.inventoryHash
+        )
+
+        #expect(first.ok)
+        #expect(retry == first)
+        #expect(reconciliationStore.snapshot() == reconciliationAfterFirstResponse)
+        #expect(diagnostics.events().filter { $0.phase == "localInventoryBuilt" }.count == 1)
+        #expect(diagnostics.events().filter { $0.phase == "syncInventoryResponseCacheHit" }.count == 1)
+    }
+
+    @MainActor
+    @Test func concurrentLocalNetworkSyncInventoryRetryJoinsSingleBuildAndResponse() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let diagnostics = LockedConnectionDiagnostics()
+        let buildBarrier = SyncInventoryResponseBuildBarrier()
+        let syncStateStore = StudyLibrarySyncStateStore(
+            rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)
+        )
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: syncStateStore,
+            runtimeConfiguration: .default,
+            onConnectionDiagnostic: diagnostics.append,
+            onSyncInventoryResponseBuildStarted: {
+                await buildBarrier.blockUntilReleased()
+            }
+        )
+        let device = makePairedDevice(id: "iphone-concurrent-idempotent")
+        let peerInventory = makePeerInventory(revision: "peer-revision-a")
+        let changedPeerInventory = makePeerInventory(revision: "peer-revision-b")
+        let syncRunID = "inventory-concurrent-idempotent-run"
+
+        let firstTask = Task { @MainActor in
+            await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+                device,
+                syncRunID: syncRunID,
+                peerInventory: peerInventory,
+                peerInventoryHash: peerInventory.inventoryHash
+            )
+        }
+        await buildBarrier.waitUntilBlocked()
+
+        let changedRetry = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: syncRunID,
+            peerInventory: changedPeerInventory,
+            peerInventoryHash: changedPeerInventory.inventoryHash
+        )
+        let retryTask = Task { @MainActor in
+            await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+                device,
+                syncRunID: syncRunID,
+                peerInventory: peerInventory,
+                peerInventoryHash: peerInventory.inventoryHash
+            )
+        }
+
+        var joinedInFlightResponse = false
+        for _ in 0..<1_000 {
+            if diagnostics.events().contains(where: { $0.phase == "syncInventoryResponseInFlightJoined" }) {
+                joinedInFlightResponse = true
+                break
+            }
+            await Task.yield()
+        }
+        #expect(joinedInFlightResponse)
+        buildBarrier.release()
+
+        let first = await firstTask.value
+        let retry = await retryTask.value
+        let reconciliationStore = SyncReconciliationStore(
+            rootURL: scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        )
+
+        #expect(!changedRetry.ok)
+        #expect(changedRetry.error == "sync_run_inventory_mismatch")
+        #expect(first.ok)
+        #expect(retry == first)
+        #expect(buildBarrier.invocationCount == 1)
+        #expect(diagnostics.events().filter { $0.phase == "localInventoryBuilt" }.count == 1)
+        #expect(diagnostics.events().filter { $0.phase == "syncInventoryResponseInFlightJoined" }.count == 1)
+        #expect(reconciliationStore.snapshot().count == 1)
+    }
+
+    @MainActor
+    @Test func localNetworkSyncInventoryRetryRejectsChangedPeerInventoryHash() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(
+                rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)
+            ),
+            runtimeConfiguration: .default,
+            onConnectionDiagnostic: diagnostics.append
+        )
+        let device = makePairedDevice(id: "iphone-inventory-mismatch")
+        let firstPeerInventory = makePeerInventory(revision: "peer-revision-a")
+        let changedPeerInventory = makePeerInventory(revision: "peer-revision-b")
+        let syncRunID = "inventory-mismatch-run"
+
+        let invalidDeclaredHash = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: "inventory-invalid-declared-hash",
+            peerInventory: firstPeerInventory,
+            peerInventoryHash: String(repeating: "c", count: 64)
+        )
+        let first = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: syncRunID,
+            peerInventory: firstPeerInventory,
+            peerInventoryHash: firstPeerInventory.inventoryHash
+        )
+        let changedRetry = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: syncRunID,
+            peerInventory: changedPeerInventory,
+            peerInventoryHash: changedPeerInventory.inventoryHash
+        )
+
+        #expect(!invalidDeclaredHash.ok)
+        #expect(invalidDeclaredHash.error == "sync_run_inventory_mismatch")
+        #expect(first.ok)
+        #expect(!changedRetry.ok)
+        #expect(changedRetry.inventory == nil)
+        #expect(changedRetry.error == "sync_run_inventory_mismatch")
+        #expect(diagnostics.events().filter { $0.phase == "localInventoryBuilt" }.count == 1)
+        #expect(diagnostics.events().contains {
+            $0.phase == "syncInventoryResponseCacheRejected"
+                && $0.errorCode == "sync_run_inventory_mismatch"
+        })
+    }
+
+    @MainActor
+    @Test func cachedInventoryResponseDoesNotBypassSupersededRunProtection() async throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let diagnostics = LockedConnectionDiagnostics()
+        let server = makeSyncServer(
+            rootURL: scratchURL,
+            gitStore: nil,
+            syncStateStore: StudyLibrarySyncStateStore(
+                rootURL: scratchURL.appendingPathComponent("SyncState", isDirectory: true)
+            ),
+            runtimeConfiguration: .default,
+            onConnectionDiagnostic: diagnostics.append
+        )
+        let device = makePairedDevice(id: "iphone-stale-cache")
+        let peerInventory = makePeerInventory(revision: "peer-revision")
+
+        let first = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: "inventory-old-run",
+            peerInventory: peerInventory,
+            peerInventoryHash: peerInventory.inventoryHash
+        )
+        let newer = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: "inventory-new-run",
+            peerInventory: peerInventory,
+            peerInventoryHash: peerInventory.inventoryHash
+        )
+        let staleRetry = await server.localNetworkSyncInventoryResponseForVerifiedDevice(
+            device,
+            syncRunID: "inventory-old-run",
+            peerInventory: peerInventory,
+            peerInventoryHash: peerInventory.inventoryHash
+        )
+
+        #expect(first.ok)
+        #expect(newer.ok)
+        #expect(!staleRetry.ok)
+        #expect(staleRetry.error == "stale_sync_run")
+        #expect(diagnostics.events().filter { $0.phase == "localInventoryBuilt" }.count == 2)
+        #expect(!diagnostics.events().contains {
+            $0.phase == "syncInventoryResponseCacheHit" && $0.syncRunID == "inventory-old-run"
+        })
+    }
+
+    @MainActor
     @Test func localNetworkSyncInventoryBuildsMetadataJobsAndHashesOffMain() async throws {
         let scratchURL = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratchURL) }
@@ -1977,6 +2194,38 @@ private final class LockedConnectionDiagnostics: @unchecked Sendable {
 }
 
 @MainActor
+private final class SyncInventoryResponseBuildBarrier {
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var invocationCount = 0
+
+    func blockUntilReleased() async {
+        invocationCount += 1
+        let waiters = blockedWaiters
+        blockedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilBlocked() async {
+        guard invocationCount == 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            blockedWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+@MainActor
 private func makeSyncServer(
     rootURL: URL,
     gitStore: GitBackedStudyMetadataStore?,
@@ -1988,7 +2237,8 @@ private func makeSyncServer(
     canonicalReadRuntimeConfiguration: CanonicalReadRuntimeConfiguration = .disabled,
     canonicalKernelMode: CanonicalKernelSwitchMode = .oldKernel,
     injectCanonicalExistenceApplyPort: Bool = true,
-    onConnectionDiagnostic: @escaping SecureLocalHTTPSServer.ConnectionDiagnosticHandler = { _ in }
+    onConnectionDiagnostic: @escaping SecureLocalHTTPSServer.ConnectionDiagnosticHandler = { _ in },
+    onSyncInventoryResponseBuildStarted: (@MainActor @Sendable () async -> Void)? = nil
 ) -> SecureLocalHTTPSServer {
     let appRootURL = rootURL.appendingPathComponent("MacApp", isDirectory: true)
     let recordingFileStore = MacRecordingFileStore(rootURL: appRootURL)
@@ -2028,7 +2278,8 @@ private func makeSyncServer(
         canonicalExistenceApplyRuntimeConfiguration: canonicalExistenceApplyRuntimeConfiguration,
         canonicalReadRuntimeConfiguration: canonicalReadRuntimeConfiguration,
         canonicalKernelMode: canonicalKernelMode,
-        canonicalRecordingExistenceApplyPort: existenceApplyPort
+        canonicalRecordingExistenceApplyPort: existenceApplyPort,
+        onSyncInventoryResponseBuildStarted: onSyncInventoryResponseBuildStarted
     )
 }
 
@@ -2039,6 +2290,44 @@ private func makePairedDevice(id: String = "device-01") -> PairedDevice {
         sharedSecretBase64URL: Data("sync-secret".utf8).base64URLEncodedString(),
         pairedAt: Date(timeIntervalSince1970: 1_000),
         lastSeenAt: nil
+    )
+}
+
+private func makePeerInventory(revision: String) -> LocalNetworkSyncInventory {
+    let generatedAt = Date(timeIntervalSince1970: revision == "peer-revision-b" ? 2_001 : 2_000)
+    let deviceID = "iphone-peer"
+    let recordingID = "peer-recording-\(revision)"
+    return LocalNetworkSyncInventory.make(
+        device: LocalNetworkSyncDeviceSection(
+            deviceID: deviceID,
+            deviceName: "Vita iPhone",
+            platform: .iPhone,
+            generatedAt: generatedAt,
+            lastKnownPeerRevision: nil,
+            appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+        ),
+        objects: [
+            LocalNetworkSyncObjectEntry(
+                objectID: "recordingAudio:\(recordingID)",
+                objectKind: .recordingAudio,
+                ownerID: recordingID,
+                displayTitle: "Peer recording",
+                fileName: "audio.m4a",
+                logicalName: "Recordings/\(recordingID).m4a",
+                sha256: String(repeating: revision == "peer-revision-b" ? "b" : "a", count: 64),
+                size: 4,
+                updatedAt: generatedAt,
+                deleted: false,
+                tombstone: false,
+                sourceDeviceID: deviceID,
+                logicalPathToken: "Recordings/\(recordingID).m4a",
+                availability: .local,
+                transferState: nil,
+                transferProgress: nil,
+                conflictStatus: nil,
+                autoDownloadAllowed: false
+            )
+        ]
     )
 }
 
