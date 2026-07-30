@@ -529,14 +529,14 @@ final class GitBackedStudyMetadataStore {
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
     }()
 
     private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 

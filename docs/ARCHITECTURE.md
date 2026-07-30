@@ -1,10 +1,46 @@
 # ARCHITECTURE
 
-最近自查日期：2026-07-17
+最近自查日期：2026-07-25
+
+## 2026-07-25 活动同步业务时钟精度
+
+活动 old-kernel 的 LWW decision clock 统一由 `SyncTimestampPolicy` 管理。它把 `Date` 规范化为最接近的 Unix 微秒、以固定 6 位小数 ISO-8601 编码，并兼容读取历史整秒 ISO-8601。该策略贯穿双端 Study Store、签名网络 JSON、reconciliation record/版本 token、内容上传 CAS/ledger 和 Mac Git-backed metadata，避免任一持久化或传输边界先把亚秒顺序抹掉。
+
+planner 只比较规范化后的微秒值。同秒不同微秒的两个版本因此仍按真实 `modifiedAt` LWW；精确同微秒且内容不同仍是信息不足，必须 deferred。系统没有引入 device/hash tie-break，因为那只能得到确定性副本，不能证明它是最新版本。inventory checksum 继续使用历史整秒日期投影以维持 checksum schema，它不是 decision clock；默认关闭的 canonical pipeline 也不在本轮改变。部署合同是双端同时升级：新 decoder 可读旧整秒数据，旧构建不作为新小数 wire 的兼容目标。
+
+## 2026-07-25 generated artifact 版本时钟
+
+transcript/note/summary 的对象级 `updatedAt` 由 inventory 读取最终文件 `modificationDate`。在当前 schema 下，这个文件属性就是 generated content version 的持久载体，不是一次本地 I/O 的审计时间。内容从 source 复制到 target 后，target 必须继续保存 source 声明的版本时间；否则 transport latency 会创建一个不存在的业务修改，并在下一次 hash 分叉时污染 LWW。
+
+双端统一通过 `SyncArtifactModifiedAtPolicy` 执行此合同：
+
+- 精度与 `SyncReconciliationPlanner` 一致，规范化为最接近的 Unix 微秒；非法、非有限或无法表示的 source 时间 fail closed。
+- 只有 `participatesInObjectReconciliation == true` 的 transcript/note/summary generated kind 才恢复源时间。`metadataJSON`、receiver-local `receiveJSON` 与 audio 的本机事实不借此改写。
+- 文件 checksum/size 校验与原子 move/replace 完成后，将 source `updatedAt` 写入最终 destination，并立即读回验证。Mac `acceptedExisting` 重试也重复该幂等校验，可修复“bytes 已接受但前次响应/属性步骤未完成”的文件。
+- iPhone pull 不需要扩 GET response schema，因为调用点已经持有经过 inventory 校验的 peer artifact；Mac PUT 继续复用现有 request `updatedAt`。wire、ID、path 和安全边界均不改变。
+
+相同 hash+size 在 planner 中本来就会直接收敛，所以该修复针对的是“传输后再次分叉时 winner 被接收时刻反转”，不是制造额外的时间同步轮次。历史上已经被接收时刻污染、且没有可信 source 版本记录的文件不能安全猜测迁移；后续成功重传或新的真实内容生成会建立可比较版本。默认关闭的 canonical root-bound generated-artifact writer 仍缺 source `modifiedAt` payload，继续作为非活动兼容边界单独处理。
+
+## 2026-07-25 业务对象与本机文件投影边界
+
+`LocalNetworkSyncInventory` 的 `artifacts` 与 `objects` 是两个不同命名空间，不能再互相等同：
+
+- `artifacts` 描述某台设备上可定位的文件事实。其 `logicalPathToken` 是应用根目录内的安全相对路径，`artifactID` 必须继续绑定 kind、owner 与该路径，以供传输 route 做 tuple 校验、路径 allowlist 和 root containment；该 ID 不是跨设备业务身份。
+- `objects` 描述需要跨端比较和收敛的语义对象。录音 metadata/audio 分别只以 `recordingMetadata:<recordingID>`、`recordingAudio:<recordingID>` 对齐。`metadataJSON`、receiver-local `receiveJSON` 与 `.audio` artifact 不进入这一层；transcript/note/summary 等可移植 generated artifact 仍以 artifact object 参与 reconciliation。
+
+新 inventory 在 artifacts -> objects 投影边界排除三类本机投影。旧 peer payload 不在 decode 时改写，因为 `inventoryHash` 是发送端原 payload 的完整性声明；过滤发生在 `syncCoreInventory` 适配边界。共享 `SyncObjectIdentityPolicy` 同时供 adapter 与 ledger 识别 `artifact_* + recordingMetadata/recordingAudio/receiveRecord`，`SyncReconciliationStore.apply` 在同一次原子更新中迁移掉旧记录并拒绝重新写入。这样 transport 路径身份、安全校验和旧 wire hash 保持不变，reconciliation 则只看到稳定业务身份。
+
+## 2026-07-25 双向 LWW metadata 收敛
+
+同步 planner 的 core action 已经携带 winner 方向；compatibility 映射必须继续尊重该方向。`updateMetadata + upload` 进入 `uploadMetadataActions`，`updateMetadata + download` 进入 `downloadMetadataActions`，缺失方向必须 fail closed 为 conflict，不能默认把 Mac winner 反向上传。iPhone 与 Mac 各自保留的 `StudyLibrarySyncModels.swift` 副本必须维持相同行为。
+
+`LocalNetworkSyncEngine` 在单次 inventory/diff/reconciliation 后只执行 conflict-isolated plan：先将 `downloadMetadataActions` 对应的 peer `studyManifest` 裁剪成 action-scoped manifest，通过 iPhone 本地 `StudyLibraryStore.applySyncManifest` 应用 Mac winner；再将 `uploadMetadataActions` 对应的本地 manifest 经既有签名 `/sync/apply-metadata` 应用到 Mac。两条路径可以在同一 tick 共存，使每个对象的较旧端获得 LWW winner；任何 conflict 及其依赖闭包仍不执行。
+
+双向 metadata apply 不是文件内容传输，也不是跨设备事务。它不得请求/发送 artifact 或 audio bytes，不得创建 placeholder、upload job、retry/finalize 或内容完成证明。peer manifest 缺失、action coverage 不完整、checksum 无效、Store partial failure 或远端 apply partial failure 都必须令本轮失败；已完成的 LWW 写入保持幂等，由下一轮 inventory 证明最终收敛。
 
 ## 2026-07-17 conflict execution plan 与 durable run 终态
 
-同步 discovery plan 与本轮可执行 metadata plan 现在是两个明确层次。完整 plan 保留所有 actions 与 `conflictActions`，用于 reconciliation、run summary、诊断和调用方展示；`/sync/apply-metadata` 只消费由 `conflictIsolatedExecutionPlan` 从完整 plan 派生的执行 plan。隔离算法对 folder、item、recording、artifact 的所有权和引用关系做闭包，凡依赖图触及 conflict 的 action 都不执行，互不相关的 action 不受影响。这样历史 conflict 不会混入新录音的 metadata shell，同时不丢失 conflict 事实，也不改变接收端真实 partial failure 必须失败的合同。
+同步 discovery plan 与本轮可执行 metadata plan 现在是两个明确层次。完整 plan 保留所有 actions 与 `conflictActions`，用于 reconciliation、run summary、诊断和调用方展示；双向 action-scoped metadata apply 只消费由 `conflictIsolatedExecutionPlan` 从完整 plan 派生的执行 plan。隔离算法对 folder、item、recording、artifact 的所有权和引用关系做闭包，凡依赖图触及 conflict 的 action 都不执行，互不相关的 action 不受影响。这样历史 conflict 不会混入本轮 metadata apply，同时不丢失 conflict 事实，也不改变接收端真实 partial failure 必须失败的合同。
 
 tick 与 scheduler 内部使用三态结果：`completed` 表示本轮 inventory/diff/必要 apply 完成；`retryableFailure` 表示可在现有 durable FIFO 中等待下一次触发；`terminalObsolete(errorCode: "stale_sync_run")` 表示 Mac 已 supersede 该相关 run。两处 durable consumer 对 terminal-obsolete 执行持久终止消费与 bounded dedupe，不记同步成功，也不进入 retry/backoff。该分类只接受 `SecureMacUploadError.serverRejected` 的精确规范化错误码；普通网络错误、其他 server reject 和 metadata apply 错误不能借此逃逸重试/失败语义。
 
@@ -20,12 +56,12 @@ Inventory transport 的幂等键为已验证 device ID + `syncRunID` + peer inve
 
 ## 双端交换产品契约：连接、同步、上传（2026-07-12）
 
-本节是 iPhone 与 Mac 双端交换的产品级权威定义。本文及其他项目文档中较早的 `fullSync`、canonical sync、bulk metadata apply、artifact download、audio bootstrap 等历史描述，只用于记录历史实现，不得覆盖本节对“连接”“同步”“上传”的定义。当前唯一 apply 例外是为既有 metadata-only 卡片发送一次 action-scoped metadata shell；它不是内容传输。真机运行只用于补充体验与网络证据，见 `CURRENT_STATE.md` 和 `SYNC_STATE_AUDIT.md`。
+本节是 iPhone 与 Mac 双端交换的产品级权威定义。本文及其他项目文档中较早的 `fullSync`、canonical sync、bulk metadata apply、artifact download、audio bootstrap 等历史描述，只用于记录历史实现，不得覆盖本节对“连接”“同步”“上传”的定义。当前允许的 apply 例外是按 winner 方向执行 action-scoped metadata shell：Mac winner 本地应用到 iPhone，iPhone winner 经既有 route 应用到 Mac；它不是内容传输。真机运行只用于补充体验与网络证据，见 `CURRENT_STATE.md` 和 `SYNC_STATE_AUDIT.md`。
 
 | 层次 | 用户入口/触发 | 允许交换的内容 | 允许的副作用 | 成功含义 |
 | --- | --- | --- | --- | --- |
 | 连接（Connection） | 配对后的连接检查、heartbeat | 建立可信通信所需的短握手、身份、能力和在线状态字段 | 更新连接/presence 状态 | 两端可以在现有 TLS pinning、HMAC、timestamp、nonce、body hash 和 `RequestVerifier` 边界内通信 |
-| 同步（Sync） | 连接页“立即同步” | 学习库 inventory，以及当前 plan 所需的 action-scoped metadata shell | 更新 sync run、快照、差异结果、逐对象 reconciliation record，并在接收端保存 metadata-only item | 按稳定 ID 和 LWW 产出差异，并使目标端既有卡片可见；不代表内容已接收 |
+| 同步（Sync） | 连接页“立即同步” | 学习库 inventory，以及当前 conflict-isolated plan 两个方向所需的 action-scoped metadata shell | 更新 sync run、快照、差异结果、逐对象 reconciliation record，并在各自较旧端保存 metadata-only winner | 按稳定 ID 和 LWW 产出差异，并使两个目标端都获得最新业务 metadata；不代表内容已接收 |
 | 上传（Upload / Content Transfer） | 用户在来源端学习库对同步选定版本点击“上传” | 实际文件 bytes，以及完成该次内容传输所必需的校验、分块、续传和 finalize 字段 | 消费 reconciliation record，将内容从 source 传到 target，并在校验成功后落盘和写完成证明 | 目标端已接收并校验同步层选定的版本；下一轮一致性同步清除标记 |
 
 连接层不得扫描学习库、构建 inventory、计算文件 hash、读写学习库对象或创建上传任务。连接成功只证明可通信，不证明同步成功，也不证明任一文件存在于对端。
@@ -36,9 +72,9 @@ Inventory transport 的幂等键为已验证 device ID + `syncRunID` + peer inve
 - 文件未变化时必须复用持久 checksum cache；cache key 至少受稳定逻辑标识、byte size、业务/文件修改事实、内容版本、算法和 schema 约束。只有 cache miss 或已证实失效的条目才允许离主线程重新读取内容计算 hash。
 - wire payload 只能随对象数量和短 metadata 增长，不能随音频、转写、笔记或其他文件内容大小增长；不得包含 `dataBase64`、文件 bytes、正文或 provider response。
 - diff 必须先按稳定 `objectID` 对齐，再把新增、删除、内容 hash 不同、rename-only、相同、时间并列和信息不足分别表示。稳定 ID 相同即为同一业务对象，名称和内容变化都只是版本变化。
-- 两端版本可比较时统一采用业务 `modifiedAt` 的 Last-Write-Wins：较新端为 source、较旧端为 target；即使双方都修改也不因此自动成为 conflict。hash 不同且时间相同，或内容对象缺 hash/size 时必须 deferred，禁止静默覆盖。删除必须依赖 tombstone/版本事实，不能仅凭某端暂时缺少对象就执行删除。
+- 两端版本可比较时统一采用微秒级业务 `modifiedAt` 的 Last-Write-Wins：较新端为 source、较旧端为 target；即使双方都修改也不因此自动成为 conflict。hash 不同且时间精确相同到微秒，或内容对象缺 hash/size 时必须 deferred，禁止静默覆盖。删除必须依赖 tombstone/版本事实，不能仅凭某端暂时缺少对象就执行删除。
 - 双端对同一对 inventory 必须运行同一 `SyncReconciliationPlanner`，得到方向无关的确定性 record ID、source、target、expected hash/size/modifiedAt 和 reason。两端分别把相关记录原子写入 `Sync/Reconciliation/records.json`；存储有 schema version、上限和损坏 fail-closed 行为，不保存文件内容、绝对路径或凭据。
-- 同步唯一允许的 apply 是针对当前 `plan.uploadMetadataActions` 的单次 `/sync/apply-metadata`；manifest 必须 action-scoped，只含必要 recording/item/folder metadata 关系。仍禁止 artifact request/put、recording audio upload/download、placeholder、物理删除、upload job、retry drainer 和内容 finalize。
+- 同步唯一允许的 apply 是针对 conflict-isolated plan 的双向 action-scoped metadata apply：`downloadMetadataActions` 从 peer `studyManifest` 裁剪后由 iPhone 本地 Store 应用，`uploadMetadataActions` 从本地 manifest 裁剪后至多调用一次 `/sync/apply-metadata`。每个方向非空时至多执行一次，只含必要 recording/item/folder metadata 关系；仍禁止 artifact request/put、recording audio upload/download、placeholder、物理删除、upload job、retry drainer 和内容 finalize。
 - conflict 是成功同步得到的一类差异结果，不是内容传输失败。连接/鉴权、inventory、协议、diff，以及本轮 scoped metadata shell 的构造、鉴权或 apply 失败可令当前 sync run 失败；独立 artifact/audio/finalize 失败不得覆盖已完成的 sync。
 - “立即同步”完成后可以让目标端既有 metadata-only 卡片出现；不得自动传输文件或把该卡片当作 audio available/completed proof。
 

@@ -3070,7 +3070,7 @@ nonisolated struct LocalNetworkSyncBackgroundStudyManifestBuilder {
 
     private static let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }
@@ -3114,7 +3114,7 @@ nonisolated enum LocalNetworkSyncInventoryBackgroundIO {
 
     private static let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }
@@ -4979,14 +4979,21 @@ final class LocalNetworkSyncEngine {
             )
             let isolatedUploadMetadataCount = plan.uploadMetadataActions.count
                 - metadataExecution.plan.uploadMetadataActions.count
-            if isolatedUploadMetadataCount > 0 {
+            let isolatedDownloadMetadataCount = plan.downloadMetadataActions.count
+                - metadataExecution.plan.downloadMetadataActions.count
+            if isolatedUploadMetadataCount > 0 || isolatedDownloadMetadataCount > 0 {
                 diagnosticsStore.record(
                     phase: "conflictExecutionActionsIsolated",
                     deviceID: snapshot.deviceID,
                     syncRunID: syncRunID,
-                    result: "isolatedUploadMetadata=\(isolatedUploadMetadataCount),conflicts=\(plan.conflictActions.count)"
+                    result: "isolatedUploadMetadata=\(isolatedUploadMetadataCount),isolatedDownloadMetadata=\(isolatedDownloadMetadataCount),conflicts=\(plan.conflictActions.count)"
                 )
             }
+            try await applyPeerMetadataIfNeeded(
+                peerInventory: peerInventory,
+                plan: metadataExecution.plan,
+                localDeviceID: localInventory.device.deviceID
+            )
             try await uploadLocalMetadataIfNeeded(
                 localInventory: localInventory,
                 plan: metadataExecution.plan,
@@ -11889,6 +11896,12 @@ final class LocalNetworkSyncEngine {
         }
         try data.write(to: tempURL, options: .atomic)
         try atomicReplace(tempURL: tempURL, destinationURL: destinationURL)
+        if expectedArtifact.kind.participatesInObjectReconciliation {
+            try SyncArtifactModifiedAtPolicy.preserve(
+                expectedArtifact.updatedAt,
+                at: destinationURL
+            )
+        }
         diagnosticsStore.record(phase: "atomicReplaceCompleted", deviceID: deviceID)
         diagnosticsStore.record(phase: "peerFileApplied", deviceID: deviceID)
         NotificationCenter.default.post(name: .localNetworkStudyLibraryDidChange, object: nil)
@@ -11927,6 +11940,12 @@ final class LocalNetworkSyncEngine {
         )
         try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try atomicReplace(tempURL: tempURL, destinationURL: destinationURL)
+        if artifact.kind.participatesInObjectReconciliation {
+            try SyncArtifactModifiedAtPolicy.preserve(
+                artifact.updatedAt,
+                at: destinationURL
+            )
+        }
         diagnosticsStore.record(phase: "atomicReplaceCompleted", deviceID: deviceID)
         diagnosticsStore.record(phase: "peerFileApplied", deviceID: deviceID)
         NotificationCenter.default.post(name: .localNetworkStudyLibraryDidChange, object: nil)

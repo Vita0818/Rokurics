@@ -125,6 +125,13 @@ struct IPhoneSyncStorageAdapter: SyncStorageAdapter {
         } else {
             try fileManager.moveItem(at: tempURL, to: destinationURL)
         }
+        if artifactKind(for: object)?.participatesInObjectReconciliation == true {
+            try SyncArtifactModifiedAtPolicy.preserve(
+                object.updatedAt,
+                at: destinationURL,
+                fileManager: fileManager
+            )
+        }
     }
 
     func markTransferState(_ state: SyncTransferState, for object: SyncObject) throws {

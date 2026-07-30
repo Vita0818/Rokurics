@@ -11,6 +11,28 @@ import Testing
 @testable import RokuricsMac
 
 struct StudyLibrarySyncTests {
+    @Test func studyLibraryStorePreservesSubsecondUpdatedAtAcrossRestart() throws {
+        let scratchURL = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratchURL) }
+        let rootURL = scratchURL.appendingPathComponent("MacApp", isDirectory: true)
+        let updatedAt = Date(timeIntervalSince1970: 2_500.123_456)
+        let item = StudyItemMetadata(
+            itemID: "item_note_subsecond_timestamp",
+            kind: .standaloneNote,
+            title: "Subsecond timestamp",
+            createdAt: Date(timeIntervalSince1970: 2_400),
+            updatedAt: updatedAt,
+            noteRelativePath: "notes/subsecond/note.md"
+        )
+        let store = StudyLibraryStore(rootURL: rootURL, listenForInboxChanges: false)
+
+        try store.save(item)
+
+        let reloaded = StudyLibraryStore(rootURL: rootURL, listenForInboxChanges: false)
+        let persisted = try #require(reloaded.allStudyItems.first { $0.itemID == item.itemID })
+        #expect(SyncTimestampPolicy.matches(persisted.updatedAt, updatedAt))
+    }
+
     @Test func macBusinessSignatureMappingMatchesSharedCrossDeviceFixtureAndIgnoresLocalState() {
         let filing = StudyFilingPath(type: "课堂", subject: "线性代数", chapter: "矩阵")
         let mac = StudyItemMetadata(
@@ -362,7 +384,7 @@ struct StudyLibrarySyncTests {
                 "HMAC": "must-not-sync",
                 "safePreview": "可以同步"
             ],
-            updatedAt: Date(timeIntervalSince1970: 1_020),
+            updatedAt: Date(timeIntervalSince1970: 1_020.654_321),
             modifiedByDeviceID: "iphone-01"
         )
         let manifest = StudyLibrarySyncManifest.make(
@@ -410,6 +432,7 @@ struct StudyLibrarySyncTests {
 
         let itemFile = try #require(try FileManager.default.contentsOfDirectory(at: gitStore.itemsURL, includingPropertiesForKeys: nil).first)
         let itemJSON = try String(contentsOf: itemFile, encoding: .utf8)
+        #expect(itemJSON.contains("1970-01-01T00:17:00.654321Z"))
         #expect(!itemJSON.contains("must-not-sync"))
         #expect(!itemJSON.contains("apiKey"))
         #expect(!itemJSON.contains("sharedSecret"))
@@ -905,6 +928,15 @@ struct StudyLibrarySyncTests {
 
         let response = await server.localNetworkSyncInventoryResponseForVerifiedDevice(makePairedDevice())
         let inventory = try #require(response.inventory)
+        let receiveArtifact = try #require(inventory.artifacts.first {
+            $0.kind == .receiveJSON && $0.ownerID == "inventory-recording"
+        })
+        let audioArtifact = try #require(inventory.artifacts.first {
+            $0.kind == .audio && $0.ownerID == "inventory-recording"
+        })
+        let transcriptArtifact = try #require(inventory.artifacts.first {
+            $0.kind == .transcriptMarkdown && $0.logicalPathToken == transcriptRelativePath
+        })
         let encoded = String(data: try JSONEncoder().encode(inventory), encoding: .utf8) ?? ""
 
         #expect(response.ok)
@@ -912,9 +944,23 @@ struct StudyLibrarySyncTests {
         #expect(inventory.sourcePlatform == .Mac)
         #expect(inventory.sourceDeviceID == inventory.device.deviceID)
         #expect(inventory.recordings.first { $0.recordingID == "inventory-recording" }?.receiveStatus == "completed")
-        #expect(inventory.artifacts.contains { $0.kind == .receiveJSON })
-        #expect(inventory.artifacts.contains { $0.kind == .transcriptMarkdown && $0.logicalPathToken == transcriptRelativePath })
-        #expect(inventory.objects.contains { $0.objectKind == .transcriptMarkdown && $0.fileName == "transcript.md" && $0.size != nil && $0.updatedAt >= Date(timeIntervalSince1970: 0) })
+        #expect(inventory.artifacts.contains(receiveArtifact))
+        #expect(inventory.artifacts.contains(audioArtifact))
+        #expect(inventory.artifacts.contains(transcriptArtifact))
+        #expect(!inventory.objects.contains { $0.objectID == receiveArtifact.artifactID })
+        #expect(!inventory.objects.contains { $0.objectID == audioArtifact.artifactID })
+        #expect(inventory.objects.contains { $0.objectID == "recordingMetadata:inventory-recording" })
+        #expect(inventory.objects.contains { $0.objectID == "recordingAudio:inventory-recording" })
+        #expect(inventory.objects.contains {
+            $0.objectID == transcriptArtifact.artifactID
+                && $0.objectKind == .transcriptMarkdown
+                && $0.fileName == "transcript.md"
+                && $0.size != nil
+                && $0.updatedAt >= Date(timeIntervalSince1970: 0)
+        })
+        #expect(!inventory.syncCoreInventory.objects.contains {
+            $0.objectID == receiveArtifact.artifactID || $0.objectID == audioArtifact.artifactID
+        })
         #expect(!encoded.contains(appRootURL.path))
         #expect(!encoded.lowercased().contains("sharedsecret"))
     }
@@ -1397,15 +1443,34 @@ struct StudyLibrarySyncTests {
             logicalPathToken: transcriptPath,
             dataBase64: transcriptData.base64EncodedString()
         )
+        let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: storedURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("stale transcript".utf8).write(to: storedURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 9_000)],
+            ofItemAtPath: storedURL.path
+        )
 
         let response = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(request)
         )
-        let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+        let firstStoredModifiedAt = try #require(
+            LocalNetworkSyncArtifactFileService.metadata(for: storedURL)?.updatedAt
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 9_000)],
+            ofItemAtPath: storedURL.path
+        )
         let repeated = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
             makePairedDevice(),
             requestBody: try JSONEncoder.syncTestEncoder.encode(request)
+        )
+        let repeatedStoredModifiedAt = try #require(
+            LocalNetworkSyncArtifactFileService.metadata(for: storedURL)?.updatedAt
         )
         let traversalPath = "transcripts/../secret.md"
         let traversal = await server.localNetworkSyncArtifactPutResponseForVerifiedDevice(
@@ -1468,8 +1533,10 @@ struct StudyLibrarySyncTests {
         #expect(response.disposition == "acceptedNew")
         #expect(response.checksum == MacSecurityUtilities.sha256Hex(transcriptData))
         #expect(String(data: try Data(contentsOf: storedURL), encoding: .utf8) == "incoming transcript")
+        #expect(try SyncArtifactModifiedAtPolicy.normalized(firstStoredModifiedAt) == request.updatedAt)
         #expect(repeated.ok)
         #expect(repeated.disposition == "acceptedExisting")
+        #expect(try SyncArtifactModifiedAtPolicy.normalized(repeatedStoredModifiedAt) == request.updatedAt)
         #expect(!traversal.ok)
         #expect(traversal.error == "artifact_path_traversal")
         #expect(!absolute.ok)
@@ -1527,6 +1594,9 @@ struct StudyLibrarySyncTests {
         }
 
         let storedURL = appRootURL.appendingPathComponent(transcriptPath, isDirectory: false)
+        let storedModifiedAt = try #require(
+            LocalNetworkSyncArtifactFileService.metadata(for: storedURL)?.updatedAt
+        )
 
         #expect(responses.count > 1)
         #expect(responses.dropLast().allSatisfy { $0.ok && $0.disposition == "acceptedChunk" })
@@ -1534,6 +1604,10 @@ struct StudyLibrarySyncTests {
         #expect(responses.last?.disposition == "acceptedNew")
         #expect(responses.last?.confirmedBytes == Int64(transcriptData.count))
         #expect(try Data(contentsOf: storedURL) == transcriptData)
+        #expect(
+            try SyncArtifactModifiedAtPolicy.normalized(storedModifiedAt)
+                == Date(timeIntervalSince1970: 2_500)
+        )
     }
 
     @MainActor
@@ -2133,7 +2207,7 @@ private func makeSyncManifest(recordingID: String) -> StudyLibrarySyncManifest {
 
 private func decodeGitBackedSyncState(at url: URL) throws -> GitBackedStudySyncState {
     let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
+    SyncTimestampPolicy.configure(decoder)
     return try decoder.decode(GitBackedStudySyncState.self, from: Data(contentsOf: url))
 }
 
@@ -2358,7 +2432,7 @@ private func signedSyncHeaders(
 private extension JSONEncoder {
     static var syncTestEncoder: JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }

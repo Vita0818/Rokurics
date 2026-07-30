@@ -1781,14 +1781,14 @@ final class SecureMacUploadClient: ObservableObject {
 
     private static let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
 
     private static let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 

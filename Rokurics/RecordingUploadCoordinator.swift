@@ -785,7 +785,7 @@ final class RecordingUploadCoordinator: ObservableObject {
                     .updatedAt
                 let modifiedAtMatches = record.sourceModifiedAt.map { expected in
                     guard let currentBusinessModifiedAt else { return false }
-                    return Int64(expected.timeIntervalSince1970) == Int64(currentBusinessModifiedAt.timeIntervalSince1970)
+                    return SyncTimestampPolicy.matches(expected, currentBusinessModifiedAt)
                 } ?? true
                 guard record.sourceSize == size,
                       record.sourceSHA256?.lowercased() == checksum,
@@ -3533,14 +3533,14 @@ final class RecordingUploadJobStore {
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
     }()
 
     private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }

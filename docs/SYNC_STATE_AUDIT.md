@@ -1,8 +1,43 @@
 # SYNC_STATE_AUDIT
 
+## 2026-07-25 活动同步同秒冲突审计
+
+- 原失败链与运行环境无关：双端 Study Store、签名 HTTP JSON、reconciliation ledger 和 shared planner 都把业务时间压为整秒。同一秒内内容不同的两个正常前台更新在 planner 前已失去先后关系，必然落入 equal-time deferred。
+- 当前 decision clock：`SyncTimestampPolicy` 取最接近的 Unix 微秒，固定写 6 位小数 ISO-8601，并兼容读历史整秒。双端 Store、inventory/request/response、reconciliation record、upload CAS/ledger、Mac Git-backed metadata 和 generated artifact mtime 共用；record ID 的 version token 也使用 epoch microseconds。
+- planner 行为：同秒不同微秒仍由较新业务时间获胜；调用方向翻转时 source/target 和 record ID 不变。精确同微秒且 hash 不同仍 deferred，表示输入无法证明最新版本，不以 device/hash 排序伪造 winner。
+- checksum 边界：inventory/manifest checksum 的历史整秒日期编码暂时保留，避免改变 checksum schema；内容/hash/name/tombstone 变化仍改变 checksum，而 LWW 读取 decoded `Date` 的微秒值。checksum 投影不得回流成为比较或 CAS 时间。
+- 兼容与范围：新 decoder 可读旧整秒持久数据和 payload；旧构建不承诺读取新小数 wire，所以运行前提是 iPhone/Mac 同时升级最新版本。默认关闭的 canonical pipeline、连接/上传触发边界、route/path/security 和真正 equal-time fail-closed 规则未改。
+
+## 2026-07-25 P1-2 generated artifact 版本时钟审计
+
+- 原失败链：iPhone inventory builder 与 Mac inventory response 都从 generated 文件的 FS `modificationDate` 生成 artifact/object `updatedAt`；shared planner 在 hash/size 不同时按该值 LWW。Mac PUT request 已携带 source `updatedAt` 但旧 server 丢弃，iPhone small/chunk pull 已持有 peer artifact `updatedAt` 但旧落盘同样丢弃。最终文件因此采用 receive-time，下一次内容再次分叉时，旧副本可能因传输较晚而反向胜出。
+- 相同 hash+size 的紧邻 inventory 会直接 no-op，因此真实故障不是“传完立刻永久 pending”，而是 transport clock 污染 content version clock。审计和回归必须构造后续新版本，确认 source 100 经时间 1000 接收后仍保存 100，而真实版本 200 继续成为 winner。
+- 当前合同：`SyncArtifactModifiedAtPolicy` 按 planner 相同的最接近 Unix 微秒精度规范化 source 时间，设置最终 destination `.modificationDate` 并读回；非法值或未保留都抛出稳定错误。策略仅用于 `participatesInObjectReconciliation` 的 transcript/note/summary。
+- iPhone 落盘面：兼容 small response、chunk verify/finalize 和 `IPhoneSyncStorageAdapter.atomicApply` 都从已验证 peer object 使用 source `updatedAt`。Mac 落盘面：artifact PUT small/chunk 共用 final apply，`acceptedNew` 与 `acceptedExisting` 都从 request 恢复 source 时间；`MacSyncStorageAdapter.atomicApply` 同步遵守。
+- wire/schema/security 不变：GET 不新增时间字段，PUT 复用既有字段；inventory hash、artifact ID、relative-path/root containment、TLS/HMAC/pinning/timestamp/nonce/body hash 与 `RequestVerifier` 均未改。metadataJSON、receiveJSON、audio 的 receiver-local 文件事实不参与该策略。
+- active “立即同步”仍不执行 artifact bytes；iPhone 兼容 small/chunk helper 只为内容传输路径恢复时守住版本合同。默认关闭的 canonical root-bound generated-artifact payload 仍没有 source `modifiedAt`，不在本轮覆盖范围。
+- 验证结果：双端测试构建通过；iOS 4 项定向与 15 个唯一 closed-loop 用例通过；Mac small replace/acceptedExisting、chunk finalization 和 inventory 回归 3 项通过。未运行 paired-device 真机。
+
+## 2026-07-25 P1-1/P1-3 对象身份收敛审计
+
+- 原失败链是确定性的：两端先生成稳定 `recordingMetadata:<id>` / `recordingAudio:<id>`，随后又把每个 artifact 按 `artifactID = SHA256(kind|owner|device-local-relative-path)` 投影成第二个 object。iPhone 与 Mac 使用不同的应用根内目录结构，所以同一音频得到不同 artifact ID；iPhone 独有 metadata.json、Mac receiver-local receive.json 又天然单边。shared planner 因而持续产生只存在一侧的 pending record，active sync 又不执行 artifact bytes，下一轮重复同一差异。
+- 当前投影规则：`.metadataJSON`、`.receiveJSON`、`.audio` 仍进入 `inventory.artifacts`，但 `participatesInObjectReconciliation == false`；录音 metadata/audio 只保留稳定 recording object。transcript/note/summary artifact 继续进入 objects，后续内容层问题不能借本轮过滤掩盖。
+- 旧版本兼容：wire decode 保留旧 `objects` 和原 inventory hash；`syncCoreInventory` 通过 `SyncObjectIdentityPolicy` 排除 `artifact_* + recordingMetadata/recordingAudio/receiveRecord`。因此新端接收旧端 inventory 时既能通过同-run hash 校验，也不会把旧伪对象送进 planner。
+- ledger 迁移：仅从 planner 过滤会使历史记录因不再进入 `evaluatedObjectIDs` 而永久残留。`SyncReconciliationStore.apply` 现在在同一 lock/atomic write 中全局清除三类旧记录，并过滤 incoming；稳定 recording record 与 generated artifact record 不受影响。
+- route/security 不变：artifact request/status/put 仍从 `inventory.artifacts` 查找，完整 tuple 仍重算 path-bound ID，再执行 kind/path/root containment；TLS/HMAC/pinning/timestamp/nonce/body hash 与 `RequestVerifier` 未改。
+- 回归结果证明：双端相同 recording hash/size、不同 iPhone/Mac audio path 时，稳定 metadata/audio objects 收敛；四个本机物理 ID 不进入 evaluated/actions/no-op；旧 payload 的 inventory hash 保持一致；Mac-only transcript 仍生成正常 download action；旧 metadata/audio/receive ledger 行被清理。
+
+## 2026-07-25 双向 metadata winner 执行审计
+
+- Core reconciliation 的 `sourceDeviceID` 决定 compatibility action direction。`.updateMetadata + .upload` 只能进入 `uploadMetadataActions`，`.updateMetadata + .download` 只能进入 `downloadMetadataActions`；同一实体不得同时出现在两个桶。缺失方向必须进入 conflict，不能猜本地或 peer winner。
+- active path 固定为：单次 local inventory -> 单次 `/sync/inventory` -> 单次 reconciliation/diff -> ledger -> conflict-isolated execution plan -> peer winner 的 action-scoped 本地 Store apply -> local winner 的 action-scoped `/sync/apply-metadata` -> run summary。下行和上行都不得使用原始 plan 或完整 manifest。
+- `downloadMetadataActions` 非空时，本轮 `metadataStoreApplyCount == 1`，为空时为 0；`uploadMetadataActions` 非空时 outbound `metadataApplyRequestCount == 1`，为空时为 0。两者可在同一 run 各为 1，但 artifact/audio bytes、placeholder、物理删除和 upload job 必须始终为 0。
+- peer manifest 缺失、action coverage 不完整、checksum 无效、Store `failedChanges/conflictCount` 非零，或 outbound apply partial/rejected/server error，都使 run 失败。已经成功的 LWW 写入幂等保留，下轮可重试；本轮不声明整个 peer revision 已应用。
+- 混合方向回归已证明：iPhone 较新的 standalone note 只进入 outbound scoped manifest；Mac 较新的同 ID note 和 Mac-only folder 只在 iPhone Store 落地，均不会反向进入 outbound manifest；同轮不产生 artifact request/put/status 或 upload job。
+
 ## 2026-07-17 conflict 隔离与 obsolete run 状态审计
 
-- discovery 完成后必须保留原始 plan 和 `conflictActions`；reconciliation 与 run summary 读取原始 plan。metadata shell apply 只能读取 conflict-isolated execution plan。隔离闭包覆盖 folder -> item 以及 item <-> recording/artifact 的依赖；触及 conflict 的 action 全部排除，无关 action 继续执行。conflict 仍是成功 diff，真实 scoped apply 异常仍是失败。
+- discovery 完成后必须保留原始 plan 和 `conflictActions`；reconciliation 与 run summary 读取原始 plan。两个方向的 metadata shell apply 都只能读取 conflict-isolated execution plan。隔离闭包覆盖 folder -> item 以及 item <-> recording/artifact 的依赖；触及 conflict 的 action 全部排除，无关 action 继续执行。conflict 仍是成功 diff，真实 scoped apply 异常仍是失败。
 - sync tick 的内部终态为 `completed`、`retryableFailure`、`terminalObsolete`。只有 `SecureMacUploadError.serverRejected("stale_sync_run")` 能产生 terminal-obsolete；该状态说明 Mac 已接受更新 run，不说明当前 run 成功。
 - coordinator heartbeat queue 与 AppService global queue 两个 durable consumer 都必须对 terminal-obsolete 执行 `markTerminallyConsumed`：从 in-flight 移除、写入 bounded completed-ID dedupe、跨重启不再领取。不得调用 `returnToPending`、不得增加 failure/backoff、不得发布 completed 或写 `lastSuccessfulSyncAt`。
 - 其他失败仍必须 `returnToPending`，等待下一次 heartbeat/状态/激活/显式事件；`superseded_previous` ACK disposition 不是 server reject，不能作为 terminal-obsolete。诊断分别使用 terminal-discard 与 retained-for-retry 事件，不能混报为 UI 同步成功。
@@ -22,22 +57,22 @@
 
 ## 2026-07-12 权威审计口径：连接、同步发现、上传
 
-从本节起，状态审计采用三个彼此独立的状态机。本文后续旧段落中的 bulk/full-manifest metadata apply、artifact/audio transfer 和最终内容证明是历史 full-sync 记录；当前同步只保留一次 action-scoped metadata-shell apply，用于物化既有 metadata-only 卡片，不代表内容传输。
+从本节起，状态审计采用三个彼此独立的状态机。本文后续旧段落中的 bulk/full-manifest metadata apply、artifact/audio transfer 和最终内容证明是历史 full-sync 记录；当前同步只保留按 winner 方向执行的 action-scoped metadata apply，每个方向至多一次，用于让较旧端获得最新 metadata 并物化既有 metadata-only 卡片，不代表内容传输。
 
 | 状态机 | 输入 | 允许动作 | 终态 |
 | --- | --- | --- | --- |
 | Connection | paired endpoint、TLS/HMAC credential、短 heartbeat | 握手、鉴权、presence/capability 更新 | connected / disconnected / authenticationFailed |
-| Sync Discovery / Reconciliation | 两端各一个 inventory snapshot | 交换稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone；按 LWW 计算 source/target；持久化逐对象标记；至多发送/应用一次 action-scoped metadata shell | completed with pendingTransfer/pendingMetadataUpdate/deferred 和可见 metadata-only item，或 inventory/protocol/scoped-metadata persistence failure |
+| Sync Discovery / Reconciliation | 两端各一个 inventory snapshot | 交换稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone；按 LWW 计算 source/target；持久化逐对象标记；每个方向至多应用一次 action-scoped metadata shell | completed with pendingTransfer/pendingMetadataUpdate/deferred 和双方最新业务 metadata，或 inventory/protocol/scoped-metadata persistence failure |
 | Upload / Content Transfer | 用户在来源端学习库选择的 reconciliation record | 校验 source/target version，读取/发送/接收文件 bytes，resume、checksum/size、no-overwrite、finalize、落盘和 proof | queued/transferring/transferredAwaitingVerification/failed/cancelled/staleSourceVersion |
 
 三类状态不得互相冒充：connected 不等于 sync completed；sync completed 不等于 content transferred；upload completed 也不能替代下一轮 inventory 对 peer 状态的观察。sync run 只能引用 upload 建议或可上传对象 ID，不能创建或执行 upload job。
 
 ### 同步成功、冲突与失败
 
-- 稳定 ID 相同即为同一对象；名称和内容变化是版本变化。两端 inventory 成功取得后，以业务 `modifiedAt` LWW 决定 source/target；双方都修改不是独立 conflict 条件。
-- hash 不同且时间相同、缺 hash/size 或版本不可比较时写 deferred。rename-only 写 metadata update 标记但不要求内容传输。
+- 稳定 ID 相同即为同一对象；名称和内容变化是版本变化。两端 inventory 成功取得后，以微秒级业务 `modifiedAt` LWW 决定 source/target；双方都修改不是独立 conflict 条件。
+- hash 不同且时间精确相同到微秒、缺 hash/size 或版本不可比较时写 deferred。rename-only 写 metadata update 标记但不要求内容传输。
 - 删除结果需要 tombstone/版本事实；peer absent 只能表示 missing/unknown，不能直接 apply delete。
-- 当前 action-scoped metadata shell 的构造、发送、验证或 `StudyLibraryStore.applySyncManifest` 失败属于本轮同步失败；artifact request、audio upload、finalize 和内容 transfer `cancelled` 属于独立上传层错误，不得覆盖已完成的同步结果。
+- 任一方向 action-scoped metadata shell 的构造、裁剪、发送、验证或 `StudyLibraryStore.applySyncManifest` 失败属于本轮同步失败；artifact request、audio upload、finalize 和内容 transfer `cancelled` 属于独立上传层错误，不得覆盖已完成的同步结果。
 - 同步只可因连接中断/鉴权失败、inventory snapshot 构建失败、schema/签名/解码/校验失败、diff 计算失败、scoped metadata-shell apply 失败或显式取消同步本身而失败。
 - 同步可持久化有界 run 状态、inventory snapshot 摘要、逐对象 reconciliation record、脱敏诊断和 receiver-local metadata-only item；不得写 receive record、artifact/audio 文件、placeholder、upload job 或内容完成证明。
 
@@ -58,23 +93,23 @@ pendingTransfer / pendingMetadataUpdate
 - 每端每个 `syncRunID` 只构建一次 inventory snapshot，所有响应、planner 和诊断复用该快照。
 - checksum cache hit 不读取大文件内容；只有 miss/stale 才在非 MainActor 计算。连续无文件变化的同步耗时和网络 bytes 不应随大文件体积增长。
 - 同步 wire bytes 只随对象数量和短 metadata 增长，不随 audio/transcript/note/summary 内容大小增长。
-- 同步期间 `uploadMetadataActions` 非空时 `metadataApplyRequestCount == 1`、为空时为 0；`artifactBytesTransferred == 0`、`audioBytesTransferred == 0`、`placeholderCreatedCount == 0`、`uploadJobsCreated == 0` 始终是硬性断言。
+- 同步期间 `uploadMetadataActions` 非空时 outbound `metadataApplyRequestCount == 1`、为空时为 0；`downloadMetadataActions` 非空时本地 `metadataStoreApplyCount == 1`、为空时为 0。`artifactBytesTransferred == 0`、`audioBytesTransferred == 0`、`placeholderCreatedCount == 0`、`uploadJobsCreated == 0` 始终是硬性断言。
 
 ### 2026-07-12 最近日志按新口径分类
 
-同步层做了本不该做的事：一次约 55 条录音的运行自动传输 69 个 artifact、创建约 51 个 placeholder、执行 bulk/repeated metadata apply 与缺失 audio upload，并在这些副作用后才以 4 个 unresolved conflict 结束。除单次 action-scoped metadata shell 外，这些动作都不得回到 active sync。
+同步层做了本不该做的事：一次约 55 条录音的运行自动传输 69 个 artifact、创建约 51 个 placeholder、执行 bulk/repeated metadata apply 与缺失 audio upload，并在这些副作用后才以 4 个 unresolved conflict 结束。除每个方向至多一次 action-scoped metadata apply 外，这些动作都不得回到 active sync。
 
 同步层该做但多做或做错的事：同轮 artifact 请求导致 Mac 约 70 次重建全库 inventory；逐对象 Store save/refresh 造成短时间高频 publish；重复 trigger 产生 stale run；presence/scheduler stop 可取消正在执行的 tick；冲突被错误提升为失败。最近 hash 诊断为 iPhone 54 次、Mac 53 次 cache hit，未见 miss/stale/recompute，因此重复读取大文件计算 hash 不是该轮卡顿主因。
 
 ### 2026-07-12 修复后源码审计
 
-`LocalNetworkSyncEngine.performTick` 的 active path 现为：start gate -> 单次 local runtime snapshot -> 单次 `/sync/inventory` -> 单次 diff -> reconciliation ledger -> 可选单次 action-scoped `/sync/apply-metadata` -> run summary -> completed。active path 不调用 canonical 二次 planner/shadow migration、placeholder、artifact request/put、audio upload、upload job、retry/finalize 或 transfer proof。`conflictActions` 被记录并随成功 plan 返回；`sync_discovery_failed` 覆盖 inventory/protocol/diff 与本轮 scoped metadata-shell apply 异常。
+`LocalNetworkSyncEngine.performTick` 的 active path 现为：start gate -> 单次 local runtime snapshot -> 单次 `/sync/inventory` -> 单次 diff -> reconciliation ledger -> conflict isolation -> 可选单次 peer metadata 本地 apply -> 可选单次 local metadata `/sync/apply-metadata` -> run summary -> completed。active path 不调用 canonical 二次 planner/shadow migration、placeholder、artifact request/put、audio upload、upload job、retry/finalize 或 transfer proof。`conflictActions` 被记录并随成功 plan 返回；`sync_discovery_failed` 覆盖 inventory/protocol/diff 与任一方向 scoped metadata apply 异常。
 
 `LocalNetworkSyncScheduler.stop()` 只取消未来 timer；timer 每次把 discovery 放入独立 task。当前 run 结束前到来的请求最多合并成一个 pending rerun。上传触发规则只允许 `.manualUploadButton` 创建新 job；`.retryDrainer` 只能恢复原始按钮 job。
 
 Mac -> iPhone 上传由独立 `MacToIPhoneUploadStore` 持久化。heartbeat offer 不含 `dataBase64`；文件 bytes 只出现在 `/upload/mac-to-iphone/chunk`，ACK 只在目标端整文件 checksum/size 验证及 no-overwrite 安装后发送。两条新 route 都经过原有 `RequestVerifier`，Mac 仍不主动连接 iPhone。
 
-本地边界测试要求：有本地 metadata upload action 时恰好发送一次 scoped manifest，并确认其中包含必要 item↔recording 关系；没有 metadata upload action 时请求数为 0。两种情况都必须保持 artifact request/put/status、audio bytes、placeholder、upload job 和 active content transfer 为 0。paired-device 真机证据仍需重新构建安装后补充。
+本地边界测试要求：有本地 metadata upload action 时恰好发送一次 outbound scoped manifest，没有时请求数为 0；有 peer metadata download action 时恰好向本地 Store 应用一次 peer scoped manifest，没有时为 0。混合方向时 outbound manifest 只能包含本地 winner，peer winner 只能在本地 Store 落地。所有情况都必须保持 artifact request/put/status、audio bytes、placeholder、upload job 和 active content transfer 为 0。paired-device 真机证据仍需重新构建安装后补充。
 
 ## 2026-07-12 开发会话日志对状态机的影响审计
 

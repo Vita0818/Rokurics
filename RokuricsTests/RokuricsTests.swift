@@ -615,6 +615,25 @@ struct RokuricsTests {
         #expect(after.updatedAt > before.updatedAt)
     }
 
+    @Test func recordingBusinessMutationAdvancesOnlyOnePersistedMicrosecondTick() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let recording = try saveRecording(id: "recording-microsecond-clock", title: "旧名称", store: store)
+        var previous = StudyItemMetadata.defaultMetadata(for: recording)
+        previous.updatedAt = Date(timeIntervalSince1970: 2_500.900_000)
+
+        let merged = previous.mergedWithCurrentRecording(
+            recording,
+            businessMutationAt: Date(timeIntervalSince1970: 2_500.100_000)
+        )
+
+        #expect(SyncTimestampPolicy.matches(
+            merged.updatedAt,
+            Date(timeIntervalSince1970: 2_500.900_001)
+        ))
+        #expect(merged.updatedAt < Date(timeIntervalSince1970: 2_500.901))
+    }
+
     @Test func emptyRenameDoesNotSaveEmptyTitle() throws {
         let (store, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2847,7 +2866,9 @@ struct RokuricsTests {
         let recording = try #require(inventory.recordings.first { $0.recordingID == metadata.id })
         let studyItem = try #require(inventory.studyItems.first { $0.recordingID == metadata.id })
         let metadataArtifact = try #require(inventory.artifacts.first { $0.kind == .metadataJSON && $0.ownerID == metadata.id })
-        let metadataObject = try #require(inventory.objects.first { $0.objectID == metadataArtifact.artifactID })
+        let audioArtifact = try #require(inventory.artifacts.first { $0.kind == .audio && $0.ownerID == metadata.id })
+        let metadataObject = try #require(inventory.objects.first { $0.objectID == "recordingMetadata:\(metadata.id)" })
+        let audioObject = try #require(inventory.objects.first { $0.objectID == "recordingAudio:\(metadata.id)" })
         let studyItemObject = try #require(inventory.objects.first { $0.objectID == "studyItem:\(studyItem.itemID)" })
         let encoded = String(data: try Self.studyEncoder.encode(inventory), encoding: .utf8) ?? ""
 
@@ -2869,9 +2890,15 @@ struct RokuricsTests {
         #expect(metadataArtifact.localAvailability == .local)
         #expect(metadataArtifact.autoDownloadAllowed == true)
         #expect(metadataObject.objectKind == .recordingMetadata)
-        #expect(metadataObject.fileName == "metadata.json")
-        #expect(metadataObject.sha256 == metadataArtifact.checksum)
-        #expect(metadataObject.size == metadataArtifact.size)
+        #expect(metadataObject.fileName == nil)
+        #expect(metadataObject.sha256 == recording.metadataHash)
+        #expect(metadataObject.size == nil)
+        #expect(audioObject.objectKind == .recordingAudio)
+        #expect(audioObject.sha256 == recording.audioChecksum)
+        #expect(audioObject.size == recording.audioSize)
+        #expect(!inventory.objects.contains { $0.objectID == metadataArtifact.artifactID })
+        #expect(!inventory.objects.contains { $0.objectID == audioArtifact.artifactID })
+        #expect(!inventory.syncCoreInventory.objects.contains { $0.objectID == metadataArtifact.artifactID || $0.objectID == audioArtifact.artifactID })
         #expect(studyItemObject.objectKind == .studyItem)
         #expect(studyItemObject.displayTitle == studyItem.title)
         #expect(studyItemObject.updatedAt == studyItem.updatedAt)
@@ -2908,7 +2935,7 @@ struct RokuricsTests {
         }
     }
 
-    @Test func localNetworkDiffPlannerSchedulesTranscriptDownloadButNotAudioDownload() {
+    @Test func localNetworkDiffPlannerSchedulesTranscriptDownloadButIgnoresDeviceLocalAudioProjection() {
         let generatedAt = Date(timeIntervalSince1970: 1)
         let local = LocalNetworkSyncInventory.make(
             device: LocalNetworkSyncDeviceSection(
@@ -2959,7 +2986,260 @@ struct RokuricsTests {
 
         #expect(plan.downloadArtifactActions.map(\.entityID).contains(transcriptID))
         #expect(!plan.downloadArtifactActions.map(\.entityID).contains(audioID))
-        #expect(plan.noOps.contains { $0.entityID == audioID && $0.reason == "audio_auto_download_disabled" })
+        #expect(!plan.uploadArtifactActions.map(\.entityID).contains(audioID))
+        #expect(!plan.conflictActions.map(\.entityID).contains(audioID))
+        #expect(!plan.noOps.map(\.entityID).contains(audioID))
+    }
+
+    @Test func localNetworkReconciliationUsesStableRecordingIDsAcrossDeviceLocalPaths() throws {
+        let generatedAt = Date(timeIntervalSince1970: 2_000)
+        let recordingID = "stable-recording-01"
+        let iphoneMetadataPath = "Metadata/\(recordingID)/metadata.json"
+        let iphoneAudioPath = "Recordings/\(recordingID).m4a"
+        let macReceivePath = "audio/inbox/\(recordingID)/receive.json"
+        let macAudioPath = "audio/inbox/\(recordingID)/audio.m4a"
+        let transcriptPath = "transcripts/\(recordingID)/transcript.md"
+
+        func device(_ id: String, platform: LocalNetworkSyncPlatform) -> LocalNetworkSyncDeviceSection {
+            LocalNetworkSyncDeviceSection(
+                deviceID: id,
+                deviceName: id,
+                platform: platform,
+                generatedAt: generatedAt,
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            )
+        }
+
+        func recording(deviceID: String, audioPath: String) -> LocalNetworkSyncRecordingEntry {
+            LocalNetworkSyncRecordingEntry(
+                recordingID: recordingID,
+                metadataHash: "shared-metadata-hash",
+                audioAvailable: true,
+                audioChecksum: "shared-audio-hash",
+                audioSize: 128,
+                uploadLedgerState: nil,
+                receiveStatus: nil,
+                processingStatus: nil,
+                updatedAt: generatedAt,
+                deleted: false,
+                title: "Stable recording",
+                createdAt: generatedAt,
+                tombstone: false,
+                audioAvailability: .local,
+                sourceDeviceID: deviceID,
+                audioLogicalPathToken: audioPath
+            )
+        }
+
+        func artifact(
+            kind: LocalNetworkSyncArtifactKind,
+            path: String,
+            checksum: String,
+            size: Int64
+        ) -> LocalNetworkSyncArtifactEntry {
+            LocalNetworkSyncArtifactEntry(
+                artifactID: LocalNetworkSyncArtifactID.make(
+                    kind: kind,
+                    ownerID: recordingID,
+                    logicalPathToken: path
+                ),
+                kind: kind,
+                ownerID: recordingID,
+                checksum: checksum,
+                size: size,
+                updatedAt: generatedAt,
+                availability: .local,
+                logicalPathToken: path
+            )
+        }
+
+        func legacyArtifactObject(
+            artifact: LocalNetworkSyncArtifactEntry,
+            objectKind: LocalNetworkSyncObjectKind
+        ) -> LocalNetworkSyncObjectEntry {
+            LocalNetworkSyncObjectEntry(
+                objectID: artifact.artifactID,
+                objectKind: objectKind,
+                ownerID: artifact.ownerID,
+                displayTitle: artifact.ownerID,
+                fileName: artifact.logicalPathToken.split(separator: "/").last.map(String.init),
+                logicalName: artifact.logicalPathToken,
+                sha256: artifact.checksum,
+                size: artifact.size,
+                updatedAt: artifact.updatedAt,
+                deleted: false,
+                tombstone: false,
+                sourceDeviceID: nil,
+                logicalPathToken: artifact.logicalPathToken,
+                availability: artifact.availability,
+                transferState: nil,
+                transferProgress: nil,
+                conflictStatus: nil,
+                autoDownloadAllowed: artifact.autoDownloadAllowed ?? artifact.kind.isAutoDownloadAllowed
+            )
+        }
+
+        let iphoneMetadata = artifact(kind: .metadataJSON, path: iphoneMetadataPath, checksum: "iphone-metadata-file", size: 64)
+        let iphoneAudio = artifact(kind: .audio, path: iphoneAudioPath, checksum: "shared-audio-hash", size: 128)
+        let macReceive = artifact(kind: .receiveJSON, path: macReceivePath, checksum: "mac-receive-file", size: 72)
+        let macAudio = artifact(kind: .audio, path: macAudioPath, checksum: "shared-audio-hash", size: 128)
+        let transcript = artifact(kind: .transcriptMarkdown, path: transcriptPath, checksum: "transcript-hash", size: 96)
+
+        let iphone = LocalNetworkSyncInventory.make(
+            device: device("iphone-01", platform: .iPhone),
+            recordings: [recording(deviceID: "iphone-01", audioPath: iphoneAudioPath)],
+            artifacts: [iphoneMetadata, iphoneAudio]
+        )
+        var mac = LocalNetworkSyncInventory.make(
+            device: device("mac-01", platform: .Mac),
+            recordings: [recording(deviceID: "mac-01", audioPath: macAudioPath)],
+            artifacts: [macReceive, macAudio, transcript]
+        )
+        let physicalIDs = Set([iphoneMetadata.artifactID, iphoneAudio.artifactID, macReceive.artifactID, macAudio.artifactID])
+
+        #expect(iphone.artifacts.contains(iphoneMetadata))
+        #expect(iphone.artifacts.contains(iphoneAudio))
+        #expect(mac.artifacts.contains(macReceive))
+        #expect(mac.artifacts.contains(macAudio))
+        #expect(physicalIDs.isDisjoint(with: Set(iphone.objects.map(\.objectID))))
+        #expect(physicalIDs.isDisjoint(with: Set(mac.objects.map(\.objectID))))
+        #expect(iphone.objects.contains { $0.objectID == "recordingMetadata:\(recordingID)" })
+        #expect(iphone.objects.contains { $0.objectID == "recordingAudio:\(recordingID)" })
+        #expect(mac.objects.contains { $0.objectID == transcript.artifactID })
+
+        mac.objects.append(contentsOf: [
+            legacyArtifactObject(artifact: macReceive, objectKind: .receiveRecord),
+            legacyArtifactObject(artifact: macAudio, objectKind: .recordingAudio)
+        ])
+        let encodedMac = try Self.studyEncoder.encode(mac)
+        let decodedMac = try Self.studyDecoder.decode(LocalNetworkSyncInventory.self, from: encodedMac)
+        #expect(decodedMac.inventoryHash == mac.inventoryHash)
+        #expect(decodedMac.objects.contains { $0.objectID == macReceive.artifactID })
+        #expect(decodedMac.objects.contains { $0.objectID == macAudio.artifactID })
+        #expect(!decodedMac.syncCoreInventory.objects.contains { physicalIDs.contains($0.objectID) })
+
+        let reconciliation = SyncReconciliationPlanner().plan(
+            local: iphone.syncCoreInventory,
+            peer: decodedMac.syncCoreInventory,
+            syncRunID: "stable-path-run",
+            discoveredAt: generatedAt
+        )
+        #expect(reconciliation.records.map(\.objectID) == [transcript.artifactID])
+        #expect(reconciliation.convergedObjectIDs.contains("recordingMetadata:\(recordingID)"))
+        #expect(reconciliation.convergedObjectIDs.contains("recordingAudio:\(recordingID)"))
+        #expect(physicalIDs.isDisjoint(with: Set(reconciliation.evaluatedObjectIDs)))
+
+        let compatibility = LocalNetworkSyncDiffPlanner().plan(
+            reconciliationPlan: reconciliation,
+            local: iphone,
+            peer: decodedMac
+        )
+        #expect(compatibility.downloadArtifactActions.map(\.entityID) == [transcript.artifactID])
+        #expect(physicalIDs.isDisjoint(with: Set(
+            compatibility.uploadArtifactActions.map(\.entityID)
+                + compatibility.downloadArtifactActions.map(\.entityID)
+                + compatibility.conflictActions.map(\.entityID)
+                + compatibility.noOps.map(\.entityID)
+        )))
+    }
+
+    @Test func iPhoneGeneratedArtifactApplyPreservesSourceTimestampForNextLWWRound() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let adapter = IPhoneSyncStorageAdapter(
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore
+        )
+        let ownerID = "timestamp-recording"
+        let logicalPath = "transcripts/\(ownerID)/transcript.md"
+        let artifactID = LocalNetworkSyncArtifactID.make(
+            kind: .transcriptMarkdown,
+            ownerID: ownerID,
+            logicalPathToken: logicalPath
+        )
+        let receivedData = Data("received version".utf8)
+        let sourceVersion = Date(timeIntervalSince1970: 2_500.875)
+        let receivedObject = SyncObject(
+            objectID: artifactID,
+            objectKind: LocalNetworkSyncObjectKind.transcriptMarkdown.rawValue,
+            ownerID: ownerID,
+            displayTitle: "Transcript",
+            fileName: "transcript.md",
+            logicalName: logicalPath,
+            sha256: SecureUploadUtilities.sha256Hex(receivedData),
+            size: Int64(receivedData.count),
+            updatedAt: sourceVersion,
+            tombstone: false,
+            deleted: false,
+            sourceDeviceID: "mac-01",
+            logicalPathToken: logicalPath,
+            availability: .local,
+            transferState: nil,
+            transferProgress: nil,
+            conflictStatus: nil,
+            autoDownloadAllowed: true,
+            metadata: [:]
+        )
+        let destinationURL = try adapter.resolveLogicalPathToken(logicalPath, for: receivedObject)
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("stale local version".utf8).write(to: destinationURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 9_000)],
+            ofItemAtPath: destinationURL.path
+        )
+        let tempURL = try adapter.openWriteTemp(for: receivedObject)
+        try receivedData.write(to: tempURL)
+
+        try adapter.atomicApply(tempURL: tempURL, for: receivedObject)
+
+        let storedMetadata = try #require(LocalNetworkSyncArtifactFileService.metadata(for: destinationURL))
+        #expect(try Data(contentsOf: destinationURL) == receivedData)
+        #expect(storedMetadata.size == Int64(receivedData.count))
+        #expect(
+            SyncTimestampPolicy.matches(
+                try SyncArtifactModifiedAtPolicy.normalized(storedMetadata.updatedAt),
+                sourceVersion
+            )
+        )
+
+        var copiedObject = receivedObject
+        copiedObject.updatedAt = storedMetadata.updatedAt
+        let newerData = Data("newer producer version".utf8)
+        var newerProducerObject = receivedObject
+        newerProducerObject.sha256 = SecureUploadUtilities.sha256Hex(newerData)
+        newerProducerObject.size = Int64(newerData.count)
+        newerProducerObject.updatedAt = Date(timeIntervalSince1970: 2_600.125)
+        newerProducerObject.sourceDeviceID = "mac-01"
+        let reconciliation = SyncReconciliationPlanner().plan(
+            local: SyncInventory.make(
+                sourceDeviceID: "iphone-01",
+                sourcePlatform: "iPhone",
+                inventoryRevision: "iphone-revision",
+                objects: [copiedObject]
+            ),
+            peer: SyncInventory.make(
+                sourceDeviceID: "mac-01",
+                sourcePlatform: "Mac",
+                inventoryRevision: "mac-revision",
+                objects: [newerProducerObject]
+            ),
+            syncRunID: "timestamp-preservation-round"
+        )
+        let record = try #require(reconciliation.records.first)
+        #expect(record.sourceDeviceID == "mac-01")
+        #expect(record.targetDeviceID == "iphone-01")
+        #expect(SyncTimestampPolicy.matches(
+            record.sourceModifiedAt,
+            Date(timeIntervalSince1970: 2_600.125)
+        ))
+        #expect(SyncTimestampPolicy.matches(record.targetModifiedAt, sourceVersion))
+        #expect(record.differenceKind == .contentModified)
+        #expect(record.reason == "latest_modified_at_wins")
     }
 
     @Test func localNetworkDiffPlannerReportsExplicitUploadSuggestionWhenMacMissingIPhoneAudio() {
@@ -3363,7 +3643,9 @@ struct RokuricsTests {
 
         #expect(conflictPlan.conflictActions.isEmpty)
         #expect(conflictPlan.downloadMetadataActions.contains { $0.entityID == "folder-conflict" && $0.reason == "latest_modified_at_wins" })
+        #expect(!conflictPlan.uploadMetadataActions.contains { $0.entityID == "folder-conflict" })
         #expect(tombstonePlan.downloadMetadataActions.contains { $0.entityID == "folder-tombstone" && $0.reason == "latest_modified_at_wins" })
+        #expect(!tombstonePlan.uploadMetadataActions.contains { $0.entityID == "folder-tombstone" })
     }
 
     @Test func recordingBundleStudyItemActionUsesItemIDAndScopedManifestCoversTombstone() throws {
@@ -6478,6 +6760,138 @@ struct RokuricsTests {
         #expect(try uploadJobStore.loadJobs().isEmpty)
     }
 
+    @Test func localNetworkSyncEngineAppliesPeerMetadataWinnersLocallyAndOnlyUploadsLocalWinners() async throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let studyStore = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let uploadJobStore = RecordingUploadJobStore(audioFileStore: audioStore)
+        let localWinner = StudyItemMetadata(
+            itemID: "mixed-direction-local-winner",
+            kind: .standaloneNote,
+            title: "iPhone 最新标题",
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 300),
+            modifiedByDeviceID: "iphone-01"
+        )
+        let localLoser = StudyItemMetadata(
+            itemID: "mixed-direction-peer-winner",
+            kind: .standaloneNote,
+            title: "iPhone 旧标题",
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 200),
+            modifiedByDeviceID: "iphone-01"
+        )
+        try studyStore.save(localWinner)
+        try studyStore.save(localLoser)
+        let sharedFolder = try #require(studyStore.effectiveStudyFolders.first {
+            $0.itemIDs.contains(localWinner.itemID) && $0.itemIDs.contains(localLoser.itemID)
+        })
+
+        var peerLoser = localWinner
+        peerLoser.title = "Mac 旧标题"
+        peerLoser.updatedAt = Date(timeIntervalSince1970: 250)
+        peerLoser.modifiedByDeviceID = "mac-01"
+        var peerWinner = localLoser
+        peerWinner.title = "Mac 最新标题"
+        peerWinner.updatedAt = Date(timeIntervalSince1970: 350)
+        peerWinner.modifiedByDeviceID = "mac-01"
+        let peerOnlyFolder = StudyFolderMetadata(
+            folderID: "mixed-direction-peer-only-folder",
+            name: "Mac 独有文件夹",
+            level: .type,
+            path: StudyFilingPath(type: "Mac 独有文件夹"),
+            createdAt: Date(timeIntervalSince1970: 150),
+            updatedAt: Date(timeIntervalSince1970: 360),
+            modifiedByDeviceID: "mac-01"
+        )
+        let peerManifest = StudyLibrarySyncManifest.make(
+            deviceID: "mac-01",
+            generatedAt: Date(timeIntervalSince1970: 400),
+            items: [peerLoser, peerWinner],
+            folders: [sharedFolder, peerOnlyFolder]
+        )
+        let peerInventory = LocalNetworkSyncInventory.make(
+            device: LocalNetworkSyncDeviceSection(
+                deviceID: "mac-01",
+                deviceName: "Mac",
+                platform: .Mac,
+                generatedAt: Date(timeIntervalSince1970: 400),
+                lastKnownPeerRevision: nil,
+                appSchemaVersion: LocalNetworkSyncInventory.appSchemaVersion
+            ),
+            folders: [sharedFolder, peerOnlyFolder].map { folder in
+                LocalNetworkSyncFolderEntry(
+                    folderID: folder.folderID,
+                    parentID: folder.parentFolderID,
+                    path: folder.path.displaySummary,
+                    name: folder.name,
+                    colorToken: folder.colorToken?.rawValue,
+                    updatedAt: folder.updatedAt,
+                    revisionHash: folder.localNetworkFolderBusinessSignatureV2,
+                    deleted: folder.isTrashed
+                )
+            },
+            studyItems: [peerLoser, peerWinner].map { item in
+                LocalNetworkSyncStudyItemEntry(
+                    itemID: item.itemID,
+                    kind: item.kind,
+                    title: item.title,
+                    folderIDs: item.folderIDs,
+                    recordingID: item.recordingID,
+                    updatedAt: item.updatedAt,
+                    revisionHash: item.localNetworkStudyItemBusinessSignatureV2,
+                    deleted: item.isTrashed,
+                    path: item.filing.displaySummary,
+                    conflictStatus: item.syncConflictStatus
+                )
+            },
+            studyManifest: peerManifest
+        )
+        let fakeClient = FakeLocalNetworkSyncClient(peerInventory: peerInventory)
+        let diagnosticsStore = ConnectionDiagnosticsStore(rootURL: rootURL)
+        let engine = LocalNetworkSyncEngine(
+            connectionStore: FakeSecureMacConnectionSnapshotProvider(snapshot: makePairedMacSnapshot()),
+            audioFileStore: audioStore,
+            studyLibraryStore: studyStore,
+            uploadJobStore: uploadJobStore,
+            client: fakeClient,
+            stateStore: LocalNetworkSyncStateStore(rootURL: rootURL),
+            diagnosticsStore: diagnosticsStore
+        )
+
+        let plan = try #require(await engine.performTick(
+            trigger: "manual",
+            now: Date(timeIntervalSince1970: 500),
+            syncRunID: "mixed-direction-metadata-run"
+        ))
+        let outboundManifest = try #require(fakeClient.appliedMetadataManifests.first)
+
+        #expect(plan.uploadMetadataActions.contains {
+            $0.entityKind == "studyItem" && $0.entityID == localWinner.itemID
+        })
+        #expect(!plan.downloadMetadataActions.contains { $0.entityID == localWinner.itemID })
+        #expect(plan.downloadMetadataActions.contains {
+            $0.entityKind == "studyItem" && $0.entityID == peerWinner.itemID
+        })
+        #expect(!plan.uploadMetadataActions.contains { $0.entityID == peerWinner.itemID })
+        #expect(plan.downloadMetadataActions.contains {
+            $0.entityKind == "folder" && $0.entityID == peerOnlyFolder.folderID
+        })
+        #expect(!plan.uploadMetadataActions.contains { $0.entityID == peerOnlyFolder.folderID })
+        #expect(fakeClient.applyMetadataCount == 1)
+        #expect(fakeClient.applyMetadataSyncRunIDs == ["mixed-direction-metadata-run"])
+        #expect(outboundManifest.items.map(\.itemID) == [localWinner.itemID])
+        #expect(outboundManifest.folders.isEmpty)
+        #expect(studyStore.item(itemID: localWinner.itemID)?.title == localWinner.title)
+        #expect(studyStore.item(itemID: peerWinner.itemID)?.title == peerWinner.title)
+        #expect(studyStore.folder(folderID: peerOnlyFolder.folderID)?.name == peerOnlyFolder.name)
+        #expect(fakeClient.artifactRequestIDs.isEmpty)
+        #expect(fakeClient.artifactPutRequests.isEmpty)
+        #expect(fakeClient.artifactStatusRequests.isEmpty)
+        #expect(try uploadJobStore.loadJobs().isEmpty)
+        #expect(diagnosticsStore.loadEntries().contains { $0.phase == "metadataApplied" })
+    }
+
     @Test func localNetworkSyncEngineExcludesHistoricalConflictFromIndependentRecordingMetadataShell() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -6576,6 +6990,10 @@ struct RokuricsTests {
         let localURL = try LocalNetworkSyncArtifactFileService.safeFileURL(rootURL: audioStore.baseDirectory(), logicalPathToken: logicalPath)
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try localData.write(to: localURL)
+        try SyncArtifactModifiedAtPolicy.preserve(
+            Date(timeIntervalSince1970: 2_010),
+            at: localURL
+        )
         let item = StudyItemMetadata(
             recordingID: "conflict-recording",
             title: "冲突转写",
@@ -7985,8 +8403,75 @@ private actor TestAsyncLatch {
     }
 }
 
+private struct SyncReconciliationLedgerFixture: Codable {
+    var schemaVersion: Int
+    var records: [SyncReconciliationRecord]
+}
+
 @MainActor
 struct SyncReconciliationClosedLoopTests {
+    @Test func syncArtifactModifiedAtPolicyUsesPlannerPrecisionAndRejectsInvalidDates() throws {
+        #expect(
+            try SyncArtifactModifiedAtPolicy.normalized(
+                Date(timeIntervalSince1970: 2_500.875)
+            ) == Date(timeIntervalSince1970: 2_500.875)
+        )
+        #expect(
+            try SyncArtifactModifiedAtPolicy.normalized(
+                Date(timeIntervalSince1970: -2_500.875)
+            ) == Date(timeIntervalSince1970: -2_500.875)
+        )
+        #expect(throws: SyncArtifactModifiedAtPolicy.Failure.invalidSourceModifiedAt) {
+            try SyncArtifactModifiedAtPolicy.normalized(
+                Date(timeIntervalSince1970: .nan)
+            )
+        }
+    }
+
+    @Test func syncTimestampCodecPreservesMicrosecondsAndReadsLegacyWholeSeconds() throws {
+        struct Fixture: Codable {
+            var updatedAt: Date
+        }
+
+        let source = Date(timeIntervalSince1970: 2_500.123_456)
+        let encoder = JSONEncoder()
+        SyncTimestampPolicy.configure(encoder)
+        let encoded = try encoder.encode(Fixture(updatedAt: source))
+        let encodedText = try #require(String(data: encoded, encoding: .utf8))
+        let decoder = JSONDecoder()
+        SyncTimestampPolicy.configure(decoder)
+        let roundTripped = try decoder.decode(Fixture.self, from: encoded)
+        let legacy = try decoder.decode(
+            Fixture.self,
+            from: Data(#"{"updatedAt":"1970-01-01T00:41:40Z"}"#.utf8)
+        )
+
+        #expect(encodedText.contains("1970-01-01T00:41:40.123456Z"))
+        #expect(SyncTimestampPolicy.matches(roundTripped.updatedAt, source))
+        #expect(legacy.updatedAt == Date(timeIntervalSince1970: 2_500))
+    }
+
+    @Test func iPhoneStudyLibraryStorePreservesSubsecondUpdatedAtAcrossRestart() throws {
+        let (audioStore, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let updatedAt = Date(timeIntervalSince1970: 2_500.654_321)
+        let item = StudyItemMetadata(
+            itemID: "item_note_subsecond_timestamp",
+            kind: .standaloneNote,
+            title: "Subsecond timestamp",
+            createdAt: Date(timeIntervalSince1970: 2_400),
+            updatedAt: updatedAt,
+            noteRelativePath: "notes/subsecond/note.md"
+        )
+        let store = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+
+        try store.save(item)
+
+        let reloaded = StudyLibraryStore(rootURL: rootURL, audioFileStore: audioStore)
+        let persisted = try #require(reloaded.allStudyItems.first { $0.itemID == item.itemID })
+        #expect(SyncTimestampPolicy.matches(persisted.updatedAt, updatedAt))
+    }
+
     @Test func enforcedUploadDoesNotCreateJobWithoutReconciliationRecord() async throws {
         let (store, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -8030,6 +8515,37 @@ struct SyncReconciliationClosedLoopTests {
         #expect(plan.records[0].targetDeviceID == "mac")
         #expect(plan.records[0].differenceKind == .contentModified)
         #expect(plan.records[0].requiresContentTransfer)
+    }
+
+    @Test func reconciliationUsesSubsecondOrderInsteadOfDeferringSameSecondChanges() {
+        let local = reconciliationInventory(
+            deviceID: "iphone",
+            object: reconciliationObject(hash: "aa", modifiedAt: 200.125)
+        )
+        let peer = reconciliationInventory(
+            deviceID: "mac",
+            object: reconciliationObject(hash: "bb", modifiedAt: 200.875)
+        )
+        let forward = SyncReconciliationPlanner().plan(
+            local: local,
+            peer: peer,
+            syncRunID: "same-second-forward"
+        )
+        let reversed = SyncReconciliationPlanner().plan(
+            local: peer,
+            peer: local,
+            syncRunID: "same-second-reversed"
+        )
+
+        #expect(forward.records.count == 1)
+        #expect(forward.records[0].sourceDeviceID == "mac")
+        #expect(forward.records[0].targetDeviceID == "iphone")
+        #expect(forward.records[0].differenceKind == .contentModified)
+        #expect(forward.records[0].status == .pendingTransfer)
+        #expect(reversed.records.count == 1)
+        #expect(reversed.records[0].sourceDeviceID == "mac")
+        #expect(reversed.records[0].targetDeviceID == "iphone")
+        #expect(reversed.records[0].recordID == forward.records[0].recordID)
     }
 
     @Test func reconciliationDefersEqualTimestampWithDifferentHashes() {
@@ -8079,18 +8595,74 @@ struct SyncReconciliationClosedLoopTests {
     @Test func reconciliationStorePersistsAndClearsAfterConvergence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("reconciliation-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let iphone = reconciliationInventory(deviceID: "iphone", object: reconciliationObject(hash: "aa", modifiedAt: 300))
-        let mac = reconciliationInventory(deviceID: "mac", object: reconciliationObject(hash: "bb", modifiedAt: 200))
+        let sourceModifiedAt = Date(timeIntervalSince1970: 300.875)
+        let iphone = reconciliationInventory(deviceID: "iphone", object: reconciliationObject(hash: "aa", modifiedAt: 300.875))
+        let mac = reconciliationInventory(deviceID: "mac", object: reconciliationObject(hash: "bb", modifiedAt: 200.125))
         let store = SyncReconciliationStore(rootURL: root)
         let pending = SyncReconciliationPlanner().plan(local: iphone, peer: mac, syncRunID: "run-1")
         try store.apply(plan: pending, localDeviceID: "iphone", syncRunID: "run-1")
 
-        #expect(SyncReconciliationStore(rootURL: root).snapshot().count == 1)
+        let reloadedRecord = try #require(SyncReconciliationStore(rootURL: root).snapshot().first)
+        #expect(SyncTimestampPolicy.matches(reloadedRecord.sourceModifiedAt, sourceModifiedAt))
 
-        let convergedMac = reconciliationInventory(deviceID: "mac", object: reconciliationObject(hash: "aa", modifiedAt: 300))
+        let convergedMac = reconciliationInventory(deviceID: "mac", object: reconciliationObject(hash: "aa", modifiedAt: 300.875))
         let converged = SyncReconciliationPlanner().plan(local: iphone, peer: convergedMac, syncRunID: "run-2")
         try store.apply(plan: converged, localDeviceID: "iphone", syncRunID: "run-2")
         #expect(SyncReconciliationStore(rootURL: root).snapshot().isEmpty)
+    }
+
+    @Test func reconciliationStoreRetiresDeviceLocalArtifactProjectionRecords() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("reconciliation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacyObjects = [
+            reconciliationObject(
+                hash: "metadata-file",
+                modifiedAt: 300,
+                objectID: "artifact_\(String(repeating: "a", count: 64))",
+                objectKind: "recordingMetadata"
+            ),
+            reconciliationObject(
+                hash: "audio-file",
+                modifiedAt: 300,
+                objectID: "artifact_\(String(repeating: "b", count: 64))",
+                objectKind: "recordingAudio"
+            ),
+            reconciliationObject(
+                hash: "receive-file",
+                modifiedAt: 300,
+                objectID: "artifact_\(String(repeating: "c", count: 64))",
+                objectKind: "receiveRecord"
+            )
+        ]
+        let stableObject = reconciliationObject(
+            hash: "stable-audio",
+            modifiedAt: 300,
+            objectID: "recordingAudio:stable"
+        )
+        let seededPlan = SyncReconciliationPlanner().plan(
+            local: reconciliationInventory(deviceID: "iphone", objects: legacyObjects + [stableObject]),
+            peer: reconciliationInventory(deviceID: "mac", objects: []),
+            syncRunID: "legacy-run"
+        )
+        let ledgerURL = root
+            .appendingPathComponent("Sync", isDirectory: true)
+            .appendingPathComponent("Reconciliation", isDirectory: true)
+            .appendingPathComponent("records.json")
+        try FileManager.default.createDirectory(at: ledgerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(SyncReconciliationLedgerFixture(schemaVersion: 1, records: seededPlan.records))
+            .write(to: ledgerURL, options: .atomic)
+
+        let store = SyncReconciliationStore(rootURL: root)
+        #expect(store.snapshot().count == 4)
+        try store.apply(
+            plan: SyncReconciliationPlan(records: [], convergedObjectIDs: [], evaluatedObjectIDs: []),
+            localDeviceID: "iphone",
+            syncRunID: "migration-run"
+        )
+
+        #expect(store.snapshot().map(\.objectID) == ["recordingAudio:stable"])
     }
 
     @Test func reconciliationLatestTombstoneWinsAndOlderTombstoneDoesNotResurrect() {
@@ -8285,11 +8857,12 @@ struct SyncReconciliationClosedLoopTests {
         modifiedAt: TimeInterval,
         fileName: String = "audio.m4a",
         tombstone: Bool = false,
-        objectID: String = "recordingAudio:recording-1"
+        objectID: String = "recordingAudio:recording-1",
+        objectKind: String = "recordingAudio"
     ) -> SyncObject {
         SyncObject(
             objectID: objectID,
-            objectKind: "recordingAudio",
+            objectKind: objectKind,
             ownerID: objectID.replacingOccurrences(of: "recordingAudio:", with: ""),
             displayTitle: "Lesson",
             fileName: fileName,

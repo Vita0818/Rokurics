@@ -162,14 +162,14 @@ final class MacToIPhoneUploadStore: @unchecked Sendable {
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
 
     private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }

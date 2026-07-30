@@ -776,11 +776,12 @@ nonisolated struct StudyItemMetadata: Codable, Equatable, Identifiable {
         let resolvedTrashedAt = clearsRecordingTombstone && !recording.isDeleted
             ? nil
             : (recording.deletedAt ?? trashedAt)
-        let resolvedUpdatedAt = businessMutationAt.map {
-            // The persisted ISO-8601 encoder currently has second precision.
-            // Advance by a full encoded tick so a rapid rename/restore cannot
-            // serialize back to the same business clock value.
-            max($0, updatedAt.addingTimeInterval(1))
+        let resolvedUpdatedAt = businessMutationAt.map { mutationAt in
+            // Advance by one persisted microsecond tick when the wall clock is
+            // not newer, without manufacturing a full second of business time.
+            SyncTimestampPolicy.strictlyIncreasing(mutationAt, after: updatedAt)
+                ?? SyncTimestampPolicy.normalized(mutationAt)
+                ?? updatedAt
         } ?? updatedAt
         return StudyItemMetadata(
             itemID: itemID,

@@ -8,6 +8,119 @@
 import CryptoKit
 import Foundation
 
+nonisolated enum SyncTimestampPolicy {
+    private static let microsecondsPerSecond: Int64 = 1_000_000
+    private static let wholeSecondStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: false)
+    private static let fractionalStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+    nonisolated static func normalized(_ date: Date) -> Date? {
+        guard let microseconds = epochMicroseconds(date) else {
+            return nil
+        }
+        return makeDate(epochMicroseconds: microseconds)
+    }
+
+    nonisolated static func strictlyIncreasing(_ candidate: Date, after previous: Date) -> Date? {
+        guard let candidateMicroseconds = epochMicroseconds(candidate),
+              let previousMicroseconds = epochMicroseconds(previous),
+              previousMicroseconds < Int64.max else {
+            return nil
+        }
+        return makeDate(
+            epochMicroseconds: max(candidateMicroseconds, previousMicroseconds + 1)
+        )
+    }
+
+    nonisolated static func matches(_ lhs: Date, _ rhs: Date) -> Bool {
+        guard let lhsMicroseconds = epochMicroseconds(lhs),
+              let rhsMicroseconds = epochMicroseconds(rhs) else {
+            return false
+        }
+        return lhsMicroseconds == rhsMicroseconds
+    }
+
+    nonisolated static func matches(_ lhs: Date?, _ rhs: Date?) -> Bool {
+        switch (lhs, rhs) {
+        case let (.some(lhs), .some(rhs)):
+            return matches(lhs, rhs)
+        case (.none, .none):
+            return true
+        default:
+            return false
+        }
+    }
+
+    nonisolated static func versionToken(_ date: Date) -> String? {
+        epochMicroseconds(date).map(String.init)
+    }
+
+    nonisolated static func configure(_ encoder: JSONEncoder) {
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(try encodedString(for: date))
+        }
+    }
+
+    nonisolated static func configure(_ decoder: JSONDecoder) {
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            guard let parsed = (try? fractionalStyle.parse(value))
+                ?? (try? wholeSecondStyle.parse(value)),
+                  let normalized = normalized(parsed) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Invalid ISO-8601 sync timestamp."
+                )
+            }
+            return normalized
+        }
+    }
+
+    private nonisolated static func epochMicroseconds(_ date: Date) -> Int64? {
+        let seconds = date.timeIntervalSince1970
+        guard seconds.isFinite else {
+            return nil
+        }
+        let scaled = (seconds * TimeInterval(microsecondsPerSecond)).rounded()
+        guard scaled >= TimeInterval(Int64.min),
+              scaled <= TimeInterval(Int64.max),
+              let value = Int64(exactly: scaled) else {
+            return nil
+        }
+        return value
+    }
+
+    private nonisolated static func encodedString(for date: Date) throws -> String {
+        guard let totalMicroseconds = epochMicroseconds(date) else {
+            throw EncodingError.invalidValue(
+                date,
+                EncodingError.Context(
+                    codingPath: [],
+                    debugDescription: "Sync timestamp is not finite or is outside the supported range."
+                )
+            )
+        }
+        var wholeSeconds = totalMicroseconds / microsecondsPerSecond
+        var fractionalMicroseconds = totalMicroseconds % microsecondsPerSecond
+        if fractionalMicroseconds < 0 {
+            wholeSeconds -= 1
+            fractionalMicroseconds += microsecondsPerSecond
+        }
+        let wholeSecondDate = Date(timeIntervalSince1970: TimeInterval(wholeSeconds))
+        let base = wholeSecondStyle.format(wholeSecondDate)
+        return String(base.dropLast())
+            + String(format: ".%06lldZ", fractionalMicroseconds)
+    }
+
+    private nonisolated static func makeDate(epochMicroseconds: Int64) -> Date {
+        Date(
+            timeIntervalSince1970:
+                TimeInterval(epochMicroseconds) / TimeInterval(microsecondsPerSecond)
+        )
+    }
+}
+
 enum SyncObjectAvailability: String, Codable, Equatable, Sendable {
     case local
     case missing
@@ -56,6 +169,73 @@ struct SyncObject: Codable, Equatable, Identifiable, Sendable {
     var conflictStatus: String?
     var autoDownloadAllowed: Bool
     var metadata: [String: String]
+}
+
+enum SyncObjectIdentityPolicy {
+    /// Physical file projections used by the local transport are not business
+    /// objects. Their IDs bind kind/owner/path for route validation, so allowing
+    /// them into reconciliation creates a new identity whenever a device uses a
+    /// different container-relative path.
+    nonisolated static func isDeviceLocalArtifactProjection(
+        objectID: String,
+        objectKind: String
+    ) -> Bool {
+        guard objectID.hasPrefix("artifact_") else {
+            return false
+        }
+        switch objectKind {
+        case "recordingMetadata", "recordingAudio", "receiveRecord":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+nonisolated enum SyncArtifactModifiedAtPolicy {
+    nonisolated enum Failure: String, Error, LocalizedError {
+        case invalidSourceModifiedAt = "sync_artifact_modified_at_invalid"
+        case sourceModifiedAtNotPreserved = "sync_artifact_modified_at_not_preserved"
+
+        var errorDescription: String? {
+            rawValue
+        }
+    }
+
+    /// Reconciliation compares timestamps at the same microsecond precision used
+    /// by the sync wire and persisted business metadata.
+    /// A received file must retain the source version time instead of using the
+    /// local write time, otherwise transport latency becomes a false business
+    /// edit and can reverse the winner after content diverges again.
+    nonisolated static func normalized(_ sourceModifiedAt: Date) throws -> Date {
+        guard let normalized = SyncTimestampPolicy.normalized(sourceModifiedAt) else {
+            throw Failure.invalidSourceModifiedAt
+        }
+        return normalized
+    }
+
+    nonisolated static func preserve(
+        _ sourceModifiedAt: Date,
+        at fileURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let expected = try normalized(sourceModifiedAt)
+        do {
+            try fileManager.setAttributes(
+                [.modificationDate: expected],
+                ofItemAtPath: fileURL.path
+            )
+            let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            guard let actual = attributes[.modificationDate] as? Date,
+                  try normalized(actual) == expected else {
+                throw Failure.sourceModifiedAtNotPreserved
+            }
+        } catch let failure as Failure {
+            throw failure
+        } catch {
+            throw Failure.sourceModifiedAtNotPreserved
+        }
+    }
 }
 
 struct SyncDirectory: Codable, Equatable, Identifiable, Sendable {
@@ -358,8 +538,19 @@ nonisolated struct SyncReconciliationPlanner: Sendable {
         discoveredAt: Date,
         tieReason: String
     ) -> SyncReconciliationRecord {
-        let localTime = normalized(local.updatedAt)
-        let peerTime = normalized(peer.updatedAt)
+        guard let localTime = SyncTimestampPolicy.normalized(local.updatedAt),
+              let peerTime = SyncTimestampPolicy.normalized(peer.updatedAt) else {
+            return makeDeferred(
+                local: local,
+                localDeviceID: localDeviceID,
+                peer: peer,
+                peerDeviceID: peerDeviceID,
+                difference: .informationInsufficient,
+                syncRunID: syncRunID,
+                discoveredAt: discoveredAt,
+                reason: "invalid_modified_at"
+            )
+        }
         if localTime > peerTime {
             return makeRecord(source: local, sourceDeviceID: localDeviceID, target: peer, targetDeviceID: peerDeviceID, difference: difference, syncRunID: syncRunID, discoveredAt: discoveredAt, reason: "latest_modified_at_wins")
         }
@@ -382,11 +573,12 @@ nonisolated struct SyncReconciliationPlanner: Sendable {
         let content = isContentBearing(source.objectKind) && !source.deletedOrTombstoned && difference != .renameOnly
         let targetBusinessName = target.flatMap { businessName(for: $0) }
         let metadata = !content || businessName(for: source) != targetBusinessName
-        let normalizedSourceDate = normalized(source.updatedAt)
-        let normalizedTargetDate = target.map { normalized($0.updatedAt) }
+        let normalizedSourceDate = SyncTimestampPolicy.normalized(source.updatedAt)
+        let normalizedTargetDate = target.flatMap { SyncTimestampPolicy.normalized($0.updatedAt) }
         let identity = [
             source.objectID, sourceDeviceID, targetDeviceID, source.sha256 ?? "", source.size.map(String.init) ?? "",
-            String(Int64(normalizedSourceDate.timeIntervalSince1970)), target?.sha256 ?? "", target?.size.map(String.init) ?? "",
+            normalizedSourceDate.flatMap(SyncTimestampPolicy.versionToken) ?? "invalid-modified-at",
+            target?.sha256 ?? "", target?.size.map(String.init) ?? "",
             difference.rawValue
         ].joined(separator: "|")
         return SyncReconciliationRecord(
@@ -455,9 +647,6 @@ nonisolated struct SyncReconciliationPlanner: Sendable {
         return normalized?.isEmpty == false ? normalized : nil
     }
 
-    private func normalized(_ date: Date) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(Int64(date.timeIntervalSince1970)))
-    }
 }
 
 nonisolated final class SyncReconciliationStore: @unchecked Sendable {
@@ -505,10 +694,20 @@ nonisolated final class SyncReconciliationStore: @unchecked Sendable {
             var ledger = try loadLocked()
             let evaluated = Set(plan.evaluatedObjectIDs)
             let incoming = plan.records.filter {
-                $0.sourceDeviceID == localDeviceID || $0.targetDeviceID == localDeviceID || $0.status == .deferred
+                !SyncObjectIdentityPolicy.isDeviceLocalArtifactProjection(
+                    objectID: $0.objectID,
+                    objectKind: $0.objectKind
+                )
+                    && ($0.sourceDeviceID == localDeviceID || $0.targetDeviceID == localDeviceID || $0.status == .deferred)
             }
             let oldByID = Dictionary(uniqueKeysWithValues: ledger.records.map { ($0.recordID, $0) })
-            ledger.records.removeAll { evaluated.contains($0.objectID) }
+            ledger.records.removeAll {
+                evaluated.contains($0.objectID)
+                    || SyncObjectIdentityPolicy.isDeviceLocalArtifactProjection(
+                        objectID: $0.objectID,
+                        objectKind: $0.objectKind
+                    )
+            }
             ledger.records.append(contentsOf: incoming.map { value in
                 var record = value
                 record.syncRunID = syncRunID ?? value.syncRunID
@@ -546,7 +745,7 @@ nonisolated final class SyncReconciliationStore: @unchecked Sendable {
         }
         let data = try Data(contentsOf: ledgerURL)
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         let ledger = try decoder.decode(Ledger.self, from: data)
         guard ledger.schemaVersion == 1 else {
             throw CocoaError(.fileReadCorruptFile)
@@ -558,7 +757,7 @@ nonisolated final class SyncReconciliationStore: @unchecked Sendable {
         guard let ledgerURL else { return }
         try fileManager.createDirectory(at: ledgerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(ledger).write(to: ledgerURL, options: .atomic)
     }

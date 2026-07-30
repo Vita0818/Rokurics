@@ -320,15 +320,15 @@ struct RecordingUploadRouteHandler {
                       record.requiresContentTransfer,
                       record.sourceSHA256?.lowercased() == request.totalSHA256.lowercased(),
                       record.sourceSize == request.totalBytes,
-                      record.sourceModifiedAt == request.sourceModifiedAt,
+                      SyncTimestampPolicy.matches(record.sourceModifiedAt, request.sourceModifiedAt),
                       record.targetSHA256?.lowercased() == request.expectedTargetSHA256?.lowercased(),
                       record.targetSize == request.expectedTargetSize,
-                      record.targetModifiedAt == request.targetModifiedAt else {
+                      SyncTimestampPolicy.matches(record.targetModifiedAt, request.targetModifiedAt) else {
                     return Self.errorResponse(statusCode: 409, reason: "Conflict", error: "sync_transfer_mark_mismatch")
                 }
                 if let expectedTargetModifiedAt = request.targetModifiedAt {
                     guard let currentTargetModifiedAt = studyLibraryStore.item(recordingID: request.recordingID)?.updatedAt,
-                          Int64(expectedTargetModifiedAt.timeIntervalSince1970) == Int64(currentTargetModifiedAt.timeIntervalSince1970) else {
+                          SyncTimestampPolicy.matches(expectedTargetModifiedAt, currentTargetModifiedAt) else {
                         return Self.errorResponse(statusCode: 409, reason: "Conflict", error: "sync_target_version_stale")
                     }
                 }
@@ -1288,7 +1288,7 @@ private nonisolated struct MacLocalNetworkSyncBackgroundStudyManifestBuilder {
 
     private static let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }
@@ -3093,7 +3093,7 @@ final class SecureLocalHTTPSServer {
     ) async throws -> T {
         try await Task.detached(priority: .utility) {
             let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
+            SyncTimestampPolicy.configure(decoder)
             return try decoder.decode(T.self, from: body)
         }.value
     }
@@ -3101,7 +3101,7 @@ final class SecureLocalHTTPSServer {
     private nonisolated static func encodeSyncBodyOffMain<T: Encodable>(_ value: T) async throws -> Data {
         try await Task.detached(priority: .utility) {
             let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
+            SyncTimestampPolicy.configure(encoder)
             encoder.outputFormatting = [.sortedKeys]
             return try encoder.encode(value)
         }.value
@@ -5495,6 +5495,9 @@ final class SecureLocalHTTPSServer {
                 artifactURL: artifactURL,
                 checksum: request.checksum,
                 existingChecksum: existingChecksum,
+                sourceModifiedAt: request.kind.participatesInObjectReconciliation
+                    ? request.updatedAt
+                    : nil,
                 writeQueue: writeQueue
             )
         } catch {
@@ -5636,6 +5639,7 @@ final class SecureLocalHTTPSServer {
         artifactURL: URL,
         checksum: String,
         existingChecksum: String?,
+        sourceModifiedAt: Date?,
         writeQueue: DispatchQueue
     ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
@@ -5645,7 +5649,8 @@ final class SecureLocalHTTPSServer {
                         tempURL: tempURL,
                         artifactURL: artifactURL,
                         checksum: checksum,
-                        existingChecksum: existingChecksum
+                        existingChecksum: existingChecksum,
+                        sourceModifiedAt: sourceModifiedAt
                     ))
                 } catch {
                     continuation.resume(throwing: error)
@@ -5658,7 +5663,8 @@ final class SecureLocalHTTPSServer {
         tempURL: URL,
         artifactURL: URL,
         checksum: String,
-        existingChecksum: String?
+        existingChecksum: String?,
+        sourceModifiedAt: Date?
     ) throws -> String {
         let disposition = existingChecksum == checksum ? "acceptedExisting" : "acceptedNew"
         try FileManager.default.createDirectory(at: artifactURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -5668,6 +5674,12 @@ final class SecureLocalHTTPSServer {
             _ = try FileManager.default.replaceItemAt(artifactURL, withItemAt: tempURL)
         } else {
             try FileManager.default.moveItem(at: tempURL, to: artifactURL)
+        }
+        if let sourceModifiedAt {
+            try SyncArtifactModifiedAtPolicy.preserve(
+                sourceModifiedAt,
+                at: artifactURL
+            )
         }
         return disposition
     }
@@ -6173,7 +6185,7 @@ final class SecureLocalHTTPSServer {
     private func sendJSON<Response: Encodable>(statusCode: Int, reason: String, body: Response, on connection: NWConnection) {
         do {
             let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
+            SyncTimestampPolicy.configure(encoder)
             encoder.outputFormatting = [.sortedKeys]
             let bodyData = try encoder.encode(body)
             sendJSONData(statusCode: statusCode, reason: reason, bodyData: bodyData, on: connection)
@@ -9524,13 +9536,13 @@ final class SecureLocalHTTPSServer {
 
     private static let syncJSONDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 
     private static let syncJSONEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()

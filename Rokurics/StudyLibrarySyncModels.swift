@@ -1825,6 +1825,15 @@ enum LocalNetworkSyncArtifactKind: String, Codable, Equatable, Sendable {
             return false
         }
     }
+
+    var participatesInObjectReconciliation: Bool {
+        switch self {
+        case .metadataJSON, .receiveJSON, .audio:
+            return false
+        case .transcriptMarkdown, .transcriptJSON, .noteMarkdown, .noteJSON, .summaryMarkdown, .summaryJSON:
+            return true
+        }
+    }
 }
 
 enum LocalNetworkSyncArtifactAvailability: String, Codable, Equatable, Sendable {
@@ -2116,28 +2125,30 @@ struct LocalNetworkSyncInventory: Codable, Equatable {
                 autoDownloadAllowed: true
             )
         }
-        let artifactObjects = artifacts.map { artifact in
-            LocalNetworkSyncObjectEntry(
-                objectID: artifact.artifactID,
-                objectKind: objectKind(for: artifact.kind),
-                ownerID: artifact.ownerID,
-                displayTitle: artifact.ownerID,
-                fileName: fileName(for: artifact),
-                logicalName: artifact.logicalPathToken,
-                sha256: artifact.checksum,
-                size: artifact.size,
-                updatedAt: artifact.updatedAt,
-                deleted: false,
-                tombstone: false,
-                sourceDeviceID: nil,
-                logicalPathToken: artifact.logicalPathToken,
-                availability: artifact.availability,
-                transferState: nil,
-                transferProgress: nil,
-                conflictStatus: nil,
-                autoDownloadAllowed: artifact.autoDownloadAllowed ?? artifact.kind.isAutoDownloadAllowed
-            )
-        }
+        let artifactObjects = artifacts
+            .filter(\.kind.participatesInObjectReconciliation)
+            .map { artifact in
+                LocalNetworkSyncObjectEntry(
+                    objectID: artifact.artifactID,
+                    objectKind: objectKind(for: artifact.kind),
+                    ownerID: artifact.ownerID,
+                    displayTitle: artifact.ownerID,
+                    fileName: fileName(for: artifact),
+                    logicalName: artifact.logicalPathToken,
+                    sha256: artifact.checksum,
+                    size: artifact.size,
+                    updatedAt: artifact.updatedAt,
+                    deleted: false,
+                    tombstone: false,
+                    sourceDeviceID: nil,
+                    logicalPathToken: artifact.logicalPathToken,
+                    availability: artifact.availability,
+                    transferState: nil,
+                    transferProgress: nil,
+                    conflictStatus: nil,
+                    autoDownloadAllowed: artifact.autoDownloadAllowed ?? artifact.kind.isAutoDownloadAllowed
+                )
+            }
         return recordingObjects + recordingAudioObjects + folderObjects + studyItemObjects + artifactObjects
     }
 
@@ -2206,7 +2217,14 @@ extension LocalNetworkSyncInventory {
             generatedAt: generatedAt,
             inventoryRevision: inventoryRevision,
             lastKnownPeerRevision: lastKnownPeerRevision,
-            objects: objects.map(\.syncObject),
+            objects: objects
+                .filter {
+                    !SyncObjectIdentityPolicy.isDeviceLocalArtifactProjection(
+                        objectID: $0.objectID,
+                        objectKind: $0.objectKind.rawValue
+                    )
+                }
+                .map(\.syncObject),
             directories: folders.map(\.syncDirectory),
             deviceSummary: [
                 "deviceName": device.deviceName,
@@ -2655,15 +2673,23 @@ nonisolated struct LocalNetworkSyncDiffPlanner {
         to plan: inout LocalNetworkSyncDiffPlan
     ) {
         switch action.kind {
-        case .uploadObject, .updateMetadata:
+        case .uploadObject:
             plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: metadataReason(action.reason, entityKind: entityKind, uploading: true)))
         case .downloadObject:
             plan.downloadMetadataActions.append(legacyAction(.downloadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: metadataReason(action.reason, entityKind: entityKind, uploading: false)))
-        case .applyTombstone:
+        case .updateMetadata, .applyTombstone:
             if action.direction == .upload {
-                plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+                let reason = action.kind == .updateMetadata
+                    ? metadataReason(action.reason, entityKind: entityKind, uploading: true)
+                    : action.reason
+                plan.uploadMetadataActions.append(legacyAction(.uploadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: reason))
+            } else if action.direction == .download {
+                let reason = action.kind == .updateMetadata
+                    ? metadataReason(action.reason, entityKind: entityKind, uploading: false)
+                    : action.reason
+                plan.downloadMetadataActions.append(legacyAction(.downloadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: reason))
             } else {
-                plan.downloadMetadataActions.append(legacyAction(.downloadMetadata, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))
+                plan.conflictActions.append(legacyAction(.conflict, action: action, entityKind: entityKind, entityID: entityID, reason: "metadata_direction_missing"))
             }
         case .conflict:
             plan.conflictActions.append(legacyAction(.conflict, action: action, entityKind: entityKind, entityID: entityID, reason: action.reason))

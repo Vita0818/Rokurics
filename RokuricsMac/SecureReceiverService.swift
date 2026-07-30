@@ -818,7 +818,7 @@ final class SecureReceiverService: ObservableObject {
             let currentBusinessModifiedAt = studyLibraryStore.item(recordingID: recordingID)?.updatedAt
             let modifiedAtMatches = reconciliationRecord.sourceModifiedAt.map { expected in
                 guard let currentBusinessModifiedAt else { return false }
-                return Int64(expected.timeIntervalSince1970) == Int64(currentBusinessModifiedAt.timeIntervalSince1970)
+                return SyncTimestampPolicy.matches(expected, currentBusinessModifiedAt)
             } ?? true
             guard reconciliationRecord.sourceSHA256?.lowercased() == checksum.lowercased(),
                   reconciliationRecord.sourceSize == size,

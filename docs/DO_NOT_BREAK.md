@@ -1,25 +1,30 @@
 # DO_NOT_BREAK
 
-## 连接 / 同步 / 上传产品边界禁区（2026-07-12，2026-07-16/17 窄化修订）
+## 连接 / 同步 / 上传产品边界禁区（2026-07-12，2026-07-16/17/25 窄化修订）
 
-以下是项目级产品不变量，解释优先级高于本文后续为旧 canonical/full-sync 实现保留的历史禁区。后续修改不得恢复旧 full-sync 副作用；当前唯一 apply 例外是按本轮 action 裁剪的 metadata shell，用于物化既有 metadata-only 卡片。后续旧版本段落中的“不得新增 upload route”不阻止本次已批准、已验证且处于 upload namespace 的 Mac -> iPhone pull/ACK route。
+以下是项目级产品不变量，解释优先级高于本文后续为旧 canonical/full-sync 实现保留的历史禁区。后续修改不得恢复旧 full-sync 副作用；当前唯一 apply 例外是按 conflict-isolated plan 和 winner 方向裁剪的双向 metadata shell，用于让较旧端获得最新业务 metadata 并物化既有 metadata-only 卡片。后续旧版本段落中的“不得新增 upload route”不阻止本次已批准、已验证且处于 upload namespace 的 Mac -> iPhone pull/ACK route。
 
 - 连接层只允许短握手、鉴权、capability 和 presence/heartbeat。不得在连接检查或 heartbeat 内扫描学习库、构建 inventory、计算文件 hash、读写文件、apply metadata、创建 upload job 或执行 retry drain。
-- 连接页“立即同步”只允许 inventory exchange + diff + 至多一次 action-scoped metadata-shell apply。允许字段限于稳定对象/文件标识、逻辑文件名、hash、byte size、业务修改时间、版本、tombstone/删除标记、必要 recording/item/folder metadata 关系和协议所需的有限状态；不得包含文件 bytes、`dataBase64`、音频、完整 transcript/note/summary、附件正文或 provider response。
-- 同步层必须按稳定 `objectID` 认定同一业务对象；名称、物理路径或内容变化不得生成新的业务 ID。双方都修改时仍按业务 `modifiedAt` LWW，较新端为 source、较旧端为 target；不得恢复“双方都改即 conflict”的旧规则。
-- hash 不同且业务时间相同、或内容对象缺少 hash/size 时必须 deferred；不得以 size 相同、请求方向、设备枚举顺序或本地优先级静默选 winner。rename-only 不得创建内容传输。
+- 连接页“立即同步”只允许 inventory exchange + diff + 每个方向至多一次 action-scoped metadata apply。`downloadMetadataActions` 只可从 peer manifest 裁剪后本地应用，`uploadMetadataActions` 只可从本地 manifest 裁剪后经既有 route 应用。允许字段限于稳定对象/文件标识、逻辑文件名、hash、byte size、业务修改时间、版本、tombstone/删除标记、必要 recording/item/folder metadata 关系和协议所需的有限状态；不得包含文件 bytes、`dataBase64`、音频、完整 transcript/note/summary、附件正文或 provider response。
+- 同步层必须按稳定 `objectID` 认定同一业务对象；名称、物理路径或内容变化不得生成新的业务 ID。双方都修改时仍按微秒级业务 `modifiedAt` LWW，较新端为 source、较旧端为 target；不得恢复“双方都改即 conflict”的旧规则。
+- `metadataJSON`、receiver-local `receiveJSON` 与 `.audio` 只能保留在 `inventory.artifacts` 作为本机 transport/file facts，不得再次投影到 `inventory.objects`、`syncCoreInventory.objects` 或 reconciliation ledger。录音业务身份只能使用 `recordingMetadata:<recordingID>` / `recordingAudio:<recordingID>`；transcript/note/summary generated artifact 仍须参与对象级 reconciliation。
+- 活动 old-kernel 的业务 `updatedAt`/`modifiedAt` 必须通过 `SyncTimestampPolicy` 按最接近的 Unix 微秒规范化，并以固定 6 位小数 ISO-8601 贯穿双端 Store、wire、reconciliation record、上传 CAS/ledger 和 Git-backed metadata；decoder 必须继续接受历史无小数整秒值。不得在其中任一边界重新使用 `.iso8601` 整秒编码、整秒 `Int64` CAS 或整秒 record version token。双端最新版是小数 wire 的部署前提；不要把“新端能读旧数据”误写成“旧端保证能读新 wire”。
+- transcript/note/summary generated artifact 的最终文件 `modificationDate` 是当前 schema 的内容版本时钟。任何接收/复制落盘都必须保留 source `updatedAt`，按 planner 相同的 Unix 微秒精度读回验证；不得把接收时刻、临时文件写入时刻或无关的 `StudyItem.updatedAt` 当作 artifact 新版本。非法 source 时间必须 fail closed。该规则不得扩散到 `metadataJSON`、receiver-local `receiveJSON` 或 audio 的本机事实。
+- 不得把 transport `artifactID` 改为与路径无关的业务 ID。其 `SHA256(kind|ownerID|logicalPathToken)` 公式、应用根内相对路径、kind-specific allowlist、root/symlink containment 及 artifact route lookup 必须保持；修复跨端身份只能发生在 objects/reconciliation 投影层。
+- 解码旧 inventory 时不得删除或规范化 payload 中的旧式 objects，否则会破坏发送端 `inventoryHash` 复算。兼容过滤必须发生在只读 core adapter；ledger apply 必须原子清理并拒绝 `artifact_* + recordingMetadata/recordingAudio/receiveRecord` 历史伪记录，不能让它们在 4096 条上限内永久残留。
+- hash 不同且业务时间精确相同到同一微秒、或内容对象缺少 hash/size 时必须 deferred；不得以 size 相同、请求方向、device ID、hash 排序、设备枚举顺序或本地优先级静默选 winner。rename-only 不得创建内容传输。inventory checksum 可保留历史整秒日期投影以维持 schema，但不得把该投影当 LWW decision clock。
 - 同步允许写入的对象级持久状态仅限有界、原子、版本化的 reconciliation record，以及通过既有 Store 保存的 receiver-local metadata-only shell；`syncedMetadataOnly` 不得成为业务签名、发送端权威字段或 peer audio proof。不得把文件 bytes、正文、绝对路径、secret、证书或完整隐私标识写入 record。损坏/未知 schema 必须 fail closed，不得覆盖原 ledger 后继续上传。
 - 上传按钮必须消费当前设备为 source 的有效 reconciliation record，并在创建 job 前校验 source hash/size/modifiedAt。job/offer 必须绑定 record ID 和 expected target version；目标端替换前再次校验 CAS、checksum/size、root containment 和 no-overwrite。缺标记、方向相反或 stale source 时不得创建或继续传输。
 - 上传完成证明只把 record 推进到 `transferredAwaitingVerification`；只有下一轮两端 inventory 收敛才清除记录。上传失败不得改写同步成功，下一轮同步失败也不得抹掉有效完成证明。
-- 同步仅可针对当前 `plan.uploadMetadataActions` 调用一次既有 `/sync/apply-metadata`，并通过 `StudyLibraryStore.applySyncManifest` 物化 action-scoped metadata shell；不得发送完整无关 manifest。不得执行 artifact content request/put、recording audio upload/download、resumable content route、placeholder、物理删除、upload job、内容 retry 或 finalize。
+- 同步仅可针对当前 conflict-isolated plan 执行双向 action-scoped metadata apply：`downloadMetadataActions` 由 iPhone `StudyLibraryStore.applySyncManifest` 本地应用，`uploadMetadataActions` 至多调用一次既有 `/sync/apply-metadata`。Mac winner 严禁进入 outbound upload manifest；任一方向都不得发送或应用完整无关 manifest。peer manifest 缺失、action coverage 不完整、checksum 无效或任一 Store/远端 partial failure 必须 fail closed。不得执行 artifact content request/put、recording audio upload/download、resumable content route、placeholder、物理删除、upload job、内容 retry 或 finalize。
 - 每端每个 `syncRunID` 至多构建一次一致性 inventory snapshot，并在本轮复用；不得按 artifact、object 或 diff action 重复扫描全库。未变化文件必须优先命中持久 checksum cache，hash miss 必须离主线程计算。
 - 同步只能发现新增、删除、修改、相同、冲突和信息不足；除上述 metadata shell 外，不得自动应用内容、删除或传输动作。tombstone 可以作为删除事实参与 diff，但“对端缺少对象”不能直接触发删除。
 - conflict 必须作为成功 diff 的结果返回。不得仅因存在 conflict 将已完成 inventory exchange/diff 的同步标记为失败；更不得先传文件或 apply，再以 conflict 终止同步。
-- 完整 discovery plan 必须保留 conflict；metadata apply 必须使用 conflict-isolated execution plan，并对 folder/item/recording/artifact 依赖关系 fail closed。历史 conflict 及其依赖 action 不得混入本次 apply，也不得阻止无关新对象的 scoped metadata shell。真实 manifest/transport/Store partial failure 仍必须令本轮失败。
+- 完整 discovery plan 必须保留 conflict；两个方向的 metadata apply 都必须使用同一个 conflict-isolated execution plan，并对 folder/item/recording/artifact 依赖关系 fail closed。历史 conflict 及其依赖 action 不得混入本次 apply，也不得阻止无关新对象的 scoped metadata shell。真实 manifest/transport/Store partial failure 仍必须令本轮失败。
 - durable sync run 的失败默认必须回到 pending。唯一终止消费例外是安全验证后收到精确 `stale_sync_run` server reject，表示该 run 已被更新 run 取代；终止消费必须持久去重、不得重试，也不得写同步成功时间。不得把 `superseded_previous` ACK disposition、普通网络错误或其他 server reject 误判为该终态。
 - 学习库内用户明确点击“上传”是创建新内容传输任务的唯一产品入口。上传在架构上是双向 selected-content transfer，可以是 iPhone -> Mac 或 Mac -> iPhone；方向不得被“上传”中文名称固定为单向。
 - heartbeat、app activation、foreground/background tick、周期同步、连接页“立即同步”、列表/详情刷新、Store publish 和 retry drainer 不得创建新的内容上传任务。只有用户已经创建的 upload job 才允许按明确产品策略续传/重试。
-- sync run 与 upload job 必须拥有独立状态、错误和完成时间。当前 scoped metadata-shell apply 失败应使本轮 sync 失败；独立 artifact/audio/finalize 失败不得回写或覆盖已经成功完成的同步结果。同步成功也不得伪装成文件已上传。
+- sync run 与 upload job 必须拥有独立状态、错误和完成时间。任一方向的 scoped metadata apply 失败应使本轮 sync 失败；独立 artifact/audio/finalize 失败不得回写或覆盖已经成功完成的同步结果。同步成功也不得伪装成文件已上传。
 - Mac 缺失录音必须复用 `StudyLibraryStore` -> `MacStudyRecordingCard` -> `StudyRecordingTransferProgressView` 既有链路；不得从 reconciliation ledger 在 View 层另建 projection、section、card 或固定“待接收”文案。
 - 不得为了拆层绕过 TLS pinning、HMAC、timestamp、nonce、body hash、Keychain、`RequestVerifier`、root containment、checksum/size、no-overwrite 或 finalize proof。拆层改变的是职责和触发边界，不降低安全边界。
 

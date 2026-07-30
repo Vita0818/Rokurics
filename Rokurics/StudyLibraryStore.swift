@@ -1937,14 +1937,14 @@ final class StudyLibraryStore: ObservableObject {
 
     private nonisolated static func jsonEncoderOffMain() -> JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
     }
 
     private nonisolated static func jsonDecoderOffMain() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }
 
@@ -2988,14 +2988,14 @@ final class StudyLibraryStore: ObservableObject {
 
     private static let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(encoder)
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
     }()
 
     private static let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        SyncTimestampPolicy.configure(decoder)
         return decoder
     }()
 }

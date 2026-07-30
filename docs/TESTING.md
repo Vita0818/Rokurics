@@ -1,5 +1,70 @@
 # TESTING
 
+## 2026-07-25 活动同步同秒冲突回归
+
+本轮只验收活动同步链路的同秒冲突消除，不包含传输完成后的状态收敛。iPhone 17 / iOS 26.5 Simulator 定向结果 8/8 通过：
+
+- 小数 wire 编解码保留六位微秒，旧整秒 payload 仍可读取。
+- iPhone `StudyLibraryStore` 重启后保留微秒。
+- 同一 Unix 秒内不同微秒按真实新旧执行 LWW，不再进入人工 conflict。
+- 真正同一微秒但内容不同仍 fail closed，保留 deferred/conflict。
+- reconciliation ledger、generated-artifact mtime 与后续 LWW 均使用同一微秒口径。
+- 业务对象在同一持久化微秒内再次更新时只推进一个微秒 tick，不再人为增加一整秒。
+
+Mac 本机定向结果 2/2 通过：`StudyLibraryStore` 重启保留微秒，Git-backed metadata JSON 保留六位小数并能正确重读。两次 `xcodebuild test` 均重新编译对应 app 与 test target；输出仍包含仓库既有 Swift actor-isolation warning。未运行完整测试套件，也未运行 paired iPhone/Mac 真机测试。
+
+## 2026-07-25 P1-2 generated artifact 时间戳回归
+
+本轮先对 iOS 与 Mac 分别执行 `build-for-testing`，生产代码和两端全部测试源码均编译通过。随后使用 Swift Testing 带末尾 `()` 的正式测试标识运行定向用例；首次不带 `()` 的过滤结果实际为 0 项，已明确排除，不计入通过数。
+
+iPhone 17 / iOS 26.5 Simulator 定向结果 4/4 通过：
+
+- `iPhoneGeneratedArtifactApplyPreservesSourceTimestampForNextLWWRound()`：替换一个已有且 mtime 更晚的 transcript，最终 bytes 与 source 相同、mtime 恢复为 source 微秒；producer 后续真实新版本仍由 planner 判为 winner。
+- `syncArtifactModifiedAtPolicyUsesPlannerPrecisionAndRejectsInvalidDates()`：正负小数时间均与 planner 的最接近 Unix 微秒规则一致，NaN fail closed。
+- `localNetworkSyncEngineSelectsNewerPeerArtifactWithoutConflict()`：旧 fixture 显式设置本地 transcript 业务版本后，peer 2020 仍正确进入 download、无 conflict。
+- `localNetworkReconciliationUsesStableRecordingIDsAcrossDeviceLocalPaths()`：P1-1/P1-3 的不同双端路径身份修复未回退。
+
+另以 suite 标识运行 `SyncReconciliationClosedLoopTests`，15 个唯一测试全部通过，覆盖 LWW、timestamp tie、缺 hash、rename、tombstone、ledger、stale source 与 completion proof。控制台因 Xcode test-plan 枚举重复打印同一组结果，但无失败，不把重复行当作额外用例。
+
+Mac 本机定向结果 3/3 通过：
+
+- `localNetworkSyncArtifactPutStoresApprovedSmallArtifactAndRejectsUnsafePaths()`：已有旧文件的 replace 保留 request `updatedAt`；随后人为污染 mtime，`acceptedExisting` 重试会再次恢复。
+- `localNetworkSyncArtifactPutStoresLargeArtifactInChunks()`：分块 finalization 的最终文件 mtime 等于 source `updatedAt`。
+- `localNetworkInventoryBridgesToSharedSyncCoreObjects()`：共享 core inventory 映射回归通过。
+
+Mac handler 测试直接命中实际 small/chunk landing。iPhone 当前“立即同步”是 discovery-only，兼容 small/chunk 内容 helper 没有活动 tick 调用者；这两条代码完成编译与调用点审计，运行期文件属性断言通过同一共享 policy 的 `IPhoneSyncStorageAdapter` landing 测试。默认关闭的 canonical root-bound generated-artifact writer 未覆盖，paired iPhone/Mac 真机未运行。两端构建仍输出仓库既有 Swift actor-isolation/deprecation warning。
+
+## 2026-07-25 P1-1/P1-3 对象身份回归
+
+本轮 iOS 与 Mac 均先执行 `build-for-testing`，生产代码及两端全部测试源码编译通过。随后在 iPhone 17 / iOS 26.5 Simulator 运行 5 项定向测试，结果 5/5 通过：
+
+- `localNetworkInventoryBuilderIncludesVersionedRecordingStudyAndArtifactSchema()`：metadata/audio 文件仍在 artifacts，objects 只保留稳定 recording identity。
+- `localNetworkDiffPlannerSchedulesTranscriptDownloadButIgnoresDeviceLocalAudioProjection()`：transcript 仍进入内容差异，path-bound audio ID 不进入任一 action/no-op。
+- `localNetworkReconciliationUsesStableRecordingIDsAcrossDeviceLocalPaths()`：双端不同 audio 相对路径、单边 metadata/receive 文件不制造差异；旧 payload 解码后 inventory hash 不变，core adapter 仍过滤旧式对象。
+- `reconciliationStoreRetiresDeviceLocalArtifactProjectionRecords()`：预埋的 metadata/audio/receive 旧 ledger 记录在空 plan apply 时也被原子清理，稳定 recording record 保留。
+- `localNetworkSyncEngineAppliesPeerMetadataWinnersLocallyAndOnlyUploadsLocalWinners()`：上一轮 P0 双向 metadata 行为未回退。
+
+Mac 本机定向执行 `localNetworkSyncInventoryReturnsReceiveAndTranscriptMetadataWithoutSecretsOrPaths()` 通过：receive/audio artifact 与相对路径定位仍保留，物理 ID 不进入 objects/core，稳定 metadata/audio object 与 transcript object 均存在。两端 build 仍输出仓库既有 Swift actor-isolation/deprecation warning。
+
+补充扩大探测并非全绿。Mac `StudyLibrarySyncTests` 仍有一个旧 reason 文案断言：测试期待 `local_object_newer`，当前 shared planner 实际稳定返回 `latest_modified_at_wins`。iOS 隔离重跑当时复现了三个失败；其中 peer transcript fixture 的本地文件 mtime 问题已由随后 P1-2 修复并通过。仍未收口的是 peer-audio no-op 用例缺少旧诊断 phase（`uploadRequestCount == 0` 与无 audio upload action 仍通过），以及 canonical-primary 用例在既有 runtime 路径返回 nil plan。它们均未命中本轮身份或时间戳实现。
+
+验收时还必须保留旧版本场景：将旧式 path-based object 显式放进已编码 inventory，接收端必须先按原 payload 通过 `inventoryHash` 校验，再在 core adapter 隔离；不得在 decoder 中改写。迁移场景必须使用一个不含旧 ID 的 plan 触发 apply，证明清理不是偶然依赖本轮 `evaluatedObjectIDs`。
+
+## 2026-07-25 双向 metadata winner 回归
+
+本轮先以 iPhone 17 / iOS 26.5 Simulator 执行 `build-for-testing`，生产代码与全部 iOS test source 编译通过；随后用包含末尾 `()` 的 Swift Testing 正式标识运行 4 项定向测试，结果 4/4 通过：
+
+- `localNetworkDiffPlannerUsesLatestVersionAndTombstoneWinner()`：peer 较新与 peer tombstone 必须进入 download bucket，不能同时进入 upload bucket。
+- `localNetworkSyncEngineAppliesPeerMetadataWinnersLocallyAndOnlyUploadsLocalWinners()`：同一 tick 同时验证 iPhone winner 上行、Mac winner 与 Mac-only folder 在 iPhone Store 落地、outbound manifest 不含 peer winner，以及 artifact/audio/upload-job 为 0。
+- `localNetworkSyncEngineSendsMetadataShellWhenMacMissingIPhoneRecordingWithoutMovingContent()`：原有 iPhone->Mac action-scoped metadata shell 保持有效。
+- `localNetworkSyncEngineExcludesHistoricalConflictFromIndependentRecordingMetadataShell()`：conflict dependency closure 仍隔离，无关 metadata winner 继续执行。
+
+随后执行 `RokuricsMac` 的 macOS Debug build，结果通过，确认 Mac 侧重复的方向映射模型可编译。两端构建仍输出仓库既有的 Swift actor-isolation 等 warning。
+
+iOS `RokuricsTests` 完整单元组也已执行：219 项中 202 通过、7 失败、10 跳过。`localNetworkDiffPlannerUsesLatestVersionAndTombstoneWinner()` 已从修复前失败转为通过，新增混合双向 engine 测试通过；剩余 7 项为 pairing/Keychain、旧诊断 phase、canonical-primary no-op、peer artifact 和 correlated-run 等既有未收口测试，本轮未扩大范围修改。未运行 paired iPhone/Mac 真机测试。
+
+后续同步层验收必须按两个方向分别计数：`uploadMetadataActions` 非空时 outbound apply 恰好 1 次，`downloadMetadataActions` 非空时本地 Store apply 恰好 1 次；两者可同轮发生。必须同时断言 peer winner 不进入 outbound manifest、local winner 不被 peer manifest 覆盖，并保持 artifact request/put/status、audio bytes、placeholder、物理删除和新 upload job 为 0。
+
 ## 2026-07-17 历史冲突隔离与 stale run 终止消费验证
 
 本轮先以 iOS Simulator `build-for-testing` 编译生产代码和全部 iOS 测试源码，结果通过。随后使用 Xcode JSON enumeration 取得包含末尾 `()` 的 Swift Testing 正式标识，避免 `-only-testing` 安静筛成 0 项；在 iPhone 17 / iOS 26.5 Simulator 上实际执行 10 项，结果包确认 `totalTestCount=10`、`passedTests=10`、`failedTests=0`、`skippedTests=0`。
@@ -25,7 +90,7 @@ Mac 可见性回归必须验证既有链路而不是另建 UI：iPhone 发送 ac
 
 ## 2026-07-12 拆层修复验证
 
-源码验收至少覆盖：sync discovery 只请求一次 inventory；有 `uploadMetadataActions` 时只允许一次 action-scoped metadata-shell apply，无 action 时为 0；即使 plan 发现缺失 artifact/audio 或 deferred，也不得发起 artifact request/put/status、audio transfer、placeholder 或 upload job。同步按稳定 ID + LWW 生成确定性 source/target record；只有 upload button 可消费 record 创建 job，retry drainer 只恢复按钮 job；双向传输均校验 source/target version、checksum/size、no-overwrite 和完成 proof。
+源码验收至少覆盖：sync discovery 只请求一次 inventory；有 `uploadMetadataActions` 时只允许一次 outbound action-scoped metadata apply，有 `downloadMetadataActions` 时只允许一次本地 Store action-scoped metadata apply，各自无 action 时为 0；即使 plan 发现缺失 artifact/audio 或 deferred，也不得发起 artifact request/put/status、audio transfer、placeholder 或 upload job。同步按稳定 ID + LWW 生成确定性 source/target record；只有 upload button 可消费 record 创建 job，retry drainer 只恢复按钮 job；双向传输均校验 source/target version、checksum/size、no-overwrite 和完成 proof。
 
 已运行并通过 iPhone generic simulator build、iOS `build-for-testing`（包含全部 iOS unit/UI test source 编译）、Mac Debug build、iOS targeted tests（read-only discovery、conflict completed、scheduler ownership、manual retry）和 Mac upload-store targeted test。iOS 完整 suite 曾执行 200 项；当时 6 项仍断言旧 full-sync 契约、2 项为模拟器 Keychain 环境问题，旧契约断言已更新。最终两次复跑均在进入测试前由 CoreSimulator 报“无法找到目标设备”，不属于应用测试失败。`git diff --check` 与 `git status --short` 作为交付检查仍必须执行。真机后续证据只需：同 Wi-Fi 配对后验证“立即同步”无文件进度/无内容流量，以及分别点击双端学习库上传按钮完成一个大文件往返。
 
@@ -50,7 +115,7 @@ xcodebuild test -project Rokurics.xcodeproj -scheme Rokurics \
 
 同步层：
 
-- 点击连接页“立即同步”只产生一对 inventory snapshot、一次 exchange/diff、必要时一次 action-scoped metadata-shell apply 和有界诊断；`uploadMetadataActions` 非空时 metadata apply 为 1、为空时为 0，artifact/audio bytes、placeholder 和新 upload job 始终为 0。
+- 点击连接页“立即同步”只产生一对 inventory snapshot、一次 exchange/diff、必要时每个方向至多一次 action-scoped metadata apply 和有界诊断；`uploadMetadataActions` 非空时 outbound apply 为 1、为空时为 0，`downloadMetadataActions` 非空时本地 Store apply 为 1、为空时为 0，artifact/audio bytes、placeholder 和新 upload job 始终为 0。
 - 同一 `syncRunID` 即使有多个对象、planner action 或诊断消费者，每端 inventory builder 调用次数也必须为 1。
 - 准备少量超大文件，先完成 checksum cache 预热；第二轮无变化同步必须全部 cache hit，不读取文件内容，耗时和网络 bytes 不随文件体积增长。修改其中一个文件后，只允许该文件 cache invalidation/off-main rehash。
 - inventory payload 只包含稳定 ID、逻辑文件名、hash、size、业务修改时间、版本、tombstone 和有限协议字段；测试必须拒绝 `dataBase64`、audio bytes、完整 transcript/note/summary、附件正文和 provider response。

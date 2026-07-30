@@ -154,7 +154,7 @@ final class MacToIPhoneUploadReceiver {
             let currentBusinessModifiedAt = recordingManager.studyLibraryStore.item(recordingID: existing.id)?.updatedAt
             let modifiedAtMatches = offer.targetModifiedAt.map { expected in
                 guard let currentBusinessModifiedAt else { return false }
-                return Int64(expected.timeIntervalSince1970) == Int64(currentBusinessModifiedAt.timeIntervalSince1970)
+                return SyncTimestampPolicy.matches(expected, currentBusinessModifiedAt)
             } ?? true
             guard currentHash?.lowercased() == offer.expectedTargetSHA256?.lowercased(),
                   currentSize == offer.expectedTargetSize,
