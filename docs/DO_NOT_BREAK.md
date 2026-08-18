@@ -1,5 +1,41 @@
 # DO_NOT_BREAK
 
+## 外部依赖优先与禁止功能兜底（Vitemis 强制规则）
+
+本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。本节是强制约束，不是建议。
+
+- 当用户指定、仓库已经采用，或经许可证、provenance、安全与平台审查可采用的外部依赖提供同等能力时，必须直接集成该依赖的官方 API 或官方扩展点。
+- 不得自行重写同等能力，不得新增替代 adapter、shim、compatibility layer、wrapper、proxy、facade、协议翻译层、parallel backend、preview backend、shadow implementation 或“先兜底、以后再换”的实现。
+- 本地代码只允许保留官方 API 必需的最薄生命周期、类型、权限、配置和 bundle 接线；不得重新实现、解释、扩展或替代依赖的核心能力。
+- exact 依赖因版本、构建、签名、许可证、平台、安全或官方 API 限制无法接入时，必须停止该能力、明确失败、报告 blocker 并请求用户决定；不得静默降级、切换 legacy/另一 provider/backend、使用 cache/mock/简化路径或继续交付不完整替代实现。
+- 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
+- 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
+
+## iPhone 上传 ownership 与恢复禁区（2026-08-09）
+
+- `activeStatuses`、display snapshot、metadata `uploadStatus` 和 durable ledger state 都是状态投影，不是当前进程 Task ownership。不得再以 `.uploading` / `.inProgress` 单字段阻止真正 owner 的首个 metadata 请求。
+- 相同 recording 的 UI、service、retry 或重复按钮入口必须通过 MainActor 隔离、跨 coordinator 实例共享的 per-recording ownership gate。重复入口只能 skip；不得抢先写 `.uploading`、创建第二个 job、释放别人的 token，或让第一个已登记 Task 把自己的展示状态误判为另一任务。
+- fire-and-forget Task 必须在所有退出路径释放 ownership 和 task registration，包括成功、失败、取消、`RecordingManager` 已释放和 coordinator 已释放。清理必须与本次 token 身份匹配，不能清掉后继任务。
+- stale durable `.inProgress` 必须在 upload decision 读取 ledger 之前、且只在当前调用取得 ownership 后恢复。不得为了恢复而无条件改写另一 live Task 的 job；也不得让 retry scheduler 先把 orphan `.inProgress` 当成活任务返回，从而永远到不了 recovery。
+- `RecordingManager` 初始化可以执行 interrupted-upload recovery，但 job 与 metadata recovery 都必须排除当前进程 token 正在拥有的 recording；普通 `reloadRecordings()`、列表刷新和点击前刷新不得恢复 fresh in-progress job。运行期 orphan 由取得 ownership 的手动上传或 retry drainer 定向恢复。
+- 入口级回归必须直接调用公开 fire-and-forget `upload()`，覆盖 back-to-back 重入时 client 恰好调用一次。仅测试 `uploadAndWait()` 的干净 ledger 不能证明按钮路径可达首包。
+
+## 上传恢复与队列公平性禁区（2026-07-30）
+
+- resumable start 的合法完成响应可以没有 `sessionID`，但只能在 `completed == true`、`finalAudioExists == true`、`confirmedBytes == localSize`、`fileSize == localSize` 且 response SHA-256 与本地整文件 SHA-256 相同时完成。不得只凭 disposition、路径、completed 单字段或 final-exists 单字段接受。
+- 非完成的 resumable start 必须包含活动 `sessionID`；不得为兼容缺字段而创建本地伪 session、从零盲传或跳过 status/chunk/finalize 合同。
+- Mac -> iPhone pending offer 不得固定永远选择队首。公平选择必须限定在同一 verified target 的未完成 jobs，并只使用 heartbeat 已验签的单调 sequence；不得信任未验证 header/query，也不得跨 target 泄露 offer。
+- heartbeat 中的 offer 选择必须只读已有内存 ledger。不得扫描源文件、计算 hash、写 attempt/status、创建 job、发送 bytes 或执行 retry drain；用户显式上传仍是新 job 的唯一入口。
+- 无 ACK、超时、断网或错误 ACK 不能被推断为 terminal failure。只有既有 ACK 的 device/checksum/size proof 全匹配才可完成 job；坏 job 可以保留并重投。若未来增加 failed/cancelled 终态，必须设计独立、签名且向旧端 fail closed 的协议，不能给旧 ACK 添加会被旧 server 忽略的 optional failure 字段。
+- 公平轮转必须与 iPhone 全局 single-flight 同时保持：一个 Mac -> iPhone transfer 活动时不得启动第二个 transfer。忙时跳过的 offer 依赖 durable ledger 后续重投，不得复制 job 或启动无界并发 pull。
+
+## Mac -> iPhone 上传验签路由一致性禁区（2026-07-30）
+
+- `/upload/mac-to-iphone/chunk` 与 `/upload/mac-to-iphone/ack` 必须同时存在于 `SecureMacUploadClient` 调用路径、`SecureLocalHTTPSServer` dispatcher、HTTP parser `bodyLimit(for:)` 和 `RequestVerifier.pathRules`；任何一处 path 改名、新增或删除都必须在同一变更中更新其余位置和边界测试。
+- 两条 request 当前只能是最大 64 KiB 的 `application/json`。不得因为 chunk response 会携带文件 bytes 而放大入站 JSON request 上限，也不得把它们误配成 recording-audio binary upload type。
+- handler 必须先通过 `RequestVerifier`，再解码 body 并校验 `request.deviceID == acceptedDevice.id`，最后才可访问 `MacToIPhoneUploadStore`。不得为修复可达性而跳过 paired-device lookup、timestamp、nonce replay、body SHA-256、HMAC、credential persistence 或 presence 语义。
+- 回归测试必须至少证明两条合法签名请求均可达 verifier accepted，并保留 replay、坏 HMAC 和超限 body 的 fail-closed 控制。仅直接调用 `MacToIPhoneUploadStore` 的测试不能证明网络上传路径可达。
+
 ## 连接 / 同步 / 上传产品边界禁区（2026-07-12，2026-07-16/17/25 窄化修订）
 
 以下是项目级产品不变量，解释优先级高于本文后续为旧 canonical/full-sync 实现保留的历史禁区。后续修改不得恢复旧 full-sync 副作用；当前唯一 apply 例外是按 conflict-isolated plan 和 winner 方向裁剪的双向 metadata shell，用于让较旧端获得最新业务 metadata 并物化既有 metadata-only 卡片。后续旧版本段落中的“不得新增 upload route”不阻止本次已批准、已验证且处于 upload namespace 的 Mac -> iPhone pull/ACK route。
@@ -981,6 +1017,8 @@ Mac HTTPS routes：
 - `POST /upload-recording-audio-session/status`
 - `POST /upload-recording-audio-session/chunk`
 - `POST /upload-recording-audio-session/finalize`
+- `POST /upload/mac-to-iphone/chunk`
+- `POST /upload/mac-to-iphone/ack`
 - `POST /device/status`
 - `POST /connection/heartbeat`
 - `POST /sync/device-status`

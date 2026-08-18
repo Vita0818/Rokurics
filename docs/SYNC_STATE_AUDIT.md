@@ -1,5 +1,38 @@
 # SYNC_STATE_AUDIT
 
+## 2026-08-09 iPhone 上传首包状态审计
+
+- 现场边界：Mac 对同一 paired iPhone 的 heartbeat 持续成功，reconciliation ledger 已存在 source=iPhone、target=Mac、`pendingTransfer` 的新录音；点击后 Mac 没有 upload route/verifier/metadata/start 事件，也没有 inbox 文件变化。因此失败发生在 iPhone coordinator -> client 之前，不属于 connection、inventory 或 Mac receiver。
+- 原重入链：首次 `upload()` 登记 MainActor Task 但尚未执行 -> 第二次入口看到 task，旧代码写 `activeStatuses[id] = .uploading` 后返回 -> 首个 Task 进入 `uploadAndWait`，把 `.uploading` 展示值误判成另一个 live owner -> 在 `uploadCoordinatorClientCallStarted` / metadata 请求前返回 -> task 字典清理但展示灰态保留。表现正是按钮永久灰、Mac 零首包。
+- 当前 ownership：同 recording 的所有 coordinator 实例先竞争 MainActor 上共享的 attempt token；成功取得 token 的 fire-and-forget 入口同步发布展示状态并登记 Task，Task 内不再读取展示字典作为锁。重复入口只记录 `active_upload_exists` / `active_upload_owned_elsewhere`。`defer` 在所有退出路径按 token 身份释放 owner 和 task。
+- 原 orphan 链：durable job 的 `.inProgress` 被 evaluator 投影为 `.inFlight` 并提前 suppress；retry service 又在进入 coordinator recovery 前把同一个持久状态当 active，因而重启/旧 coordinator 留下的 job 永远无法恢复，也不会调用 client。
+- 当前 recovery：`hasActiveUploadInFlight()` 只反映本进程 token/task；取得 token 的 `uploadAndWait` 在读取 ledger decision 前，按当前 recording ID 把 stale in-progress 变为 retryable。普通 `RecordingManager.reloadRecordings()` 不做全量 upload recovery；manager 初始化恢复崩溃前任务时，同时从 job 与 metadata recovery 中排除 token-owned recording，避免对象图重建把真实 live job 改成 interrupted。
+- 安全与产品边界未变：按钮仍必须消费 matching reconciliation mark，校验 source hash/size/modifiedAt；client 仍走 metadata -> resumable start/status/chunk/finalize，Mac 仍执行 `RequestVerifier`、target CAS、checksum/size、root containment、no-overwrite 和 completion proof。sync/heartbeat 不创建 fresh upload job。
+- 诊断判别：正常新点击应依次看到 `uploadCoordinatorEntered`、ledger/decision、`uploadCoordinatorClientCallStarted`、`metadataUploadStarted`，Mac 随后看到 `/upload-recording-metadata`。若只有 `active_upload_owned_elsewhere`，说明同 recording 仍有真实进程内 owner；若没有 client-call stage，不应先归因 TLS。
+
+## 2026-07-30 上传恢复状态审计
+
+### iPhone -> Mac resumable start
+
+- 原阻断链：Mac 发现相同最终音频已经存在 -> 返回 `ok/completed/finalAudioExists` 和匹配 checksum/size，不创建 session -> iPhone 先执行 `guard let sessionID` -> 合法幂等终态被当成 start failure -> 已存在的正确文件反而令每次重试确定性失败。
+- 当前分支顺序：先要求 `ok`；若出现 completed/final-exists 任一终态信号，则必须验证两者都为真，并验证 confirmed bytes、final size、SHA-256 与本地源完全一致，成功后直接 `audioSucceeded/acceptedExisting`；proof 不完整写稳定 mismatch failure。只有非终态才要求 `sessionID` 并进入 chunk 状态机。
+- 因此 `sessionID == nil` 本身不再等于失败，也不等于成功；它必须结合完整终态 proof 判断。该修复不接受 completed ledger、metadata-only、路径存在或 disposition 作为内容证明。
+
+### Mac -> iPhone durable offer
+
+- 原阻断链：`nextOffer` 固定返回 target 的第一个 `state != completed` job -> 该 job 永远拿不到有效 ACK -> 每个 heartbeat 都重复同一 offer -> 后续 job 永远不可见，即使其源文件、reconciliation 与网络全部正常。
+- 当前调度：heartbeat request 已经通过原有签名 verifier 后，server 把 body `sequenceNumber` 和 `deviceID` 交给 store；store 保留 durable ledger 数组的入队顺序，对该 target 的 pending jobs 以 sequence modulo 选择。选择不写 ledger；Mac 重启从同一 `jobs.json` 恢复，后续递增 heartbeat 仍可轮到各 job。
+- `skip` 仅表示该 heartbeat 轮到其他 pending job或 iPhone single-flight 正忙，不改变 job 状态；`retry` 表示未完成 job 在后续 heartbeat 再次被选择；`completed` 仍只来自 target/checksum/size 全匹配的 ACK。错误 ACK 抛错且 job 保留。
+- iPhone receiver 全局最多一个 active transfer。忙时的新 offer 不排入另一份内存任务，也不并发 pull；它依赖 Mac durable pending ledger 后续重投。
+- 当前没有 failed/cancelled receipt。公平轮转只消除 head-of-line starvation，坏 job 仍可能永久存在并周期性占用一个轮次；不得把本修复描述成坏任务已终止、队列已自动清理或完整 terminal recovery。
+
+## 2026-07-30 Mac -> iPhone 上传 P0 验签路由审计
+
+- 原确定性失败链：`SecureMacUploadClient` 正常发送 `/upload/mac-to-iphone/chunk` 或 `/upload/mac-to-iphone/ack` -> `SecureLocalHTTPSServer` dispatcher 命中对应 handler -> handler 首先调用 `RequestVerifier` -> `pathRules[path]` 查找失败 -> 返回 `path_not_allowed` -> `MacToIPhoneUploadStore` 永远不可达。该失败与配对、TLS、HMAC 是否正确、设备前台状态、同一局域网或文件内容均无关。
+- 文档此前写有“两条新 route 都经过原有 RequestVerifier”和“没有已知正常路径代码级阻碍”，但当时源码的 verifier allowlist 实际缺少两条 path；本轮以源码为准纠正该结论。
+- 当前修复只在 `RequestVerifier.pathRules` 增加两条既有 route，均为 64 KiB `application/json`，与 dispatcher 和 HTTP parser `bodyLimit(for:)` 对齐。请求仍必须完整通过 paired-device、timestamp、nonce、body hash、HMAC 和 credential persistence；handler 仍校验 body device ID，store 仍负责 target、checksum/size、no-overwrite 与 completion proof。
+- 边界测试在修复前因 `path_not_allowed` 失败，修复后合法 chunk/ACK 通过；nonce replay、坏 HMAC、64 KiB + 1 body 分别保持 `nonce_replay`、`signature_mismatch`、`body_too_large`。因此本轮结论只到“本地代码级 P0 已收口”，paired 真机往返仍是独立证据缺口。
+
 ## 2026-07-25 活动同步同秒冲突审计
 
 - 原失败链与运行环境无关：双端 Study Store、签名 HTTP JSON、reconciliation ledger 和 shared planner 都把业务时间压为整秒。同一秒内内容不同的两个正常前台更新在 planner 前已失去先后关系，必然落入 equal-time deferred。

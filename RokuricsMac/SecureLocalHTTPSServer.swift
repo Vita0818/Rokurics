@@ -3273,7 +3273,8 @@ final class SecureLocalHTTPSServer {
             let heartbeatRequest = try? await Self.decodeSyncBodyOffMain(ConnectionHeartbeatRequest.self, from: request.body)
             if let heartbeatRequest {
                 heartbeatResponse.macToIPhoneUploadOffer = macToIPhoneUploadStore.nextOffer(
-                    targetDeviceID: heartbeatRequest.deviceID
+                    targetDeviceID: heartbeatRequest.deviceID,
+                    heartbeatSequenceNumber: heartbeatRequest.sequenceNumber
                 )
                 consumePeerSyncRunStatus(
                     heartbeatRequest.syncRunStatus,

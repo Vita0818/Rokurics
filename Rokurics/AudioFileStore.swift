@@ -212,11 +212,15 @@ struct AudioFileStore {
     }
 
     @discardableResult
-    func recoverStaleUploadingMetadata() throws -> Int {
+    func recoverStaleUploadingMetadata(
+        excludingRecordingIDs: Set<String> = []
+    ) throws -> Int {
         let metadataList = try loadAllMetadata(includeDeleted: true)
         var recoveredCount = 0
 
-        for metadata in metadataList where RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) == .uploading {
+        for metadata in metadataList
+        where RecordingUploadStatus(rawMetadataValue: metadata.uploadStatus) == .uploading
+            && !excludingRecordingIDs.contains(metadata.id) {
             try saveMetadata(metadata.recoveringStaleUploadingStatus())
             recoveredCount += 1
         }

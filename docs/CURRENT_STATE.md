@@ -1,6 +1,46 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-07-25
+最近一次自查日期：2026-08-18
+
+## 2026-08-18 v0.23 发布准备
+
+双端产品版本已统一为 `0.23 (1)`：`Rokurics`、`RokuricsMac`、`RokuricsLiveActivities` 及其测试 target 的 Debug/Release `MARKETING_VERSION` 均为 `0.23`，`CURRENT_PROJECT_VERSION` 保持 `1`。iPhone 与 Live Activity 继续由各自 Info.plist 展开 build setting，Mac 继续使用 Xcode 生成的 Info.plist；两端设置页的版本缺省文案也同步为 `0.23`。正式 bundle ID、签名团队、deployment target、entitlements、route/schema 和运行时 owner 均未改变。
+
+发布构建验证已完成：iOS device Release build、macOS Release build、iOS archive 与 macOS archive 均成功。archive 内 iPhone、Live Activity 和 Mac 的 `CFBundleShortVersionString`/`CFBundleVersion` 都实测为 `0.23`/`1`；两份 archive 的深度代码签名校验通过，iOS 主二进制为 arm64，Mac 主二进制为 arm64+x86_64，三项 dSYM 均存在。Mac archive 同时成功嵌入既有 whisper.cpp helper 与依赖动态库。Release 源码边界仍由 `runtimeConfigurationFromStoredDefaults()` 的非 DEBUG 分支固定返回 `oldKernel`。
+
+当前生成的是本地 Apple Development 签名 archive，不等于 App Store 分发导出、上传、notarization 或审核完成。Mac Store validation 仍提示 target 没有 `LSApplicationCategoryType`；产品应先明确选择商店分类再补配置。构建号 `1` 仅在 App Store Connect 中尚未用于该 bundle/version train 时可直接上传；本地无法确认上传历史，正式上传前必须核对并在已使用时递增。构建仍输出仓库既有 Swift actor-isolation warnings。本轮未重新运行单元测试、UI 测试、paired iPhone/Mac 真机流程、TestFlight/App Store Connect 校验或发布后 smoke test。
+
+## 2026-08-09 iPhone 上传首包重入自锁修复
+
+实机侧现象是：同步已经生成 iPhone -> Mac 的 `pendingTransfer` 录音记录，Mac heartbeat 持续成功，但用户点击上传后按钮长期变灰，Mac 的 upload route、verifier、metadata inbox 和 audio inbox 都没有任何新事件。这个证据把失败点限定在 iPhone `RecordingUploadCoordinator` 调用网络 client 之前，而不是连接、同步发现、TLS/HMAC 或 Mac receiver。
+
+根因是上传层把“显示为上传中”和“真正拥有上传任务”混成了同一个锁。`upload()` 第一次调用先登记异步 Task；在该 Task 获得 MainActor 执行前，如果按钮或嵌套控件再次触发 `upload()`，旧代码会先把 `activeStatuses` 写成 `.uploading`。随后第一个真正的 Task 进入 `uploadAndWait`，看到这个展示状态后误判为已有上传并在 metadata 请求前返回；Task 虽被移除，展示状态却一直保留为上传中，于是形成按钮永久灰、Mac 零请求的确定性自锁。持久 ledger 中遗留的 `.inProgress` 还存在同类闭环：decision 在 stale recovery 之前就把它当作 live owner 抑制，外层 retry guard 又因同一 durable 状态不进入恢复。
+
+当前 `RecordingUploadCoordinator` 使用 MainActor 隔离、进程内共享且按 recording ID 区分的 attempt token 作为真实 ownership；`activeStatuses` 只负责展示。重复入口只记录 skip，不再改写状态；fire-and-forget Task 用 `defer` 在成功、失败、取消或上下文释放时同时释放 token 和 task。公开 `uploadAndWait` 也经过同一 ownership gate。获得 token 的调用会在 evaluator 读取 ledger 前只恢复当前录音的 stale in-progress job，因此遗留任务能进入重试，而不会被自己抑制。`hasActiveUploadInFlight()` 只查看当前进程真实 token/task，不再把重启后 durable `.inProgress` 猜成仍有活 owner。
+
+`RecordingManager` 只在实例初始化时执行 interrupted-upload recovery，而且会同时从 job 与 metadata recovery 中排除当前进程 token 正在拥有的 recording；普通 `reloadRecordings()` 仍刷新录音和 Study Store，但不再把另一个 coordinator 正在写的 fresh in-progress job 改成 `upload_interrupted`。手动上传和 retry drainer 会在取得 ownership 后做定向恢复，保留崩溃恢复能力。
+
+本地验证：iOS generic simulator Debug App build 通过。新增 4 项入口级回归全部通过，覆盖同一/不同 coordinator 连续触发只发一次 client、普通 reload 不打断 live job、第二个 manager 初始化不恢复 token-owned job、stale in-progress 在 ledger decision 前恢复并实际调用 client，以及 token 最终释放；另有 6 项既有正常上传、completion proof、retry 与启动恢复回归通过，共 10/10。当前 Xcode 27 下完整 `RokuricsTests` target 会先被 8 个与本轮无关的 canonical actor/global-actor fixture 编译错误阻断；定向验证通过命令行只排除这些既有坏文件后执行，未修改它们。尚未把新构建安装到 paired iPhone/Mac 做真实首包验收。
+
+## 2026-07-30 上传层两个恢复性阻断修复
+
+本轮先收口两个会在已有上传任务恢复时造成永久停滞的代码级阻断。
+
+第一处位于 iPhone `RecordingUploadClient`。Mac 的 resumable start 在目标音频已经完整存在时，会合法返回 `ok=true`、`completed=true`、`finalAudioExists=true` 和最终 checksum/size，但不再创建 `sessionID`。旧客户端先强制解包 `sessionID`，因此把这个幂等完成响应误判成 `resumable_start_failed`，理想网络下重试也无法结束。现在客户端先判断完成终态；只有 `completed`、`finalAudioExists`、`confirmedBytes`、`fileSize` 和 SHA-256 全部与本地音频一致时，才直接返回 `acceptedExisting`。完成声明不完整或 proof 不匹配会以 `resumable_completion_proof_mismatch` fail closed；非完成响应仍必须带 `sessionID`，否则返回 `resumable_session_missing`。
+
+第二处位于 Mac -> iPhone durable offer 队列。旧 `MacToIPhoneUploadStore.nextOffer` 永远返回同一设备的第一个未完成 job；只要该 job 因 stale reconciliation、源文件缺失或其他持久错误永远拿不到 ACK，后续合法 job 就永久不可见。现在 Mac 使用已验签 heartbeat body 中的单调 `sequenceNumber`，在该 target 的全部未完成 job 间做无状态公平轮转；选择过程只读内存 ledger，不在 heartbeat 中扫描文件、创建 job 或写持久状态。错误 ACK 仍不完成 job，正确且 target/checksum/size 匹配的 ACK 才能标记完成；重启后持久 job 继续参与轮转。`jobs.json` 的 Job 字段、state raw value 和编码格式均未改变，历史 queued/completed 数据按原格式读取，不需要 schema migration。iPhone receiver 同时增加全局 single-flight gate，当前传输未结束时不启动另一 transfer，未接收的 offer 由后续 heartbeat 再投递。
+
+该队列修复解决的是 head-of-line starvation，不是新增失败/取消终态：现有 wire 没有可信的 terminal failure receipt，因此坏 job 仍会持久并周期性重试，不能因超时、无 ACK 或断网被猜测为永久失败。本轮没有新增 route/schema，没有让 heartbeat 携带文件 bytes，也没有降低 TLS/HMAC/pinning/timestamp/nonce/body hash、`RequestVerifier`、target CAS、checksum/size、no-overwrite 或 completion proof。
+
+最终本地验证：iOS simulator 定向测试 6/6 通过，覆盖两个新恢复分支、proof/session fail-closed、single-flight 以及原有 start/chunk/finalize 和 status-resume 回归；Mac 定向测试 3/3 通过，覆盖 durable store/ACK、重启公平轮转和真实 verifier route。iOS generic simulator Debug build 与 Mac arm64 Debug build 均通过。未运行完整测试套件，也未运行 paired iPhone/Mac 真机 heartbeat -> offer -> pull/install -> ACK 闭环。
+
+## 2026-07-30 Mac -> iPhone 上传 P0 验签路由修复
+
+Mac -> iPhone 内容上传此前存在与网络、前后台、文件大小和配对状态无关的确定性阻断：iPhone `SecureMacUploadClient` 会向 `/upload/mac-to-iphone/chunk` 与 `/upload/mac-to-iphone/ack` 发送签名 JSON，Mac `SecureLocalHTTPSServer` 也注册了对应 dispatcher、64 KiB request body limit 和 handler；但 `RequestVerifier.pathRules` 没有这两条路径。两个 handler 的第一步都是 verifier，因此任何正常请求都会先以 `path_not_allowed` 被拒绝，无法进入 `MacToIPhoneUploadStore`。
+
+`RequestVerifier` 现已为两条既有路径增加完全匹配的规则：请求体上限均为 64 KiB，只允许 `application/json`，不要求音频上传专用的 `X-Rokurics-Upload-Type`。这只是补齐已有安全路由的 allowlist，不绕过 paired-device lookup、timestamp window、nonce replay、body SHA-256、HMAC、credential persistence 或 `markDeviceSeen`；handler 后续的 request `deviceID` 与已验证设备一致性校验、chunk/ACK checksum/size/no-overwrite/final proof 也保持不变。
+
+新增 `macToIPhoneUploadRoutesRequireFullSignedRequestVerification()` 直接穿过真实 `RequestVerifier` 边界。该测试在生产修复前稳定失败，合法 chunk/ACK 均得到 `path_not_allowed`；补齐规则后 1/1 通过，并同时证明重复 nonce 返回 `nonce_replay`、坏签名返回 `signature_mismatch`、超过 64 KiB 返回 `body_too_large`，拒绝请求不会更新 presence。Mac Debug build 通过。本轮只完成本地代码级 P0 收口，尚未运行 paired iPhone/Mac 真机上传。
 
 ## 2026-07-25 活动同步同秒冲突修复
 

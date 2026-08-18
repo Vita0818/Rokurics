@@ -42,7 +42,10 @@ struct RokuricsMacTests {
         )
         let decodedChunk = chunk.dataBase64.flatMap { Data(base64Encoded: $0) }
 
-        #expect(restored.nextOffer(targetDeviceID: "iphone-01") == offer)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 1
+        )?.transferID == offer.transferID)
         #expect(decodedChunk == audio)
         #expect(chunk.chunkChecksum == checksum)
         #expect(chunk.isFinalChunk == true)
@@ -54,7 +57,106 @@ struct RokuricsMacTests {
             size: Int64(audio.count),
             completedAt: Date(timeIntervalSince1970: 200)
         ))
-        #expect(restored.nextOffer(targetDeviceID: "iphone-01") == nil)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 2
+        ) == nil)
+    }
+
+    @Test func macToIPhoneUploadStoreRotatesPastUnacknowledgedHeadAfterRestart() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac-to-iphone-upload-rotation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        let sourceURL = rootURL.appendingPathComponent("audio.m4a", isDirectory: false)
+        let audio = Data("fair durable upload queue".utf8)
+        try audio.write(to: sourceURL)
+        let checksum = MacSecurityUtilities.sha256Hex(audio)
+        let store = MacToIPhoneUploadStore(rootURL: rootURL)
+
+        let first = try store.enqueue(
+            recordingID: "first",
+            title: "First",
+            createdAt: Date(timeIntervalSince1970: 100),
+            duration: 3,
+            sourceURL: sourceURL,
+            targetDeviceID: "iphone-01",
+            checksum: checksum,
+            size: Int64(audio.count),
+            now: Date(timeIntervalSince1970: 100)
+        )
+        let second = try store.enqueue(
+            recordingID: "second",
+            title: "Second",
+            createdAt: Date(timeIntervalSince1970: 200),
+            duration: 3,
+            sourceURL: sourceURL,
+            targetDeviceID: "iphone-01",
+            checksum: checksum,
+            size: Int64(audio.count),
+            now: Date(timeIntervalSince1970: 200)
+        )
+        let otherTarget = try store.enqueue(
+            recordingID: "other-target",
+            title: "Other target",
+            createdAt: Date(timeIntervalSince1970: 300),
+            duration: 3,
+            sourceURL: sourceURL,
+            targetDeviceID: "iphone-02",
+            checksum: checksum,
+            size: Int64(audio.count),
+            now: Date(timeIntervalSince1970: 300)
+        )
+
+        let restored = MacToIPhoneUploadStore(rootURL: rootURL)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 1
+        )?.transferID == first.transferID)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 2
+        )?.transferID == second.transferID)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 3
+        )?.transferID == first.transferID)
+        #expect(restored.nextOffer(
+            targetDeviceID: "iphone-02",
+            heartbeatSequenceNumber: 1
+        )?.transferID == otherTarget.transferID)
+
+        var rejectedMismatchedProof = false
+        do {
+            try restored.acknowledge(MacToIPhoneUploadAckRequest(
+                transferID: second.transferID,
+                deviceID: "iphone-01",
+                checksum: "wrong-checksum",
+                size: Int64(audio.count),
+                completedAt: Date(timeIntervalSince1970: 400)
+            ))
+        } catch let error as MacToIPhoneUploadStoreError {
+            rejectedMismatchedProof = error.localizedDescription == "mac_to_iphone_upload_proof_mismatch"
+        }
+        #expect(rejectedMismatchedProof)
+
+        let restoredAfterRejectedAck = MacToIPhoneUploadStore(rootURL: rootURL)
+        #expect(restoredAfterRejectedAck.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 2
+        )?.transferID == second.transferID)
+
+        try restoredAfterRejectedAck.acknowledge(MacToIPhoneUploadAckRequest(
+            transferID: second.transferID,
+            deviceID: "iphone-01",
+            checksum: checksum,
+            size: Int64(audio.count),
+            completedAt: Date(timeIntervalSince1970: 500)
+        ))
+        #expect(restoredAfterRejectedAck.nextOffer(
+            targetDeviceID: "iphone-01",
+            heartbeatSequenceNumber: 2
+        )?.transferID == first.transferID)
     }
 
     @Test func cancelledMacSyncEventDebounceDoesNotContinueToDrain() async {
@@ -5302,6 +5404,123 @@ struct RokuricsMacTests {
         case .rejected(let reason):
             #expect(reason == "path_not_allowed")
         }
+    }
+
+    @MainActor
+    @Test func macToIPhoneUploadRoutesRequireFullSignedRequestVerification() throws {
+        let device = makeHeartbeatDevice()
+        var markDeviceSeenCount = 0
+        let verifier = RequestVerifier(
+            pairedDeviceProvider: { id in id == device.id ? device : nil },
+            markDeviceSeen: { _, _ in markDeviceSeenCount += 1 }
+        )
+        let now = Date(timeIntervalSince1970: 3_150)
+        let chunkPath = "/upload/mac-to-iphone/chunk"
+        let chunkBody = try encodedResumableRequest(MacToIPhoneUploadChunkRequest(
+            transferID: "mac-transfer-01",
+            deviceID: device.id,
+            offset: 0,
+            length: 32 * 1024
+        ))
+        let chunkHeaders = try signedJSONHeaders(
+            device: device,
+            path: chunkPath,
+            body: chunkBody,
+            nonce: "mac-to-iphone-chunk",
+            now: now
+        )
+
+        switch verifier.verify(
+            method: "POST",
+            path: chunkPath,
+            headers: chunkHeaders,
+            body: chunkBody,
+            now: now
+        ) {
+        case .accepted(let acceptedDevice):
+            #expect(acceptedDevice.id == device.id)
+        case .rejected(let reason):
+            Issue.record("valid Mac-to-iPhone chunk request rejected: \(reason)")
+        }
+
+        let ackPath = "/upload/mac-to-iphone/ack"
+        let ackBody = try encodedResumableRequest(MacToIPhoneUploadAckRequest(
+            transferID: "mac-transfer-01",
+            deviceID: device.id,
+            checksum: MacSecurityUtilities.sha256Hex(Data("audio".utf8)),
+            size: 5,
+            completedAt: now
+        ))
+        let ackHeaders = try signedJSONHeaders(
+            device: device,
+            path: ackPath,
+            body: ackBody,
+            nonce: "mac-to-iphone-ack",
+            now: now
+        )
+
+        switch verifier.verify(
+            method: "POST",
+            path: ackPath,
+            headers: ackHeaders,
+            body: ackBody,
+            now: now
+        ) {
+        case .accepted(let acceptedDevice):
+            #expect(acceptedDevice.id == device.id)
+        case .rejected(let reason):
+            Issue.record("valid Mac-to-iPhone ACK request rejected: \(reason)")
+        }
+
+        switch verifier.verify(
+            method: "POST",
+            path: chunkPath,
+            headers: chunkHeaders,
+            body: chunkBody,
+            now: now
+        ) {
+        case .accepted:
+            Issue.record("replayed Mac-to-iPhone chunk request unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "nonce_replay")
+        }
+
+        var badSignatureHeaders = try signedJSONHeaders(
+            device: device,
+            path: ackPath,
+            body: ackBody,
+            nonce: "mac-to-iphone-bad-signature",
+            now: now
+        )
+        badSignatureHeaders["X-Rokurics-Signature"] = "bad-signature"
+        switch verifier.verify(
+            method: "POST",
+            path: ackPath,
+            headers: badSignatureHeaders,
+            body: ackBody,
+            now: now
+        ) {
+        case .accepted:
+            Issue.record("bad-signature Mac-to-iPhone ACK unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "signature_mismatch")
+        }
+
+        let oversizedBody = Data(repeating: 0, count: 64 * 1024 + 1)
+        switch verifier.verify(
+            method: "POST",
+            path: chunkPath,
+            headers: ["Content-Type": "application/json"],
+            body: oversizedBody,
+            now: now
+        ) {
+        case .accepted:
+            Issue.record("oversized Mac-to-iPhone chunk request unexpectedly accepted")
+        case .rejected(let reason):
+            #expect(reason == "body_too_large")
+        }
+
+        #expect(markDeviceSeenCount == 2)
     }
 
     @MainActor

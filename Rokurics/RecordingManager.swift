@@ -71,14 +71,14 @@ final class RecordingManager: ObservableObject {
         let fileStore = AudioFileStore()
         self.fileStore = fileStore
         self.studyLibraryStore = StudyLibraryStore(audioFileStore: fileStore)
-        loadExistingRecordings()
+        loadExistingRecordings(recoverInterruptedUploads: true)
         observeAudioSessionNotifications()
     }
 
     init(fileStore: AudioFileStore) {
         self.fileStore = fileStore
         self.studyLibraryStore = StudyLibraryStore(audioFileStore: fileStore)
-        loadExistingRecordings()
+        loadExistingRecordings(recoverInterruptedUploads: true)
         observeAudioSessionNotifications()
     }
 
@@ -193,7 +193,7 @@ final class RecordingManager: ObservableObject {
     }
 
     func reloadRecordings() {
-        loadExistingRecordings()
+        loadExistingRecordings(recoverInterruptedUploads: false)
     }
 
     var pendingUploadCount: Int {
@@ -729,13 +729,21 @@ final class RecordingManager: ObservableObject {
         log("directory writable: \(fileStore.isWritableDirectory(at: directoryURL))")
     }
 
-    private func loadExistingRecordings() {
+    private func loadExistingRecordings(recoverInterruptedUploads: Bool) {
         do {
             try fileStore.ensureStorageDirectories()
-            let uploadJobStore = RecordingUploadJobStore(audioFileStore: fileStore)
-            let recoveredJobs = try uploadJobStore.recoverStaleInProgressJobs(now: Date())
-            try fileStore.applyRecoveredUploadJobs(recoveredJobs)
-            try fileStore.recoverStaleUploadingMetadata()
+            if recoverInterruptedUploads {
+                let uploadJobStore = RecordingUploadJobStore(audioFileStore: fileStore)
+                let activeRecordingIDs = RecordingUploadCoordinator.activelyOwnedRecordingIDs
+                let recoveredJobs = try uploadJobStore.recoverStaleInProgressJobs(
+                    now: Date(),
+                    excludingRecordingIDs: activeRecordingIDs
+                )
+                try fileStore.applyRecoveredUploadJobs(recoveredJobs)
+                try fileStore.recoverStaleUploadingMetadata(
+                    excludingRecordingIDs: activeRecordingIDs
+                )
+            }
             let loadedRecordings = try fileStore.loadAllMetadata()
             let loadedTrashedRecordings = try fileStore.loadTrashedMetadata()
             recordings = loadedRecordings

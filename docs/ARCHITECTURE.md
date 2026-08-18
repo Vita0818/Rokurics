@@ -1,6 +1,46 @@
 # ARCHITECTURE
 
-最近自查日期：2026-07-25
+## 外部依赖优先与禁止功能兜底（Vitemis 强制规则）
+
+本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。本节是强制约束，不是建议。
+
+- 当用户指定、仓库已经采用，或经许可证、provenance、安全与平台审查可采用的外部依赖提供同等能力时，必须直接集成该依赖的官方 API 或官方扩展点。
+- 不得自行重写同等能力，不得新增替代 adapter、shim、compatibility layer、wrapper、proxy、facade、协议翻译层、parallel backend、preview backend、shadow implementation 或“先兜底、以后再换”的实现。
+- 本地代码只允许保留官方 API 必需的最薄生命周期、类型、权限、配置和 bundle 接线；不得重新实现、解释、扩展或替代依赖的核心能力。
+- exact 依赖因版本、构建、签名、许可证、平台、安全或官方 API 限制无法接入时，必须停止该能力、明确失败、报告 blocker 并请求用户决定；不得静默降级、切换 legacy/另一 provider/backend、使用 cache/mock/简化路径或继续交付不完整替代实现。
+- 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
+- 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
+
+最近自查日期：2026-08-09
+
+## 2026-08-09 iPhone 上传任务 ownership
+
+iPhone -> Mac 上传现在明确分离两类状态：`activeStatuses` / display snapshot 是 UI 投影，不能充当并发锁；真正的执行 ownership 是 `RecordingUploadCoordinator` 在 MainActor 上维护的进程级、per-recording attempt token。UI coordinator 与 `LocalNetworkSyncAppService` coordinator 即使是不同实例，也必须先取得同一个 token 才能调用 client。相同录音的重复按钮事件、retry 与其他入口在已有 owner 时只记录 skip，不得提前写 `.uploading`、创建第二个 job 或清除第一个 owner 的状态。
+
+fire-and-forget `upload()` 在同步返回给 View 前取得 token、发布 preparing/uploading 投影并登记 Task。Task 内不再用展示字典判断 ownership；所有退出路径通过 `defer` 释放 token/task。公开 `uploadAndWait()` 使用相同 token，因此同步 engine、retry drainer 和测试入口遵守同一互斥合同。`hasActiveUploadInFlight()` 只反映当前进程的 token/task，durable ledger 的 `.inProgress` 不能证明重启后仍有活 Task。
+
+崩溃恢复分为两处：`RecordingManager` 初始化时恢复中断 job 和 uploading metadata，但必须排除当前进程 token 正在拥有的 recording；普通 `reloadRecordings()` 只刷新数据，不能在 live Task 期间把 fresh in-progress job 标成失败。获得 token 的上传调用会在 decision evaluator 之前定向恢复当前 recording 的 stale in-progress ledger，再按原有 retry/mark/CAS/proof 路径继续。网络与接收架构保持 `RecordingUploadCoordinator` -> `RecordingUploadClient` -> `SecureMacUploadClient` -> Mac `SecureLocalHTTPSServer` / `RequestVerifier` / `MacRecordingFileStore`，没有新增 route 或降低安全校验。
+
+## 2026-07-30 上传恢复终态与公平调度
+
+iPhone -> Mac resumable start 有两个互斥的成功形态：
+
+1. Mac 创建或恢复活动 session：response 必须包含 `sessionID`，客户端随后按 status/chunk/finalize 推进。
+2. Mac 已经持有完整最终音频：response 可以不含 `sessionID`，但必须同时声明 `completed=true`、`finalAudioExists=true`，并以 confirmed bytes、final file size 和 SHA-256 证明它与本次本地源文件完全相同。
+
+客户端必须先识别并验证第二种终态，再要求第一种形态的 session。任何部分完成声明、size/bytes/hash 不一致都不能被 `acceptedExisting`；非终态缺 session 也不能继续。这保持“最终内容 proof 才能完成”的边界，同时让响应丢失后的幂等 start 真正可恢复。
+
+Mac -> iPhone offer 调度仍建立在用户显式创建的 durable jobs 上。Mac heartbeat handler 只从已验签 request 取得 target device 和单调 sequence；store 保留 `jobs.json` 数组的持久入队顺序，在该 target 的 pending jobs 中选择 `(sequence - 1) mod pendingCount`。选择是无状态、线性只读内存操作，不更新 attempt、status 或 ledger，因此 connection heartbeat 仍不承担上传执行和持久化副作用。job 只有收到 target/checksum/size 全匹配的既有 ACK 才退出 pending 集合；无 ACK、错误 ACK、超时和断网都只意味着以后重投。Job 字段、state raw value 和 ledger 编码未变，旧 queued/completed ledger 不需要迁移或重写。
+
+轮转消除了一个坏 job 对所有后项的永久饥饿，但不会自行判断坏 job 的 terminal failure。iPhone 端采用全局 single-flight：一个 pull/verify/install/ACK 流程活动时，其他 heartbeat offer 当轮跳过；由于 Mac ledger 保持 pending，它们会在后续 sequence 再出现。这避免轮转把原本串行的大文件接收扩成无界并发，也不需要新增失败 ACK route 或改变旧 wire。
+
+## 2026-07-30 Mac -> iPhone 上传路由验签边界
+
+Mac -> iPhone 内容传输仍采用 iPhone client 拉取 Mac HTTPS server 的既有拓扑。iPhone 对 `/upload/mac-to-iphone/chunk` 与 `/upload/mac-to-iphone/ack` 构造签名 JSON；Mac dispatcher 命中 handler 后，handler 的首个业务边界是 `RequestVerifier`。只有 verifier 接受后，body 才会解码并校验 `deviceID == acceptedDevice.id`，随后才允许访问 `MacToIPhoneUploadStore`。
+
+每条签名 route 实际存在三处必须一致的注册事实：`SecureLocalHTTPSServer` dispatcher、HTTP parser `bodyLimit(for:)`、`RequestVerifier.pathRules`。这两条 route 现在三处均使用精确相同的 path；request body limit 为 64 KiB，content type 为 `application/json`。此前只存在 dispatcher 与 parser 规则而遗漏 verifier allowlist，导致所有理想正常请求在存储层前确定性失败。
+
+本次修复没有形成较弱的“内部上传”旁路。新规则仍按统一顺序执行 method/path、body size、content type、paired device、timestamp window、nonce replay、body SHA-256、HMAC、credential persistence 和 presence update；坏签名、重放和超限 body 均 fail closed。chunk response 可以携带文件分块，但 request 本身只是短 descriptor，64 KiB 限制针对入站 JSON request，不改变 response bytes、chunk checksum、整文件 checksum/size、no-overwrite 或 ACK completion proof。
 
 ## 2026-07-25 活动同步业务时钟精度
 

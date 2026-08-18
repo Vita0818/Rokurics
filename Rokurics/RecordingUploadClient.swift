@@ -731,7 +731,7 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                     targetModifiedAt: resumeContext?.targetModifiedAt
                 )
             )
-            guard startResponse.ok, let startedSessionID = startResponse.sessionID else {
+            guard startResponse.ok else {
                 UploadFlightRecorder.record(
                     side: .iPhone,
                     stage: "audioUploadFailed",
@@ -743,6 +743,61 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                     safeErrorMessage: startResponse.error
                 )
                 throw RecordingUploadError.audioUploadFailed(startResponse.error ?? "resumable_start_failed")
+            }
+
+            if startResponse.completed || startResponse.finalAudioExists == true {
+                guard startResponse.completed,
+                      startResponse.finalAudioExists == true,
+                      startResponse.confirmedBytes == audioSize,
+                      startResponse.fileSize == audioSize,
+                      startResponse.checksum?.lowercased() == totalSHA256.lowercased() else {
+                    UploadFlightRecorder.record(
+                        side: .iPhone,
+                        stage: "audioUploadFailed",
+                        recordingID: metadata.id,
+                        eventResult: "fail",
+                        reasonCode: "resumable_completion_proof_mismatch",
+                        uploadStatus: metadata.uploadStatus,
+                        httpPath: "/upload-recording-audio-session/start",
+                        confirmedBytes: startResponse.confirmedBytes,
+                        totalBytes: audioSize
+                    )
+                    throw RecordingUploadError.audioUploadFailed("resumable_completion_proof_mismatch")
+                }
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "resumableStartCompleted",
+                    recordingID: metadata.id,
+                    eventResult: "success",
+                    reasonCode: startResponse.disposition,
+                    uploadStatus: metadata.uploadStatus,
+                    httpPath: "/upload-recording-audio-session/start",
+                    confirmedBytes: startResponse.confirmedBytes,
+                    totalBytes: audioSize,
+                    macReceiveState: startResponse.receiveStatus,
+                    audioRelativePathSet: startResponse.finalAudioRelativePath != nil
+                )
+                try progress?(.audioSucceeded(disposition: startResponse.disposition ?? "acceptedExisting"))
+                return RecordingUploadResult(
+                    recordingID: metadata.id,
+                    metadataFileName: metadataResponse.metadataFileName ?? metadataResponse.fileName,
+                    audioFileName: startResponse.finalAudioRelativePath?.components(separatedBy: "/").last ?? "audio.m4a",
+                    metadataDisposition: metadataResponse.disposition,
+                    audioDisposition: startResponse.disposition ?? "acceptedExisting"
+                )
+            }
+
+            guard let startedSessionID = startResponse.sessionID else {
+                UploadFlightRecorder.record(
+                    side: .iPhone,
+                    stage: "audioUploadFailed",
+                    recordingID: metadata.id,
+                    eventResult: "fail",
+                    reasonCode: "resumable_session_missing",
+                    uploadStatus: metadata.uploadStatus,
+                    httpPath: "/upload-recording-audio-session/start"
+                )
+                throw RecordingUploadError.audioUploadFailed("resumable_session_missing")
             }
             UploadFlightRecorder.record(
                 side: .iPhone,
@@ -767,17 +822,6 @@ final class RecordingUploadClient: RecordingUploadClientProtocol {
                 totalSHA256: totalSHA256,
                 confirmedBytes: confirmedBytes
             ))
-
-            if startResponse.completed || startResponse.finalAudioExists == true {
-                try progress?(.audioSucceeded(disposition: startResponse.disposition ?? "acceptedExisting"))
-                return RecordingUploadResult(
-                    recordingID: metadata.id,
-                    metadataFileName: metadataResponse.metadataFileName ?? metadataResponse.fileName,
-                    audioFileName: "audio.m4a",
-                    metadataDisposition: metadataResponse.disposition,
-                    audioDisposition: startResponse.disposition ?? "acceptedExisting"
-                )
-            }
         }
 
         guard let activeSessionID = sessionID else {

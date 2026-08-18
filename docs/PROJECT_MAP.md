@@ -1,8 +1,41 @@
 # PROJECT_MAP
 
-最近自查日期：2026-07-25
+最近自查日期：2026-08-18
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-08-18 v0.23 版本配置文件
+
+- `Rokurics.xcodeproj/project.pbxproj`：七个 target 的 Debug/Release `MARKETING_VERSION` 统一为 `0.23`；`CURRENT_PROJECT_VERSION` 继续为 `1`。实际发布产品是 `Rokurics`、`RokuricsMac` 与嵌入 iPhone App 的 `RokuricsLiveActivities`。
+- `Rokurics/Info.plist`、`RokuricsLiveActivities/Info.plist`：继续通过 `$(MARKETING_VERSION)` 与 `$(CURRENT_PROJECT_VERSION)` 生成 `CFBundleShortVersionString`/`CFBundleVersion`，未写死第二份版本号。
+- `Rokurics/IPhoneSettingsView.swift`、`RokuricsMac/MacSettingsView.swift`：正常路径继续读取 Bundle Info；缺字段时的显示缺省值更新为 `0.23 (1)`。
+- `Rokurics.xcodeproj/xcshareddata/xcschemes/Rokurics.xcscheme`、`RokuricsMac.xcscheme`：ArchiveAction 原本即使用 Release，本轮未修改 scheme。
+- 发布验证产物只生成在系统临时目录，不进入仓库。iOS archive 包含 iPhone App、Live Activity extension 与各自 dSYM；Mac archive 包含 universal App、dSYM、既有 whisper helper 和依赖动态库。
+
+## 2026-08-09 iPhone 上传首包修复文件
+
+- `Rokurics/RecordingUploadCoordinator.swift`：以 MainActor 上进程共享、per-recording attempt token 取代 display/ledger 充当 live-task 锁；重复 `upload()` 不再写灰态，Task 所有退出路径释放 token；stale in-progress 在 decision 前按当前 recording 定向恢复；retry active guard 只看真实进程内 owner。
+- `Rokurics/RecordingManager.swift`：初始化仍恢复进程中断任务，但跳过 token-owned recording；普通 `reloadRecordings()` 不再恢复 upload ledger 或 stale uploading metadata，避免刷新打断另一 coordinator 的 fresh in-progress job。
+- `Rokurics/AudioFileStore.swift`：stale uploading metadata recovery 接受 active recording 排除集合，避免第二个 manager 初始化把 live metadata 改成 failed。
+- `RokuricsTests/RokuricsTests.swift`：新增 fire-and-forget 同实例/跨实例重复触发恰好一次 client、reload 保留 live job、第二个 manager 初始化保留 token-owned job、stale ledger 恢复后实际上传四项回归，并等待 token 清理后结束。
+- Mac receiver、route、`RequestVerifier`、wire schema、job schema、TLS/HMAC/pinning/nonce/body hash、CAS/checksum/no-overwrite/final proof 均未因本次首包修复改变。
+
+## 2026-07-30 上传恢复修复文件
+
+- `Rokurics/RecordingUploadClient.swift`：resumable start 先解析“目标已完整存在”的终态 proof，再要求活动 `sessionID`；完成响应必须同时匹配 completed/final-exists/confirmed bytes/final size/SHA-256。
+- `Rokurics/MacToIPhoneUploadReceiver.swift`：`MacToIPhoneUploadSingleFlightGate` 把 Mac -> iPhone 拉取限制为全局单传输；忙时 offer 不丢失，由 Mac durable ledger 后续重投。
+- `RokuricsMac/MacToIPhoneUploadStore.swift`：按 target 过滤未完成 job，并使用 heartbeat sequence 做只读公平轮转；ACK 的 target/checksum/size 完成条件不变。
+- `RokuricsMac/SecureLocalHTTPSServer.swift`：从已通过 heartbeat verifier 的 request body 把 `sequenceNumber` 显式传给 offer scheduler，不依赖默认值，也不在 heartbeat 中写 queue。
+- `RokuricsTests/RokuricsTests.swift`：覆盖无 session 的已完成响应、完成 proof 不匹配、非完成响应缺 session，以及 receiver single-flight gate。
+- `RokuricsMacTests/RokuricsMacTests.swift`：覆盖队列重启、A/B/A 轮转、错误 ACK 保留、后项成功完成和 target 隔离；持久化测试按稳定 `transferID` 比较，避免把 JSON 日期规范化误判为队列失败。
+
+## 2026-07-30 Mac -> iPhone 上传 P0 路由文件
+
+- `Rokurics/SecureMacUploadClient.swift`：iPhone 作为现有 HTTPS client，分别向 `/upload/mac-to-iphone/chunk` 和 `/upload/mac-to-iphone/ack` 发送签名 JSON。
+- `RokuricsMac/SecureLocalHTTPSServer.swift`：Mac dispatcher 将两条 POST 路径送入对应 handler；HTTP parser 对两者都使用 64 KiB request body limit；handler 必须先调用 `RequestVerifier`，再校验 body `deviceID` 与已验证设备一致。
+- `RokuricsMac/RequestVerifier.swift`：两条路径现已显式进入 `pathRules`，均限制为 64 KiB `application/json`，并继续执行 paired-device、timestamp、nonce、body hash、HMAC 与 credential persistence 全链路。
+- `RokuricsMac/MacToIPhoneUploadStore.swift`：只接收 verifier 与 handler 校验完成后的 chunk/ACK 操作；后续恢复修复增加了 pending offer 的公平轮转，但未修改 checksum、size、target device、no-overwrite 或 completion proof 行为。
+- `RokuricsMacTests/RokuricsMacTests.swift`：`macToIPhoneUploadRoutesRequireFullSignedRequestVerification()` 覆盖两条合法签名路径与 replay、坏 HMAC、超限 body 的拒绝控制。
 
 ## 连接 / 同步 / 上传职责地图（2026-07-12）
 

@@ -41,6 +41,7 @@ final class RecordingUploadCoordinator: ObservableObject {
     private let reconciliationStore: SyncReconciliationStore
     private let enforcesReconciliationMarks: Bool
     private var uploadTasks: [String: Task<Void, Never>] = [:]
+    private static var activeAttemptTokensByRecordingID: [String: UUID] = [:]
 
     init(
         uploadClient: RecordingUploadClientProtocol? = nil,
@@ -133,13 +134,11 @@ final class RecordingUploadCoordinator: ObservableObject {
     }
 
     func hasActiveUploadInFlight() -> Bool {
-        if activeStatuses.values.contains(.uploading) {
-            return true
-        }
-        guard let jobs = try? jobStore.loadJobs() else {
-            return false
-        }
-        return jobs.contains(where: Self.isActiveUploadJob)
+        !Self.activeAttemptTokensByRecordingID.isEmpty || !uploadTasks.isEmpty
+    }
+
+    static var activelyOwnedRecordingIDs: Set<String> {
+        Set(activeAttemptTokensByRecordingID.keys)
     }
 
     func pendingTransferRecord(for metadata: RecordingMetadata, localDeviceID: String) -> SyncReconciliationRecord? {
@@ -544,6 +543,22 @@ final class RecordingUploadCoordinator: ObservableObject {
         activeStatuses[recordingID] = status
     }
 
+    private static func claimActiveAttempt(recordingID: String) -> UUID? {
+        guard activeAttemptTokensByRecordingID[recordingID] == nil else {
+            return nil
+        }
+        let token = UUID()
+        activeAttemptTokensByRecordingID[recordingID] = token
+        return token
+    }
+
+    private static func releaseActiveAttempt(recordingID: String, token: UUID) {
+        guard activeAttemptTokensByRecordingID[recordingID] == token else {
+            return
+        }
+        activeAttemptTokensByRecordingID[recordingID] = nil
+    }
+
     private func updateErrorMessage(_ message: String?, for recordingID: String) {
         guard errorMessages[recordingID] != message else {
             return
@@ -653,8 +668,6 @@ final class RecordingUploadCoordinator: ObservableObject {
             uploadStatus: metadata.uploadStatus
         )
         guard uploadTasks[metadata.id] == nil else {
-            setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
-            updateErrorMessage(nil, for: metadata.id)
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "uploadCoordinatorSkippedWithReason",
@@ -667,13 +680,40 @@ final class RecordingUploadCoordinator: ObservableObject {
             return
         }
 
+        guard let attemptToken = Self.claimActiveAttempt(recordingID: metadata.id) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "uploadCoordinatorSkippedWithReason",
+                traceID: resolvedTraceID,
+                recordingID: metadata.id,
+                eventResult: "skip",
+                reasonCode: "active_upload_owned_elsewhere",
+                uploadStatus: metadata.uploadStatus
+            )
+            return
+        }
+
+        // This is presentation only. The process-wide, per-recording token
+        // above is the single-flight authority shared by the UI and service.
+        setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
+        updateErrorMessage(nil, for: metadata.id)
+
         uploadTasks[metadata.id] = Task { [weak self, weak recordingManager] in
-            guard let self, let recordingManager else {
+            defer {
+                Self.releaseActiveAttempt(recordingID: metadata.id, token: attemptToken)
+                self?.uploadTasks[metadata.id] = nil
+            }
+            guard let self else {
+                return
+            }
+            guard let recordingManager else {
+                self.setActiveStatus(nil, for: metadata)
+                self.updateErrorMessage("上传上下文已释放，请重试。", for: metadata.id)
                 return
             }
 
             _ = await UploadFlightRecorder.$currentTraceID.withValue(resolvedTraceID) {
-                await self.uploadAndWait(
+                await self.uploadAndWaitWithActiveTrace(
                     metadata: metadata,
                     settings: settings,
                     recordingManager: recordingManager,
@@ -684,7 +724,6 @@ final class RecordingUploadCoordinator: ObservableObject {
                     syncRunID: syncRunID
                 )
             }
-            self.uploadTasks[metadata.id] = nil
         }
     }
 
@@ -700,6 +739,21 @@ final class RecordingUploadCoordinator: ObservableObject {
         syncRunID: String? = nil
     ) async -> RecordingUploadStatus {
         let resolvedTraceID = traceID ?? UploadFlightRecorder.currentTraceID ?? UploadFlightRecorder.makeTraceID()
+        guard let attemptToken = Self.claimActiveAttempt(recordingID: metadata.id) else {
+            UploadFlightRecorder.record(
+                side: .iPhone,
+                stage: "uploadCoordinatorSkippedWithReason",
+                traceID: resolvedTraceID,
+                recordingID: metadata.id,
+                eventResult: "skip",
+                reasonCode: "active_upload_owned_elsewhere",
+                uploadStatus: metadata.uploadStatus
+            )
+            return .uploading
+        }
+        defer {
+            Self.releaseActiveAttempt(recordingID: metadata.id, token: attemptToken)
+        }
         return await UploadFlightRecorder.$currentTraceID.withValue(resolvedTraceID) {
             await uploadAndWaitWithActiveTrace(
                 metadata: metadata,
@@ -802,20 +856,29 @@ final class RecordingUploadCoordinator: ObservableObject {
             }
         }
 
-        if activeStatuses[metadata.id] == .uploading {
-            setActiveStatus(.uploading, for: metadata, job: try? jobStore.loadJob(recordingID: metadata.id))
-            updateErrorMessage(nil, for: metadata.id)
-            print("[RokuricsRecordingUpload] coordinator skipped active upload recordingIDPrefix=\(recordingIDPrefix)")
+        do {
+            // This invocation owns the process-wide single-flight token. Any
+            // durable in-progress state for this recording is therefore an
+            // interrupted attempt, not another live task in this process.
+            _ = try jobStore.recoverStaleInProgressJobs(
+                now: Date(),
+                recordingID: metadata.id
+            )
+        } catch {
+            setActiveStatus(.failed, for: metadata)
+            updateErrorMessage("上传任务恢复失败：\(error.localizedDescription)", for: metadata.id)
             UploadFlightRecorder.record(
                 side: .iPhone,
                 stage: "uploadCoordinatorSkippedWithReason",
                 traceID: traceID,
                 recordingID: metadata.id,
-                eventResult: "skip",
-                reasonCode: "active_status_uploading",
-                uploadStatus: metadata.uploadStatus
+                eventResult: "fail",
+                reasonCode: "stale_job_recovery_failed",
+                uploadStatus: metadata.uploadStatus,
+                errorDomain: "RecordingUploadJobStore",
+                safeErrorMessage: error.localizedDescription
             )
-            return .uploading
+            return .failed
         }
 
         let existingLedgerJob = try? jobStore.loadJob(recordingID: metadata.id)
@@ -894,7 +957,6 @@ final class RecordingUploadCoordinator: ObservableObject {
         }
 
         do {
-            try jobStore.recoverStaleInProgressJobs(now: Date())
             let existingJob = try jobStore.ensureJob(
                 for: metadata,
                 settings: settings,
@@ -2188,7 +2250,10 @@ final class RecordingUploadCoordinator: ObservableObject {
             eventResult: "begin",
             reasonCode: "upload_ledger"
         )
-        _ = try? jobStore.recoverStaleInProgressJobs(now: now)
+        _ = try? jobStore.recoverStaleInProgressJobs(
+            now: now,
+            excludingRecordingIDs: Self.activelyOwnedRecordingIDs
+        )
         let queue = retryQueue()
         let jobs: [RecordingUploadJob]
         do {
@@ -2552,20 +2617,6 @@ final class RecordingUploadCoordinator: ObservableObject {
             return .inFlight
         }
         return .none
-    }
-
-    private static func isActiveUploadJob(_ job: RecordingUploadJob) -> Bool {
-        if job.overallState == .inProgress
-            || job.metadataStage == .inProgress
-            || job.audioStage == .inProgress {
-            return true
-        }
-        switch job.resumableState {
-        case .starting, .uploading, .finalizing:
-            return true
-        case .notStarted, .paused, .retryableFailed, .completed, .fatalFailed, .none:
-            return false
-        }
     }
 
     private func recordDecision(
@@ -3350,11 +3401,21 @@ final class RecordingUploadJobStore {
     }
 
     @discardableResult
-    func recoverStaleInProgressJobs(now: Date) throws -> [RecordingUploadJob] {
+    func recoverStaleInProgressJobs(
+        now: Date,
+        recordingID: String? = nil,
+        excludingRecordingIDs: Set<String> = []
+    ) throws -> [RecordingUploadJob] {
         var ledger = try loadLedger()
         var recovered: [RecordingUploadJob] = []
 
         for index in ledger.jobs.indices {
+            if let recordingID, ledger.jobs[index].recordingID != recordingID {
+                continue
+            }
+            if excludingRecordingIDs.contains(ledger.jobs[index].recordingID) {
+                continue
+            }
             guard ledger.jobs[index].overallState == .inProgress
                     || ledger.jobs[index].metadataStage == .inProgress
                     || ledger.jobs[index].audioStage == .inProgress else {

@@ -91,9 +91,24 @@ final class MacToIPhoneUploadStore: @unchecked Sendable {
         return offer
     }
 
-    func nextOffer(targetDeviceID: String) -> MacToIPhoneUploadOffer? {
+    /// Uses the authenticated heartbeat sequence as a stateless cursor so one
+    /// unacknowledged job cannot permanently hide the remaining durable jobs.
+    func nextOffer(
+        targetDeviceID: String,
+        heartbeatSequenceNumber: UInt64
+    ) -> MacToIPhoneUploadOffer? {
         lock.withLock {
-            jobs.first { $0.offer.targetDeviceID == targetDeviceID && $0.state != "completed" }?.offer
+            let pendingJobs = jobs.filter {
+                $0.offer.targetDeviceID == targetDeviceID && $0.state != "completed"
+            }
+            guard !pendingJobs.isEmpty else {
+                return nil
+            }
+            let zeroBasedSequence = heartbeatSequenceNumber == 0
+                ? 0
+                : heartbeatSequenceNumber - 1
+            let index = Int(zeroBasedSequence % UInt64(pendingJobs.count))
+            return pendingJobs[index].offer
         }
     }
 

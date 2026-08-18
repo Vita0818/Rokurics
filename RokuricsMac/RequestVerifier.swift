@@ -74,6 +74,16 @@ final class RequestVerifier {
             allowedContentTypePrefixes: ["application/json"],
             requiredUploadType: nil
         ),
+        "/upload/mac-to-iphone/chunk": PathRule(
+            maxBodyBytes: 64 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
+        "/upload/mac-to-iphone/ack": PathRule(
+            maxBodyBytes: 64 * 1024,
+            allowedContentTypePrefixes: ["application/json"],
+            requiredUploadType: nil
+        ),
         "/device/status": PathRule(
             maxBodyBytes: 256 * 1024,
             allowedContentTypePrefixes: ["application/json"],

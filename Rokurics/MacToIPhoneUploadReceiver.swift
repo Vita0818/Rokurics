@@ -1,5 +1,24 @@
 import Foundation
 
+nonisolated struct MacToIPhoneUploadSingleFlightGate {
+    private(set) var activeTransferID: String?
+
+    mutating func begin(_ transferID: String) -> Bool {
+        guard activeTransferID == nil else {
+            return false
+        }
+        activeTransferID = transferID
+        return true
+    }
+
+    mutating func end(_ transferID: String) {
+        guard activeTransferID == transferID else {
+            return
+        }
+        activeTransferID = nil
+    }
+}
+
 /// Executes Mac -> iPhone content transfer independently from sync discovery.
 /// The only input is a durable offer created by the Mac Upload button.
 @MainActor
@@ -7,7 +26,7 @@ final class MacToIPhoneUploadReceiver {
     private let audioFileStore: AudioFileStore
     private let recordingManager: RecordingManager
     private let reconciliationStore: SyncReconciliationStore
-    private var activeTransferIDs: Set<String> = []
+    private var singleFlightGate = MacToIPhoneUploadSingleFlightGate()
     private let chunkSize = 2 * 1024 * 1024
 
     init(
@@ -29,10 +48,10 @@ final class MacToIPhoneUploadReceiver {
         guard offer.targetDeviceID == settings.deviceID,
               offer.size > 0,
               !offer.checksum.isEmpty,
-              activeTransferIDs.insert(offer.transferID).inserted else {
+              singleFlightGate.begin(offer.transferID) else {
             return
         }
-        defer { activeTransferIDs.remove(offer.transferID) }
+        defer { singleFlightGate.end(offer.transferID) }
 
         do {
             guard let recordID = offer.reconciliationRecordID,

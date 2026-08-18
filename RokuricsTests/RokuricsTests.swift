@@ -1985,6 +1985,80 @@ struct RokuricsTests {
         #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.failed.rawValue)
     }
 
+    @Test func reloadRecordingsKeepsFreshInProgressUploadJobRunning() throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "fresh-job-during-reload", title: "运行中任务", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let now = Date()
+        _ = try jobStore.ensureJob(for: metadata, settings: makePairedMacSnapshot(), now: now)
+        _ = try jobStore.markAttemptStarted(recordingID: metadata.id, now: now)
+        _ = try jobStore.applyProgress(recordingID: metadata.id, event: .metadataStarted, now: now)
+
+        manager.reloadRecordings()
+
+        let runningJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        #expect(runningJob.overallState == .inProgress)
+        #expect(runningJob.metadataStage == .inProgress)
+        #expect(runningJob.lastErrorCode == nil)
+        #expect(runningJob.nextRetryAfter == nil)
+    }
+
+    @Test func recordingManagerInitializationDoesNotRecoverProcessOwnedUpload() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "live-job-during-manager-init", title: "运行中初始化", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let client = FakeRecordingUploadClient(
+            result: .success(RecordingUploadResult(
+                recordingID: metadata.id,
+                metadataFileName: "metadata.json",
+                audioFileName: "audio.m4a",
+                metadataDisposition: "acceptedNew",
+                audioDisposition: "acceptedNew"
+            )),
+            suspendsUntilReleased: true
+        )
+        defer { client.releaseSuspendedUpload() }
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let coordinator = RecordingUploadCoordinator(uploadClient: client, jobStore: jobStore)
+
+        coordinator.upload(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            recordingManager: manager
+        )
+
+        for _ in 0..<200 {
+            if client.uploadRequestCount == 1,
+               try jobStore.loadJob(recordingID: metadata.id)?.overallState == .inProgress {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        #expect(RecordingUploadCoordinator.activelyOwnedRecordingIDs.contains(metadata.id))
+        let secondManager = RecordingManager(fileStore: store)
+        let jobDuringUpload = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        #expect(jobDuringUpload.overallState == .inProgress)
+        #expect(jobDuringUpload.lastErrorCode == nil)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploading.rawValue)
+        #expect(secondManager.recordings.first(where: { $0.id == metadata.id })?.uploadStatus == RecordingUploadStatus.uploading.rawValue)
+
+        client.releaseSuspendedUpload()
+        for _ in 0..<200 {
+            if try jobStore.loadJob(recordingID: metadata.id)?.overallState == .succeeded,
+               !RecordingUploadCoordinator.activelyOwnedRecordingIDs.contains(metadata.id) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        #expect(try jobStore.loadJob(recordingID: metadata.id)?.overallState == .succeeded)
+        #expect(!RecordingUploadCoordinator.activelyOwnedRecordingIDs.contains(metadata.id))
+    }
+
     @Test func resumableUploadProgressPersistsInLedger() throws {
         let (store, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -2129,6 +2203,176 @@ struct RokuricsTests {
         #expect(transport.chunkOffsets == [0, 3, 6])
         #expect(transport.finalizeCount == 1)
         #expect(events.contains(.audioResumableProgress(sessionID: "session-1", confirmedBytes: 9, totalBytes: 9, nextOffset: 9)))
+    }
+
+    @Test func resumableStartCompletedWithoutSessionReturnsAcceptedExisting() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(
+            id: "resumable-start-completed",
+            title: "服务端已完成",
+            store: store,
+            audioData: Data("abcdefghi".utf8)
+        )
+        let checksum = try SecureUploadUtilities.sha256Hex(fileURL: store.audioURL(for: metadata))
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.startResponseOverride = ResumableAudioUploadSessionResponse(
+            ok: true,
+            disposition: "acceptedExisting",
+            status: "completed",
+            sessionID: nil,
+            confirmedBytes: metadata.fileSize,
+            nextOffset: metadata.fileSize,
+            chunkSize: nil,
+            completed: true,
+            finalAudioExists: true,
+            chunkAccepted: nil,
+            finalAudioRelativePath: "audio/inbox/day/\(metadata.id)/audio.m4a",
+            checksum: checksum,
+            fileSize: metadata.fileSize,
+            receiveStatus: "completed",
+            processingStatus: "notStarted",
+            error: nil,
+            reason: nil
+        )
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        var events: [RecordingUploadProgressEvent] = []
+
+        let result = try await client.uploadRecording(
+            metadata: metadata,
+            settings: makePairedMacSnapshot(),
+            progress: { event in events.append(event) }
+        )
+
+        #expect(result.audioDisposition == "acceptedExisting")
+        #expect(transport.resumableStartCount == 1)
+        #expect(transport.chunkOffsets.isEmpty)
+        #expect(transport.finalizeCount == 0)
+        #expect(events.contains(.audioSucceeded(disposition: "acceptedExisting")))
+        #expect(events.allSatisfy { event in
+            if case .audioResumableSessionStarted = event {
+                return false
+            }
+            return true
+        })
+    }
+
+    @Test func resumableStartCompletedWithoutSessionRejectsMismatchedProof() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(
+            id: "resumable-start-proof-mismatch",
+            title: "完成证明不匹配",
+            store: store,
+            audioData: Data("abcdefghi".utf8)
+        )
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.startResponseOverride = ResumableAudioUploadSessionResponse(
+            ok: true,
+            disposition: "acceptedExisting",
+            status: "completed",
+            sessionID: nil,
+            confirmedBytes: metadata.fileSize,
+            nextOffset: metadata.fileSize,
+            chunkSize: nil,
+            completed: true,
+            finalAudioExists: true,
+            chunkAccepted: nil,
+            finalAudioRelativePath: "audio/inbox/day/\(metadata.id)/audio.m4a",
+            checksum: "mismatched-checksum",
+            fileSize: metadata.fileSize,
+            receiveStatus: "completed",
+            processingStatus: "notStarted",
+            error: nil,
+            reason: nil
+        )
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        var capturedError: Error?
+
+        do {
+            _ = try await client.uploadRecording(metadata: metadata, settings: makePairedMacSnapshot())
+        } catch {
+            capturedError = error
+        }
+
+        #expect(capturedError?.localizedDescription.contains("resumable_completion_proof_mismatch") == true)
+        #expect(transport.resumableStartCount == 1)
+        #expect(transport.chunkOffsets.isEmpty)
+        #expect(transport.finalizeCount == 0)
+    }
+
+    @Test func resumableStartWithoutCompletionOrSessionIsRejected() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(
+            id: "resumable-start-session-missing",
+            title: "缺少会话",
+            store: store,
+            audioData: Data("abcdefghi".utf8)
+        )
+        let transport = FakeRecordingSecureUploadTransport()
+        transport.startResponseOverride = ResumableAudioUploadSessionResponse(
+            ok: true,
+            disposition: "acceptedNew",
+            status: "active",
+            sessionID: nil,
+            confirmedBytes: 0,
+            nextOffset: 0,
+            chunkSize: 3,
+            completed: false,
+            finalAudioExists: false,
+            chunkAccepted: nil,
+            finalAudioRelativePath: nil,
+            checksum: nil,
+            fileSize: nil,
+            receiveStatus: "receiving",
+            processingStatus: "awaitingAudio",
+            error: nil,
+            reason: nil
+        )
+        let client = RecordingUploadClient(
+            secureClient: transport,
+            audioFileStore: store,
+            resumableThresholdBytes: 4,
+            resumableChunkSize: 3
+        )
+        var capturedError: Error?
+
+        do {
+            _ = try await client.uploadRecording(metadata: metadata, settings: makePairedMacSnapshot())
+        } catch {
+            capturedError = error
+        }
+
+        #expect(capturedError?.localizedDescription.contains("resumable_session_missing") == true)
+        #expect(transport.resumableStartCount == 1)
+        #expect(transport.chunkOffsets.isEmpty)
+        #expect(transport.finalizeCount == 0)
+    }
+
+    @Test func macToIPhoneUploadReceiverAdmitsOnlyOneTransferAtATime() {
+        var gate = MacToIPhoneUploadSingleFlightGate()
+
+        let admittedA = gate.begin("transfer-a")
+        let admittedBWhileABusy = gate.begin("transfer-b")
+        #expect(admittedA)
+        #expect(!admittedBWhileABusy)
+        gate.end("transfer-b")
+        let admittedBAfterWrongRelease = gate.begin("transfer-b")
+        #expect(!admittedBAfterWrongRelease)
+        gate.end("transfer-a")
+        let admittedBAfterAReleased = gate.begin("transfer-b")
+        #expect(admittedBAfterAReleased)
     }
 
     @Test func resumableNetworkFailurePreservesProgressInCoordinatorLedger() async throws {
@@ -8838,6 +9082,128 @@ struct SyncReconciliationClosedLoopTests {
         #expect(record?.completionProof?.verifiedSize == metadata.fileSize)
     }
 
+    @Test func backToBackFireAndForgetUploadsWithMatchingReconciliationRunClientOnceAndFinishUploaded() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "matching-source-double-upload", title: "Double upload", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let modifiedAt = Date(timeIntervalSince1970: 2_700)
+        try manager.studyLibraryStore.upsertRecordingMetadata(metadata, businessMutationAt: modifiedAt)
+        let settings = makePairedMacSnapshot()
+        let reconciliationStore = SyncReconciliationStore(rootURL: rootURL)
+        let checksum = try SecureUploadUtilities.sha256Hex(
+            fileURL: rootURL.appendingPathComponent(metadata.relativeAudioPath)
+        )
+        try persistSourcePlan(
+            store: reconciliationStore,
+            sourceDeviceID: settings.deviceID,
+            hash: checksum,
+            size: metadata.fileSize,
+            modifiedAt: modifiedAt,
+            recordingID: metadata.id
+        )
+        let client = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedNew",
+            audioDisposition: "acceptedNew"
+        )))
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let coordinator = RecordingUploadCoordinator(
+            uploadClient: client,
+            jobStore: jobStore,
+            reconciliationStore: reconciliationStore,
+            enforcesReconciliationMarks: true
+        )
+        let secondCoordinator = RecordingUploadCoordinator(
+            uploadClient: client,
+            jobStore: RecordingUploadJobStore(audioFileStore: store),
+            reconciliationStore: reconciliationStore,
+            enforcesReconciliationMarks: true
+        )
+        #expect(!jobStore.ledgerFileExists)
+
+        coordinator.upload(metadata: metadata, settings: settings, recordingManager: manager)
+        coordinator.upload(metadata: metadata, settings: settings, recordingManager: manager)
+        secondCoordinator.upload(metadata: metadata, settings: settings, recordingManager: manager)
+
+        for _ in 0..<200 {
+            if try jobStore.loadJob(recordingID: metadata.id)?.overallState == .succeeded,
+               try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue,
+               !RecordingUploadCoordinator.activelyOwnedRecordingIDs.contains(metadata.id) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let completedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        #expect(client.uploadRequestCount == 1)
+        #expect(completedJob.overallState == .succeeded)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+        #expect(!RecordingUploadCoordinator.activelyOwnedRecordingIDs.contains(metadata.id))
+    }
+
+    @Test func enforcedUploadRecoversStaleInProgressJobBeforeLedgerSuppression() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "matching-source-stale-ledger", title: "Stale ledger", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let modifiedAt = Date(timeIntervalSince1970: 2_800)
+        try manager.studyLibraryStore.upsertRecordingMetadata(metadata, businessMutationAt: modifiedAt)
+        let settings = makePairedMacSnapshot()
+        let reconciliationStore = SyncReconciliationStore(rootURL: rootURL)
+        let checksum = try SecureUploadUtilities.sha256Hex(
+            fileURL: rootURL.appendingPathComponent(metadata.relativeAudioPath)
+        )
+        try persistSourcePlan(
+            store: reconciliationStore,
+            sourceDeviceID: settings.deviceID,
+            hash: checksum,
+            size: metadata.fileSize,
+            modifiedAt: modifiedAt,
+            recordingID: metadata.id
+        )
+        let reconciliationRecord = try #require(
+            reconciliationStore.pendingSourceRecord(
+                objectID: "recordingAudio:\(metadata.id)",
+                sourceDeviceID: settings.deviceID
+            )
+        )
+        let jobStore = RecordingUploadJobStore(audioFileStore: store)
+        let staleAt = Date(timeIntervalSince1970: 100)
+        _ = try jobStore.ensureJob(for: metadata, settings: settings, now: staleAt)
+        try jobStore.bindReconciliation(record: reconciliationRecord, recordingID: metadata.id, now: staleAt)
+        _ = try jobStore.markAttemptStarted(recordingID: metadata.id, now: staleAt)
+        _ = try jobStore.applyProgress(recordingID: metadata.id, event: .metadataStarted, now: staleAt)
+        let client = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedExisting",
+            audioDisposition: "acceptedNew"
+        )))
+        let coordinator = RecordingUploadCoordinator(
+            uploadClient: client,
+            jobStore: jobStore,
+            reconciliationStore: reconciliationStore,
+            enforcesReconciliationMarks: true
+        )
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: settings,
+            recordingManager: manager
+        )
+
+        let completedJob = try #require(try jobStore.loadJob(recordingID: metadata.id))
+        #expect(status == .uploaded)
+        #expect(client.uploadRequestCount == 1)
+        #expect(completedJob.overallState == .succeeded)
+        #expect(completedJob.attemptCount == 2)
+        #expect(try store.loadMetadata(id: metadata.id).uploadStatus == RecordingUploadStatus.uploaded.rawValue)
+    }
+
     private func reconciliationInventory(deviceID: String, object: SyncObject) -> SyncInventory {
         reconciliationInventory(deviceID: deviceID, objects: [object])
     }
@@ -8984,10 +9350,24 @@ private final class FakeRecordingUploadClient: RecordingUploadClientProtocol {
     let events: [RecordingUploadProgressEvent]
     private(set) var lastMetadata: RecordingMetadata?
     private(set) var uploadRequestCount = 0
+    private let suspendsUntilReleased: Bool
+    private var suspensionReleased = false
+    private var suspensionContinuation: CheckedContinuation<Void, Never>?
 
-    init(result: ResultMode, events: [RecordingUploadProgressEvent] = []) {
+    init(
+        result: ResultMode,
+        events: [RecordingUploadProgressEvent] = [],
+        suspendsUntilReleased: Bool = false
+    ) {
         self.result = result
         self.events = events
+        self.suspendsUntilReleased = suspendsUntilReleased
+    }
+
+    func releaseSuspendedUpload() {
+        suspensionReleased = true
+        suspensionContinuation?.resume()
+        suspensionContinuation = nil
     }
 
     func uploadRecording(
@@ -8999,6 +9379,15 @@ private final class FakeRecordingUploadClient: RecordingUploadClientProtocol {
         lastMetadata = metadata
         for event in events {
             try progress?(event)
+        }
+        if suspendsUntilReleased, !suspensionReleased {
+            await withCheckedContinuation { continuation in
+                if suspensionReleased {
+                    continuation.resume()
+                } else {
+                    suspensionContinuation = continuation
+                }
+            }
         }
 
         switch result {
@@ -9022,6 +9411,7 @@ private final class FakeRecordingSecureUploadTransport: RecordingSecureUploadTra
     var statusConfirmedBytes: Int64?
     var statusError: Error?
     var finalizeDisposition = "acceptedNew"
+    var startResponseOverride: ResumableAudioUploadSessionResponse?
 
     private var sessionID = "session-1"
     private var confirmedBytes: Int64 = 0
@@ -9087,6 +9477,9 @@ private final class FakeRecordingSecureUploadTransport: RecordingSecureUploadTra
         request: ResumableAudioUploadStartRequest
     ) async throws -> ResumableAudioUploadSessionResponse {
         resumableStartCount += 1
+        if let startResponseOverride {
+            return startResponseOverride
+        }
         sessionID = "session-1"
         totalBytes = request.totalBytes
         chunkSize = request.chunkSize
