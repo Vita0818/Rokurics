@@ -67,7 +67,7 @@ enum RokuricsTypography {
     }
 
     static func chatGreeting(size: CGFloat = 24, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chatMessage(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
@@ -79,63 +79,63 @@ enum RokuricsTypography {
     }
 
     static func englishTitle(size: CGFloat = 30, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseTitle(size: CGFloat = 30, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishBody(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishCaption(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseBody(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseCaption(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func numberBody(size: CGFloat = 15, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif).monospacedDigit()
+        JetBrainsMonoFont.font(size: size, weight: weight).monospacedDigit()
     }
 
     static func appTitle(size: CGFloat = 39, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func largeNumber(size: CGFloat = 42, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight).monospacedDigit()
     }
 
     static func title(size: CGFloat = 30, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func headline(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func body(size: CGFloat = 15, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func caption(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func technical(size: CGFloat = 15, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func technicalLarge(size: CGFloat = 24, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func fingerprint(size: CGFloat = 15, weight: Font.Weight = .semibold) -> Font {
@@ -143,7 +143,7 @@ enum RokuricsTypography {
     }
 
     static func button(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 }
 
@@ -153,23 +153,35 @@ struct RokuricsText: View {
     var size: CGFloat?
     var weight: Font.Weight?
     var forceTechnical = false
+    var preservesLaTeXFont = false
 
     init(
         _ text: String,
         token: RokuricsTypographyToken = .body,
         size: CGFloat? = nil,
         weight: Font.Weight? = nil,
-        forceTechnical: Bool = false
+        forceTechnical: Bool = false,
+        preservesLaTeXFont: Bool = false
     ) {
         self.text = text
         self.token = token
         self.size = size
         self.weight = weight
         self.forceTechnical = forceTechnical
+        self.preservesLaTeXFont = preservesLaTeXFont
     }
 
     var body: some View {
-        Text(RokuricsTypography.attributedString(for: text, token: token, size: size, weight: weight, forceTechnical: forceTechnical))
+        Text(
+            RokuricsTypography.attributedString(
+                for: text,
+                token: token,
+                size: size,
+                weight: weight,
+                forceTechnical: forceTechnical,
+                preservesLaTeXFont: preservesLaTeXFont
+            )
+        )
     }
 }
 
@@ -181,11 +193,11 @@ struct RokuricsMixedTypographyStyle: Equatable {
     let technical: RokuricsTypographyTokenSpec
 
     init(size: CGFloat, weight: Font.Weight) {
-        latin = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .serif)
-        chinese = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .default)
-        number = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .serif, usesMonospacedDigits: true)
-        punctuation = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .default)
-        technical = RokuricsTypographyTokenSpec(size: size, weight: weight, design: .monospaced)
+        latin = RokuricsTypographyTokenSpec(size: size, weight: weight)
+        chinese = RokuricsTypographyTokenSpec(size: size, weight: weight)
+        number = RokuricsTypographyTokenSpec(size: size, weight: weight, usesMonospacedDigits: true)
+        punctuation = RokuricsTypographyTokenSpec(size: size, weight: weight)
+        technical = RokuricsTypographyTokenSpec(size: size, weight: weight)
     }
 
     func font(for kind: RokuricsMixedTextRun.Kind) -> Font {
@@ -207,11 +219,10 @@ struct RokuricsMixedTypographyStyle: Equatable {
 struct RokuricsTypographyTokenSpec: Equatable {
     let size: CGFloat
     let weight: Font.Weight
-    let design: Font.Design
     var usesMonospacedDigits = false
 
     var font: Font {
-        let font = Font.system(size: size, weight: weight, design: design)
+        let font = JetBrainsMonoFont.font(size: size, weight: weight)
         return usesMonospacedDigits ? font.monospacedDigit() : font
     }
 }
@@ -255,16 +266,75 @@ extension RokuricsTypography {
         token: RokuricsTypographyToken,
         size: CGFloat? = nil,
         weight: Font.Weight? = nil,
-        forceTechnical: Bool = false
+        forceTechnical: Bool = false,
+        preservesLaTeXFont: Bool = false
     ) -> AttributedString {
         let style = mixedStyle(for: token, size: size, weight: weight)
         var result = AttributedString()
-        for run in RokuricsMixedTextRun.runs(in: text, forceTechnical: forceTechnical || token == .technical) {
-            var segment = AttributedString(run.value)
-            segment.font = style.font(for: run.kind)
-            result += segment
+
+        let segments = preservesLaTeXFont
+            ? RokuricsLaTeXFontBoundary.segments(in: text)
+            : [RokuricsLaTeXFontBoundary.Segment(text: text, preservesCurrentFont: false)]
+
+        for boundarySegment in segments {
+            if boundarySegment.preservesCurrentFont {
+                var formula = AttributedString(boundarySegment.text)
+                formula.font = legacyFormulaFont(for: token, style: style)
+                result += formula
+                continue
+            }
+
+            for run in RokuricsMixedTextRun.runs(
+                in: boundarySegment.text,
+                forceTechnical: forceTechnical || token == .technical
+            ) {
+                var segment = AttributedString(run.value)
+                segment.font = style.font(for: run.kind)
+                result += segment
+            }
         }
         return result
+    }
+
+    static func applyMixedScriptFonts(
+        to attributedString: inout AttributedString,
+        token: RokuricsTypographyToken,
+        preservesLaTeXFont: Bool = false
+    ) {
+        let style = mixedStyle(for: token)
+        let plainText = String(attributedString.characters)
+        let segments = preservesLaTeXFont
+            ? RokuricsLaTeXFontBoundary.segments(in: plainText)
+            : [RokuricsLaTeXFontBoundary.Segment(text: plainText, preservesCurrentFont: false)]
+
+        var cursor = attributedString.startIndex
+        for boundarySegment in segments {
+            if boundarySegment.preservesCurrentFont {
+                cursor = attributedString.characters.index(
+                    cursor,
+                    offsetBy: boundarySegment.text.count
+                )
+                continue
+            }
+
+            for run in RokuricsMixedTextRun.runs(in: boundarySegment.text) {
+                let next = attributedString.characters.index(cursor, offsetBy: run.value.count)
+                attributedString[cursor..<next].font = style.font(for: run.kind)
+                cursor = next
+            }
+        }
+    }
+
+    private static func legacyFormulaFont(
+        for token: RokuricsTypographyToken,
+        style: RokuricsMixedTypographyStyle
+    ) -> Font {
+        let design: Font.Design = token == .technical ? .monospaced : .serif
+        return .system(
+            size: style.latin.size,
+            weight: style.latin.weight,
+            design: design
+        )
     }
 }
 

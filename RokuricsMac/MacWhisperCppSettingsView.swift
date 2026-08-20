@@ -75,9 +75,15 @@ struct MacWhisperCppSettingsView: View {
                 )
                 RokuricsSettingsDivider()
                 RokuricsSettingsPickerRow(title: RokuricsCopy.text("默认语言", "Default language"), selection: languageBinding) {
-                    Text("auto").tag("auto")
-                    Text("zh").tag("zh")
-                    Text("en").tag("en")
+                    Text("auto")
+                        .font(MacTypography.body(size: 13, weight: .medium))
+                        .tag("auto")
+                    Text("zh")
+                        .font(MacTypography.body(size: 13, weight: .medium))
+                        .tag("zh")
+                    Text("en")
+                        .font(MacTypography.body(size: 13, weight: .medium))
+                        .tag("en")
                 }
                 RokuricsSettingsDivider()
                 RokuricsSettingsToggleRow(title: "JSON Segments", isOn: preferSegmentOutputBinding)

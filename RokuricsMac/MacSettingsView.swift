@@ -250,7 +250,9 @@ struct MacSettingsView: View {
         MacSettingsHomeGroup(title: RokuricsCopy.text("Debug · 学习库迁移试点（高级限制/诊断）", "Debug · Library Migration Pilot")) {
             Picker(RokuricsCopy.text("高级限制", "Guardrail"), selection: debugPilotModeBinding) {
                 ForEach(CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotModeChoices, id: \.rawValue) { choice in
-                    Text(choice.title).tag(choice.rawValue)
+                    Text(choice.title)
+                        .font(MacTypography.body(size: 13, weight: .medium))
+                        .tag(choice.rawValue)
                 }
             }
             .pickerStyle(.menu)
@@ -1315,6 +1317,7 @@ struct RokuricsSettingsPickerRow<SelectionValue: Hashable, PickerContent: View>:
             Picker("", selection: $selection) {
                 pickerContent
             }
+            .font(MacTypography.body(size: 13, weight: .medium))
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(maxWidth: 250, alignment: .trailing)

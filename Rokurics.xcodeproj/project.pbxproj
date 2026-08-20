@@ -8,6 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		58F100012FC0000000000001 /* RokuricsLiveActivities.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 58F100032FC0000000000003 /* RokuricsLiveActivities.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		58F200022FD0000000000002 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 58F200012FD0000000000001 /* Fonts */; };
+		58F200032FD0000000000003 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 58F200012FD0000000000001 /* Fonts */; };
+		58F200042FD0000000000004 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 58F200012FD0000000000001 /* Fonts */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,9 +73,17 @@
 		58E315312FADB9210019DCDD /* RokuricsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		58E3153B2FADB9210019DCDD /* RokuricsUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RokuricsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		58F100032FC0000000000003 /* RokuricsLiveActivities.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RokuricsLiveActivities.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		58F200012FD0000000000001 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		58F200052FD0000000000005 /* Exceptions for "RokuricsMac" folder in "RokuricsMac" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 58A089A82FB050430065EF5A /* RokuricsMac */;
+		};
 		58F1000F2FC000000000000F /* Exceptions for "Rokurics" folder in "Rokurics" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -92,6 +103,9 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		58A089AA2FB050430065EF5A /* RokuricsMac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				58F200052FD0000000000005 /* Exceptions for "RokuricsMac" folder in "RokuricsMac" target */,
+			);
 			path = RokuricsMac;
 			sourceTree = "<group>";
 		};
@@ -199,6 +213,7 @@
 		58E3151B2FADB91F0019DCDD = {
 			isa = PBXGroup;
 			children = (
+				58F200012FD0000000000001 /* Fonts */,
 				58E315262FADB91F0019DCDD /* Rokurics */,
 				58B200012FC200000000001 /* RokuricsShared */,
 				58F100052FC0000000000005 /* RokuricsLiveActivitiesShared */,
@@ -461,6 +476,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				58F200032FD0000000000003 /* Fonts in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -482,6 +498,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				58F200022FD0000000000002 /* Fonts in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -503,6 +520,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				58F200042FD0000000000004 /* Fonts in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -661,7 +679,8 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RokuricsMac/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = RokuricsMac;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally on this Mac.";
@@ -710,7 +729,8 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RokuricsMac/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Rokurics needs microphone access to record audio locally on this Mac.";
 				LD_RUNPATH_SEARCH_PATHS = (

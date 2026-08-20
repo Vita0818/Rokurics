@@ -20,21 +20,8 @@ enum RokuricsTextStyle: Equatable, CaseIterable {
     case technical
 }
 
-enum MacTypographyFontDesign: Equatable {
-    case defaultSystem
-    case serif
-    case monospaced
-
-    var swiftUIDesign: Font.Design {
-        switch self {
-        case .defaultSystem:
-            return .default
-        case .serif:
-            return .serif
-        case .monospaced:
-            return .monospaced
-        }
-    }
+enum MacTypographyFontFamily: Equatable {
+    case jetBrainsMono
 }
 
 enum MacTypographyFontWeight: Equatable {
@@ -60,23 +47,22 @@ enum MacTypographyFontWeight: Equatable {
 struct MacTypographyTokenSpec: Equatable {
     let size: CGFloat
     let weight: MacTypographyFontWeight
-    let design: MacTypographyFontDesign
+    let family: MacTypographyFontFamily
     let usesMonospacedDigits: Bool
 
     init(
         size: CGFloat,
         weight: MacTypographyFontWeight,
-        design: MacTypographyFontDesign,
         usesMonospacedDigits: Bool = false
     ) {
         self.size = size
         self.weight = weight
-        self.design = design
+        family = .jetBrainsMono
         self.usesMonospacedDigits = usesMonospacedDigits
     }
 
     var font: Font {
-        let font = Font.system(size: size, weight: weight.swiftUIWeight, design: design.swiftUIDesign)
+        let font = JetBrainsMonoFont.font(size: size, weight: weight.swiftUIWeight)
         return usesMonospacedDigits ? font.monospacedDigit() : font
     }
 }
@@ -89,11 +75,11 @@ struct MacMixedTypographyStyle: Equatable {
     let technical: MacTypographyTokenSpec
 
     init(size: CGFloat, weight: MacTypographyFontWeight) {
-        latin = MacTypographyTokenSpec(size: size, weight: weight, design: .serif)
-        chinese = MacTypographyTokenSpec(size: size, weight: weight, design: .defaultSystem)
-        number = MacTypographyTokenSpec(size: size, weight: weight, design: .serif, usesMonospacedDigits: true)
-        punctuation = MacTypographyTokenSpec(size: size, weight: weight, design: .defaultSystem)
-        technical = MacTypographyTokenSpec(size: size, weight: weight, design: .monospaced)
+        latin = MacTypographyTokenSpec(size: size, weight: weight)
+        chinese = MacTypographyTokenSpec(size: size, weight: weight)
+        number = MacTypographyTokenSpec(size: size, weight: weight, usesMonospacedDigits: true)
+        punctuation = MacTypographyTokenSpec(size: size, weight: weight)
+        technical = MacTypographyTokenSpec(size: size, weight: weight)
     }
 
     func font(for kind: MacMixedTextRun.Kind) -> Font {
@@ -113,10 +99,10 @@ struct MacMixedTypographyStyle: Equatable {
 }
 
 enum MacTypography {
-    static let pageTitleSpec = MacTypographyTokenSpec(size: 32, weight: .bold, design: .defaultSystem)
-    static let chatGreetingSpec = MacTypographyTokenSpec(size: 24, weight: .semibold, design: .defaultSystem)
-    static let chatMessageSpec = MacTypographyTokenSpec(size: 15, weight: .regular, design: .defaultSystem)
-    static let chatInputSpec = MacTypographyTokenSpec(size: 15, weight: .regular, design: .defaultSystem)
+    static let pageTitleSpec = MacTypographyTokenSpec(size: 32, weight: .bold)
+    static let chatGreetingSpec = MacTypographyTokenSpec(size: 24, weight: .semibold)
+    static let chatMessageSpec = MacTypographyTokenSpec(size: 15, weight: .regular)
+    static let chatInputSpec = MacTypographyTokenSpec(size: 15, weight: .regular)
 
     static func font(for style: RokuricsTextStyle) -> Font {
         switch style {
@@ -168,83 +154,83 @@ enum MacTypography {
     }
 
     static func chatGreeting(size: CGFloat = chatGreetingSpec.size, weight: Font.Weight = chatGreetingSpec.weight.swiftUIWeight) -> Font {
-        .system(size: size, weight: weight, design: chatGreetingSpec.design.swiftUIDesign)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chatMessage(size: CGFloat = chatMessageSpec.size, weight: Font.Weight = chatMessageSpec.weight.swiftUIWeight) -> Font {
-        .system(size: size, weight: weight, design: chatMessageSpec.design.swiftUIDesign)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chatInput(size: CGFloat = chatInputSpec.size, weight: Font.Weight = chatInputSpec.weight.swiftUIWeight) -> Font {
-        .system(size: size, weight: weight, design: chatInputSpec.design.swiftUIDesign)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
-    // English-only product language uses a serif voice.
+    // JetBrains Mono is the primary Latin face across every product text role.
     static func englishBrand(size: CGFloat = 42, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishLargeTitle(size: CGFloat = 40, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishTitle(size: CGFloat = 34, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishHeadline(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishBody(size: CGFloat = 14, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func englishCaption(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
-    // Chinese copy stays on the native system Chinese font. Do not route Chinese
-    // labels through serif tokens.
+    // JetBrains Mono has no CJK glyphs. Chinese therefore continues through the
+    // native system fallback cascade, which resolves to PingFang on Apple OSes.
     static func chineseLargeTitle(size: CGFloat = 38, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseTitle(size: CGFloat = 28, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseHeadline(size: CGFloat = 17, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseBody(size: CGFloat = 14, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func chineseCaption(size: CGFloat = 12, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
-    // Numbers use the serif display voice with stable digit spacing.
+    // The family is monospaced already; monospacedDigit keeps the intent explicit.
     static func numberLarge(size: CGFloat = 46, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight, design: .serif).monospacedDigit()
+        JetBrainsMonoFont.font(size: size, weight: weight).monospacedDigit()
     }
 
     static func numberTitle(size: CGFloat = 38, weight: Font.Weight = .bold) -> Font {
-        .system(size: size, weight: weight, design: .serif).monospacedDigit()
+        JetBrainsMonoFont.font(size: size, weight: weight).monospacedDigit()
     }
 
     static func numberBody(size: CGFloat = 13, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif).monospacedDigit()
+        JetBrainsMonoFont.font(size: size, weight: weight).monospacedDigit()
     }
 
     static func fingerprint(size: CGFloat = 15, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func technical(size: CGFloat = 13, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        JetBrainsMonoFont.font(size: size, weight: weight)
     }
 
     static func number(size: CGFloat = 38, weight: Font.Weight = .bold) -> Font {
@@ -313,14 +299,31 @@ enum MacTypography {
     static func attributedString(
         for text: String,
         style: MacMixedTypographyStyle,
-        forceTechnical: Bool = false
+        forceTechnical: Bool = false,
+        preservesLaTeXFont: Bool = false
     ) -> AttributedString {
         var result = AttributedString()
 
-        for run in MacMixedTextRun.runs(in: text, forceTechnical: forceTechnical) {
-            var segment = AttributedString(run.value)
-            segment.font = style.font(for: run.kind)
-            result += segment
+        let segments = preservesLaTeXFont
+            ? RokuricsLaTeXFontBoundary.segments(in: text)
+            : [RokuricsLaTeXFontBoundary.Segment(text: text, preservesCurrentFont: false)]
+
+        for boundarySegment in segments {
+            if boundarySegment.preservesCurrentFont {
+                var formula = AttributedString(boundarySegment.text)
+                formula.font = legacyFormulaFont(for: style)
+                result += formula
+                continue
+            }
+
+            for run in MacMixedTextRun.runs(
+                in: boundarySegment.text,
+                forceTechnical: forceTechnical
+            ) {
+                var segment = AttributedString(run.value)
+                segment.font = style.font(for: run.kind)
+                result += segment
+            }
         }
 
         return result
@@ -328,14 +331,37 @@ enum MacTypography {
 
     static func applyMixedScriptFonts(
         to attributedString: inout AttributedString,
-        style: MacMixedTypographyStyle
+        style: MacMixedTypographyStyle,
+        preservesLaTeXFont: Bool = false
     ) {
+        let plainText = String(attributedString.characters)
+        let segments = preservesLaTeXFont
+            ? RokuricsLaTeXFontBoundary.segments(in: plainText)
+            : [RokuricsLaTeXFontBoundary.Segment(text: plainText, preservesCurrentFont: false)]
+
         var cursor = attributedString.startIndex
-        for run in MacMixedTextRun.runs(in: String(attributedString.characters)) {
-            let next = attributedString.characters.index(cursor, offsetBy: run.value.count)
-            attributedString[cursor..<next].font = style.font(for: run.kind)
-            cursor = next
+        for boundarySegment in segments {
+            if boundarySegment.preservesCurrentFont {
+                cursor = attributedString.characters.index(
+                    cursor,
+                    offsetBy: boundarySegment.text.count
+                )
+                continue
+            }
+
+            for run in MacMixedTextRun.runs(in: boundarySegment.text) {
+                let next = attributedString.characters.index(cursor, offsetBy: run.value.count)
+                attributedString[cursor..<next].font = style.font(for: run.kind)
+                cursor = next
+            }
         }
+    }
+
+    private static func legacyFormulaFont(for style: MacMixedTypographyStyle) -> Font {
+        .system(
+            size: style.latin.size,
+            weight: style.latin.weight.swiftUIWeight
+        )
     }
 }
 
@@ -407,27 +433,43 @@ struct RokuricsMixedText: View {
     let text: String
     var style: MacMixedTypographyStyle
     var forceTechnical = false
+    var preservesLaTeXFont = false
 
     init(
         _ text: String,
         style: MacMixedTypographyStyle,
-        forceTechnical: Bool = false
+        forceTechnical: Bool = false,
+        preservesLaTeXFont: Bool = false
     ) {
         self.text = text
         self.style = style
         self.forceTechnical = forceTechnical
+        self.preservesLaTeXFont = preservesLaTeXFont
     }
 
     init(
         _ text: String,
         textStyle: RokuricsTextStyle,
-        forceTechnical: Bool = false
+        forceTechnical: Bool = false,
+        preservesLaTeXFont: Bool = false
     ) {
-        self.init(text, style: MacTypography.mixedStyle(for: textStyle), forceTechnical: forceTechnical)
+        self.init(
+            text,
+            style: MacTypography.mixedStyle(for: textStyle),
+            forceTechnical: forceTechnical,
+            preservesLaTeXFont: preservesLaTeXFont
+        )
     }
 
     var body: some View {
-        Text(MacTypography.attributedString(for: text, style: style, forceTechnical: forceTechnical))
+        Text(
+            MacTypography.attributedString(
+                for: text,
+                style: style,
+                forceTechnical: forceTechnical,
+                preservesLaTeXFont: preservesLaTeXFont
+            )
+        )
     }
 }
 

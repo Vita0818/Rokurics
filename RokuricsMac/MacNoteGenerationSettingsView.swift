@@ -57,7 +57,9 @@ struct MacNoteGenerationSettingsView: View {
         RokuricsSettingsGroup(title: "Provider") {
             RokuricsSettingsPickerRow(title: "AI Provider", selection: providerKindBinding) {
                 ForEach(NoteGenerationProviderKind.allCases) { providerKind in
-                    Text(providerKind.displayName).tag(providerKind)
+                    Text(providerKind.displayName)
+                        .font(MacTypography.body(size: 13, weight: .medium))
+                        .tag(providerKind)
                 }
             }
 
@@ -89,7 +91,9 @@ struct MacNoteGenerationSettingsView: View {
                     RokuricsSettingsDivider()
                     RokuricsSettingsPickerRow(title: RokuricsCopy.text("模型候选", "Candidates"), selection: modelNameBinding) {
                         ForEach(currentModelCandidates, id: \.self) { modelName in
-                            Text(modelName).tag(modelName)
+                            Text(modelName)
+                                .font(MacTypography.body(size: 13, weight: .medium))
+                                .tag(modelName)
                         }
                     }
                 }
@@ -132,7 +136,9 @@ struct MacNoteGenerationSettingsView: View {
             if providerKindDraft == .openAICompatible {
                 RokuricsSettingsPickerRow(title: "Preset", selection: providerPresetBinding) {
                     ForEach(AIProviderPreset.allCases) { preset in
-                        Text(preset.displayName).tag(preset)
+                        Text(preset.displayName)
+                            .font(MacTypography.body(size: 13, weight: .medium))
+                            .tag(preset)
                     }
                 }
                 RokuricsSettingsDivider()

@@ -281,7 +281,13 @@ struct RokuricsMarkdownContentView: View {
     private func blockView(_ block: RokuricsMarkdownBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            RokuricsText(text, token: .sectionTitle, size: level == 1 ? 20 : 17, weight: .semibold)
+            RokuricsText(
+                text,
+                token: .sectionTitle,
+                size: level == 1 ? 20 : 17,
+                weight: .semibold,
+                preservesLaTeXFont: true
+            )
                 .foregroundStyle(RokuricsColors.deepText)
                 .padding(.top, level == 1 ? 2 : 8)
         case .bullet(let text):
@@ -289,13 +295,13 @@ struct RokuricsMarkdownContentView: View {
                 Text("•")
                     .font(RokuricsTypography.body(size: 15, weight: .semibold))
                     .foregroundStyle(RokuricsColors.aqua)
-                RokuricsText(text, token: .body)
+                RokuricsText(text, token: .body, preservesLaTeXFont: true)
                     .foregroundStyle(RokuricsColors.deepText)
                     .lineSpacing(5)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .paragraph(let text):
-            RokuricsText(text, token: .body)
+            RokuricsText(text, token: .body, preservesLaTeXFont: true)
                 .foregroundStyle(RokuricsColors.deepText)
                 .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)

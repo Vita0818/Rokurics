@@ -20,6 +20,13 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Fonts/JetBrainsMono-Regular.ttf</string>
+		<string>Fonts/JetBrainsMono-Medium.ttf</string>
+		<string>Fonts/JetBrainsMono-SemiBold.ttf</string>
+		<string>Fonts/JetBrainsMono-Bold.ttf</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

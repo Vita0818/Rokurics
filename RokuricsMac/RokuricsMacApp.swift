@@ -11,6 +11,10 @@ import SwiftUI
 struct RokuricsMacApp: App {
     @StateObject private var secureReceiverService = Self.makeSecureReceiverService()
 
+    init() {
+        JetBrainsMonoFont.ensureAvailable()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(secureReceiverService: secureReceiverService)

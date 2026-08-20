@@ -11,6 +11,10 @@ import WidgetKit
 
 @main
 struct RokuricsLiveActivitiesBundle: WidgetBundle {
+    init() {
+        JetBrainsMonoFont.ensureAvailable()
+    }
+
     var body: some Widget {
         RecordingLiveActivityWidget()
     }
@@ -22,19 +26,19 @@ struct RecordingLiveActivityWidget: Widget {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(context.state.statusText)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .font(JetBrainsMonoFont.font(size: 15, weight: .semibold))
                         .foregroundStyle(.white)
 
                     Spacer(minLength: 8)
 
                     Text(context.state.elapsedMinuteText)
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .font(JetBrainsMonoFont.font(size: 24, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                 }
 
                 Text(displayTitle(context))
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .font(JetBrainsMonoFont.font(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.72))
                     .lineLimit(1)
             }
@@ -45,19 +49,19 @@ struct RecordingLiveActivityWidget: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Text(context.state.statusText)
-                        .font(.caption.weight(.semibold))
+                        .font(JetBrainsMonoFont.font(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                 }
 
                 DynamicIslandExpandedRegion(.trailing) {
                     Text(context.state.elapsedMinuteText)
-                        .font(.title3.weight(.semibold).monospacedDigit())
+                        .font(JetBrainsMonoFont.font(size: 20, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.white)
                 }
 
                 DynamicIslandExpandedRegion(.bottom) {
                     Text(displayTitle(context))
-                        .font(.caption2.weight(.medium))
+                        .font(JetBrainsMonoFont.font(size: 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.75))
                         .lineLimit(1)
                 }
@@ -66,7 +70,7 @@ struct RecordingLiveActivityWidget: Widget {
                     .foregroundStyle(.red)
             } compactTrailing: {
                 Text(context.state.elapsedMinuteText)
-                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .font(JetBrainsMonoFont.font(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.white)
             } minimal: {
                 Image(systemName: "mic.fill")

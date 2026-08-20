@@ -248,7 +248,9 @@ struct IPhoneSettingsView: View {
         IPhoneSettingsSectionCard(title: RokuricsCopy.text("Debug · 学习库迁移试点（高级限制/诊断）", "Debug · Library Migration Pilot")) {
             Picker(RokuricsCopy.text("高级限制", "Guardrail"), selection: debugPilotModeBinding) {
                 ForEach(CanonicalLibraryMetadataDebugPilotConfiguration.iPhoneRealDeviceDebugPilotModeChoices, id: \.rawValue) { choice in
-                    Text(choice.title).tag(choice.rawValue)
+                    Text(choice.title)
+                        .font(RokuricsTypography.body(size: 14, weight: .medium))
+                        .tag(choice.rawValue)
                 }
             }
             .pickerStyle(.menu)
@@ -883,7 +885,9 @@ private struct IPhoneAISettingsDetailView: View {
         IPhoneSettingsSectionCard(title: "Provider") {
             Picker("AI Provider", selection: $providerKindDraft) {
                 ForEach(NoteGenerationProviderKind.allCases) { kind in
-                    Text(kind.displayName).tag(kind)
+                    Text(kind.displayName)
+                        .font(RokuricsTypography.body(size: 15, weight: .medium))
+                        .tag(kind)
                 }
             }
             .pickerStyle(.segmented)
@@ -898,7 +902,9 @@ private struct IPhoneAISettingsDetailView: View {
             if providerKindDraft == .openAICompatible {
                 Picker("Preset", selection: $presetDraft) {
                     ForEach(AIProviderPreset.iPhoneVisibleCases) { preset in
-                        Text(preset.displayName).tag(preset)
+                        Text(preset.displayName)
+                            .font(RokuricsTypography.body(size: 15, weight: .medium))
+                            .tag(preset)
                     }
                 }
                 .pickerStyle(.menu)

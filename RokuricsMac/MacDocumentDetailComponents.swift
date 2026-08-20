@@ -802,8 +802,16 @@ struct RokuricsMarkdownContentView: View {
     private func blockView(_ block: RokuricsMarkdownBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(text)
-                .font(RokuricsDetailTypography.contentHeading(level: level))
+            Text(
+                MacTypography.attributedString(
+                    for: text,
+                    style: MacMixedTypographyStyle(
+                        size: level == 1 ? 20 : (level == 2 ? 17 : 16),
+                        weight: .semibold
+                    ),
+                    preservesLaTeXFont: true
+                )
+            )
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
                 .padding(.top, level == 1 ? 2 : 8)
         case .bullet(let text):
@@ -811,15 +819,25 @@ struct RokuricsMarkdownContentView: View {
                 Text("•")
                     .font(RokuricsDetailTypography.bodyEmphasis)
                     .foregroundStyle(MacTheme.aqua)
-                Text(text)
-                    .font(RokuricsDetailTypography.body)
+                Text(
+                    MacTypography.attributedString(
+                        for: text,
+                        style: MacMixedTypographyStyle(size: 15, weight: .regular),
+                        preservesLaTeXFont: true
+                    )
+                )
                     .foregroundStyle(MacTheme.deepText(for: colorScheme))
                     .lineSpacing(5)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .paragraph(let text):
-            Text(text)
-                .font(RokuricsDetailTypography.body)
+            Text(
+                MacTypography.attributedString(
+                    for: text,
+                    style: MacMixedTypographyStyle(size: 15, weight: .regular),
+                    preservesLaTeXFont: true
+                )
+            )
                 .foregroundStyle(MacTheme.deepText(for: colorScheme))
                 .lineSpacing(5)
                 .fixedSize(horizontal: false, vertical: true)

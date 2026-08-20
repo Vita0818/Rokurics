@@ -12,6 +12,10 @@ struct RokuricsApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var localNetworkSyncService = LocalNetworkSyncAppService()
 
+    init() {
+        JetBrainsMonoFont.ensureAvailable()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

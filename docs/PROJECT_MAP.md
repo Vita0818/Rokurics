@@ -1,8 +1,22 @@
 # PROJECT_MAP
 
-最近自查日期：2026-08-18
+最近自查日期：2026-08-19
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-08-19 JetBrains Mono 字体文件
+
+- `Fonts/JetBrainsMono-Regular.ttf`、`Medium.ttf`、`SemiBold.ttf`、`Bold.ttf`：JetBrains Mono `v2.304` 官方静态字体，作为 iPhone、Mac 与 Live Activity 共用的 folder resource。
+- `Fonts/JetBrainsMono-OFL.txt`：上游 SIL Open Font License 1.1 原文。
+- `docs/FONT_DEPENDENCY.md`：版本、官方来源、发布包与单文件 SHA-256、许可证、平台注册、中文 fallback、公式边界和 fail-closed 合同。
+- `RokuricsLiveActivitiesShared/JetBrainsMonoFont.swift`：iPhone App 与 Live Activity 共用的 PostScript 名称/weight 最薄映射及 `UIFont` 启动校验。
+- `RokuricsMac/JetBrainsMonoFont.swift`：Mac 对应的 `NSFont` 启动校验与同一 PostScript 映射。
+- `Rokurics/RokuricsTypography.swift`、`RokuricsMac/MacTypography.swift`：所有应用文本 token 的拉丁主字体统一为 JetBrains Mono；中文依赖系统 CJK fallback。
+- `RokuricsShared/RokuricsLaTeXFontBoundary.swift`：只标记四类 LaTeX delimiter span，让现有公式字体不被全局英文替换；不解析或渲染 LaTeX。
+- `RokuricsShared/SharedChatComponents.swift`、双端 Markdown 文档 view：对正文应用 JetBrains Mono，同时跳过公式 span。
+- `Rokurics/Info.plist`、`RokuricsLiveActivities/Info.plist`：`UIAppFonts` 指向 bundle 内 `Fonts/` 相对路径。
+- `RokuricsMac/Info.plist`：Mac 显式 Info.plist，包含 `ATSApplicationFontsPath = Fonts/` 并继续展开版本、bundle ID 与 deployment target。
+- `Rokurics.xcodeproj/project.pbxproj`：根 `Fonts/` folder resource 同时进入三个 product target；Mac `Info.plist` 从 synchronized group membership 排除，Debug/Release 改读显式 plist。
 
 ## 2026-08-18 v0.23 版本配置文件
 
@@ -805,9 +819,11 @@ target 编译边界：
 - `Rokurics.xcodeproj/xcshareddata/xcschemes/RokuricsMac.xcscheme`
   - build/run/test `RokuricsMac`，测试包含 `RokuricsMacTests` 和 `RokuricsMacUITests`。
 - `Rokurics/Info.plist`
-  - 麦克风权限、本地网络权限、Live Activities、后台 audio mode、ATS local networking。
+  - 麦克风权限、本地网络权限、Live Activities、后台 audio mode、ATS local networking，以及四个 JetBrains Mono `UIAppFonts` 相对路径。
 - `RokuricsLiveActivities/Info.plist`
-  - WidgetKit extension。
+  - WidgetKit extension；`UIAppFonts` 注册根 `Fonts/` folder resource 内四个 JetBrains Mono TTF。
+- `RokuricsMac/Info.plist`
+  - Mac app 显式 Info.plist；包含 `ATSApplicationFontsPath = Fonts/`、麦克风说明，并从 build setting 展开 bundle ID、版本和 deployment target。
 - `RokuricsMac/RokuricsMac.entitlements`
   - App Sandbox、network client/server、user-selected executable/read-only、app-scope bookmarks。
 - `.gitignore`
@@ -874,6 +890,7 @@ target 编译边界：
 
 ## 资源目录
 
+- `Fonts/`：JetBrains Mono `v2.304` 官方 Regular/Medium/SemiBold/Bold TTF 与 OFL-1.1 文本；以同一 folder resource 复制到三个 product bundle。
 - `Rokurics/Assets.xcassets/`：iOS app icon、AccentColor、Finder 风格文件夹 icon variants。
 - `RokuricsMac/Assets.xcassets/`：macOS app icon、AccentColor。
 - `Scripts/GeneratedFinderFolderIcons/`：`export_finder_folder_icons.swift` 生成的 512px 备份 PNG。

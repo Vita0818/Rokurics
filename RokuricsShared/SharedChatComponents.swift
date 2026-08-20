@@ -497,10 +497,17 @@ struct ChatMessageBubble: View {
 
     private var markdownText: some View {
         Group {
-            if let attributed = try? AttributedString(markdown: content) {
+            if let attributed = try? AttributedString(
+                markdown: RokuricsLaTeXFontBoundary
+                    .preservingBackslashDelimitersForMarkdown(in: content)
+            ) {
                 Text(scriptAwareAttributedString(attributed))
             } else {
-                RokuricsSharedText(text: content, token: .chatMessage)
+                RokuricsSharedText(
+                    text: content,
+                    token: .chatMessage,
+                    preservesLaTeXFont: true
+                )
             }
         }
     }
@@ -508,10 +515,17 @@ struct ChatMessageBubble: View {
     private func scriptAwareAttributedString(_ attributed: AttributedString) -> AttributedString {
         var result = attributed
         #if os(macOS)
-        MacTypography.applyMixedScriptFonts(to: &result, style: MacTypography.mixedStyle(for: .chatMessage))
+        MacTypography.applyMixedScriptFonts(
+            to: &result,
+            style: MacTypography.mixedStyle(for: .chatMessage),
+            preservesLaTeXFont: true
+        )
         #else
-        let plainText = String(result.characters)
-        result = RokuricsTypography.attributedString(for: plainText, token: .chatMessage)
+        RokuricsTypography.applyMixedScriptFonts(
+            to: &result,
+            token: .chatMessage,
+            preservesLaTeXFont: true
+        )
         #endif
         return result
     }

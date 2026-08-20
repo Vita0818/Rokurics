@@ -1,10 +1,20 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-08-18
+最近一次自查日期：2026-08-19
+
+## 2026-08-19 全局英文 JetBrains Mono 与公式字体保留
+
+iPhone、Mac 与 Live Activity 的应用自绘文本现在统一以官方 JetBrains Mono `v2.304` 为拉丁主字体。仓库固定分发官方 Regular、Medium、SemiBold、Bold 四个静态 TTF，并保留原始 OFL-1.1 文本；版本、上游发布包、PostScript 名称和 SHA-256 见 `docs/FONT_DEPENDENCY.md`。三个 product target 通过同一个根目录 `Fonts/` folder resource 取得完全相同的字体 bytes，不使用系统预装副本、网络下载、另一字体或运行时 fallback provider。
+
+iPhone 与 Live Activity 使用 `UIAppFonts` 注册 `Fonts/JetBrainsMono-*.ttf`；Mac 为承载 `ATSApplicationFontsPath = Fonts/` 从 Xcode 生成 Info.plist 改为显式 `RokuricsMac/Info.plist`。Mac 显式 plist 继续从 build setting 展开 bundle ID、`0.23 (1)`、deployment target 和麦克风说明；签名、entitlements、product name、route、schema、安全链路和 runtime owner 均未改变。三个入口在初始化时校验四个 PostScript 名称，缺失时明确 fatal，不能静默回 system serif、SF Mono、Menlo 或其它字体。
+
+现有 iPhone/Mac 混排层、共享 UI、Picker 文案与 Live Activity 文本都改为 JetBrains Mono。JetBrains Mono 不含 CJK 汉字，中文继续走 Apple 系统 fallback；本机 Core Text 对 `ABC中文` 的实测 glyph run 为 `JetBrainsMono-Regular` + `PingFangSC-Regular`，因此中文仍由苹方显示。SF Symbols 的 `.font(.system(...))` 只保留为图标尺寸/字重控制。
+
+LaTeX 公式是唯一应用文本例外。Markdown 文档和聊天只识别 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]` 边界，并让这些 span 保留变更前的系统/serif 字体；本轮不新增或替换 LaTeX renderer，也不解析公式语义。iOS simulator generic Debug build（含 Live Activity）、iOS device Release build、Mac arm64 Debug/Release build 均已通过；三个 Release product 的 `0.23 (1)`、字体路径、Info.plist 注册键、字体 SHA-256 和 Mac 中文苹方 fallback 已核验。尚未运行 UI 截图回归、真机、完整单元/UI 测试或 archive 验证。
 
 ## 2026-08-18 v0.23 发布准备
 
-双端产品版本已统一为 `0.23 (1)`：`Rokurics`、`RokuricsMac`、`RokuricsLiveActivities` 及其测试 target 的 Debug/Release `MARKETING_VERSION` 均为 `0.23`，`CURRENT_PROJECT_VERSION` 保持 `1`。iPhone 与 Live Activity 继续由各自 Info.plist 展开 build setting，Mac 继续使用 Xcode 生成的 Info.plist；两端设置页的版本缺省文案也同步为 `0.23`。正式 bundle ID、签名团队、deployment target、entitlements、route/schema 和运行时 owner 均未改变。
+双端产品版本已统一为 `0.23 (1)`：`Rokurics`、`RokuricsMac`、`RokuricsLiveActivities` 及其测试 target 的 Debug/Release `MARKETING_VERSION` 均为 `0.23`，`CURRENT_PROJECT_VERSION` 保持 `1`。iPhone 与 Live Activity 继续由各自 Info.plist 展开 build setting；Mac 当时使用 Xcode 生成的 Info.plist，2026-08-19 字体资源接线后改为显式 `RokuricsMac/Info.plist`，仍从相同 build setting 展开版本。两端设置页的版本缺省文案也同步为 `0.23`。正式 bundle ID、签名团队、deployment target、entitlements、route/schema 和运行时 owner 均未改变。
 
 发布构建验证已完成：iOS device Release build、macOS Release build、iOS archive 与 macOS archive 均成功。archive 内 iPhone、Live Activity 和 Mac 的 `CFBundleShortVersionString`/`CFBundleVersion` 都实测为 `0.23`/`1`；两份 archive 的深度代码签名校验通过，iOS 主二进制为 arm64，Mac 主二进制为 arm64+x86_64，三项 dSYM 均存在。Mac archive 同时成功嵌入既有 whisper.cpp helper 与依赖动态库。Release 源码边界仍由 `runtimeConfigurationFromStoredDefaults()` 的非 DEBUG 分支固定返回 `oldKernel`。
 

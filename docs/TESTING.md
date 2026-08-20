@@ -10,6 +10,64 @@
 - 测试 double 只存在于测试 target，不进入 production selection 或 runtime fallback。
 - Review 检查新增 wrapper/adapter/facade 是否仅为官方 API 必需的最薄接线；发现核心能力复制、第二实现或静默降级即判定失败。
 
+## 2026-08-19 JetBrains Mono 字体验证
+
+依赖身份：官方 JetBrains Mono `v2.304`，四个 TTF 与 OFL checksum 见 `docs/FONT_DEPENDENCY.md`。
+
+实际运行并通过：
+
+```sh
+plutil -lint Rokurics/Info.plist RokuricsMac/Info.plist RokuricsLiveActivities/Info.plist
+
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme Rokurics \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /private/tmp/RokuricsFont-iOS2 build
+
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/RokuricsFont-Mac3 build
+
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme Rokurics \
+  -configuration Release -destination 'generic/platform=iOS' \
+  -derivedDataPath /private/tmp/RokuricsFont-iOS-Release build
+
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac \
+  -configuration Release -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/RokuricsFont-Mac-Release build
+
+shasum -a 256 Fonts/JetBrainsMono-Regular.ttf \
+  Fonts/JetBrainsMono-Medium.ttf \
+  Fonts/JetBrainsMono-SemiBold.ttf \
+  Fonts/JetBrainsMono-Bold.ttf \
+  Fonts/JetBrainsMono-OFL.txt
+
+xcrun swiftc RokuricsShared/RokuricsLaTeXFontBoundary.swift \
+  /private/tmp/RokuricsLaTeXBoundaryProbe.swift \
+  -o /private/tmp/RokuricsLaTeXBoundaryProbe
+/private/tmp/RokuricsLaTeXBoundaryProbe
+
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/RokuricsFont-MacTests test \
+  -only-testing:RokuricsMacTests/ChatFeatureTests
+```
+
+验证结果：
+
+- iOS generic simulator Debug build 通过，并同时构建/嵌入 `RokuricsLiveActivities.appex`。
+- Mac arm64 Debug build 通过；沙箱内一次 clean build 因 Xcode SwiftUI macro plugin 的 `sandbox-exec: sandbox_apply: Operation not permitted` 失败，按权限流程在沙箱外重跑后通过。该失败不是源码或字体错误。
+- iOS device Release 与 Mac arm64 Release build 均通过；iPhone app、Live Activity 与 Mac app 三个发布 product 的版本仍为 `0.23 (1)`，Mac Release bundle ID 仍为 `com.Vita0818.RokuricsMac`。
+- iOS app、嵌入的 Live Activity extension 与 Mac app 三个 bundle 都在 `Fonts/` 下包含四个 TTF 和 `JetBrainsMono-OFL.txt`。
+- iOS app/extension 产物 `UIAppFonts` 均列出四个 `Fonts/JetBrainsMono-*.ttf`；Mac 产物为 `ATSApplicationFontsPath = Fonts/`。
+- 产物 `JetBrainsMono-Regular.ttf` SHA-256 与仓库/官方 release 文件相同；其余三档由同一资源 folder copy，仓库 checksum 已逐项核对。
+- `otfinfo` 确认四个 PostScript 名称分别为 `JetBrainsMono-Regular`、`Medium`、`SemiBold`、`Bold`。
+- macOS Core Text 混排探针以 JetBrains Mono 16pt 排版 `ABC中文`，glyph run 字体依次为 `JetBrainsMono-Regular`、`PingFangSC-Regular`。
+- LaTeX boundary probe 通过，覆盖 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]`、escaped dollar、未闭合 delimiter，以及 CommonMark 前后反斜线 delimiter 保真；未闭合 delimiter 保持普通文本。
+- 静态扫描确认普通文本字体入口已统一到 `JetBrainsMonoFont.font`；剩余直接 `.font(.system(...))` 都位于 `Image(systemName:)` 的 SF Symbols 尺寸/字重路径，另有双端 typography 内明确的 LaTeX legacy formula font。
+- `RokuricsMacTests/ChatFeatureTests.swift` 的字体契约断言已从旧 serif/default/monospaced design 标签更新为 `MacTypographyFontFamily.jetBrainsMono`。定向 test command 已尝试，但 Xcode 仍会先编译整个 `RokuricsMacTests` target，并被仓库既有、与本轮无关的 `MacV818LibraryMetadataFakeExecutor` actor 对 global-actor-isolated protocol conformance 编译错误阻断，因此 ChatFeatureTests 未实际执行；app target Debug/Release 构建不受影响。
+
+本轮只修改了上述直接字体契约测试；未有单元测试实际执行，未运行 UI 测试、真机、截图基线或 archive。字体行为主要通过双端 Debug/Release 编译、bundle/Info.plist、PostScript/checksum、Core Text glyph-run、独立 LaTeX probe 与源码边界检查验证。
+
 ## 2026-08-18 v0.23 发布验证
 
 版本设置核验：

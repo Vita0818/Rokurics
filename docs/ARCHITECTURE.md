@@ -11,7 +11,17 @@
 - 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
 - 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
 
-最近自查日期：2026-08-09
+最近自查日期：2026-08-19
+
+## 2026-08-19 字体与公式排版边界
+
+字体依赖是官方 JetBrains Mono `v2.304`，完整 provenance、checksum 和许可证合同见 `docs/FONT_DEPENDENCY.md`。根目录 `Fonts/` 由 Xcode 作为 folder resource 原样复制到 iPhone app、Mac app 和 Live Activity extension；iOS/extension 通过 `UIAppFonts` 注册，Mac 通过 `ATSApplicationFontsPath` 注册。SwiftUI 只调用官方 `Font.custom`，本地 `JetBrainsMonoFont` 仅把现有 Regular/Medium/SemiBold/Bold token 映射到四个官方 PostScript 名称，并在三个入口初始化时用平台字体 API 验证注册结果。
+
+排版流是“JetBrains Mono 拉丁主字体 -> Apple 系统 glyph fallback”。JetBrains Mono 不含 CJK 汉字，因此英文、数字和技术文本由 JetBrains Mono 绘制，中文由 Apple cascade 继续解析为 PingFang；没有嵌入或复制苹方。现有 iPhone/Mac mixed-run 类型继续负责业务层的混排 token 与 AttributedString 属性，但不再选择 serif/default/另一 monospaced 英文字体。SF Symbols 保留 system symbol font，只把 `.font(.system(...))` 用作图标尺寸和 symbol weight。
+
+公式流与普通文本流分开。`RokuricsLaTeXFontBoundary` 只切分 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]` span；Markdown 文档和聊天在这些 span 上保留变更前的系统/serif font attribute，其余字符应用 JetBrains Mono。它不理解命令、AST、数学布局或 glyph shaping，不替代当前公式 renderer。未闭合 delimiter 作为普通文本处理，不猜测或修复公式。
+
+字体缺失是显式配置错误：app/extension 初始化校验任一 PostScript 名称失败即停止，不允许静默切换系统英文字体、另一 JetBrains Mono 版本或网络下载。中文 glyph fallback 与 LaTeX 保留是明确的 script/renderer 边界，不是英文功能 fallback。
 
 ## 2026-08-09 iPhone 上传任务 ownership
 

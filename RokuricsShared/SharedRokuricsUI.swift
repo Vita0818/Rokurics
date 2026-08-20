@@ -128,13 +128,15 @@ struct RokuricsSharedText: View {
     var size: CGFloat?
     var weight: Font.Weight?
     var forceTechnical = false
+    var preservesLaTeXFont = false
 
     var body: some View {
         #if os(macOS)
         RokuricsMixedText(
             text,
             style: MacTypography.mixedStyle(for: token.macStyle),
-            forceTechnical: forceTechnical || token == .technical
+            forceTechnical: forceTechnical || token == .technical,
+            preservesLaTeXFont: preservesLaTeXFont
         )
         #else
         RokuricsText(
@@ -142,7 +144,8 @@ struct RokuricsSharedText: View {
             token: token.iOSToken,
             size: size,
             weight: weight,
-            forceTechnical: forceTechnical || token == .technical
+            forceTechnical: forceTechnical || token == .technical,
+            preservesLaTeXFont: preservesLaTeXFont
         )
         #endif
     }

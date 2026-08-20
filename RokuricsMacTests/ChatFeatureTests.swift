@@ -428,19 +428,19 @@ struct ChatFeatureTests {
         #expect(RokuricsTextStyle.chatMessage != .pageTitle)
         #expect(RokuricsTextStyle.chatInput != .pageTitle)
         #expect(MacTypography.chatGreetingSpec != MacTypography.pageTitleSpec)
-        #expect(MacTypography.chatGreetingSpec.design == .defaultSystem)
+        #expect(MacTypography.chatGreetingSpec.family == .jetBrainsMono)
         #expect(MacTypography.chatGreetingSpec.size == 24)
         #expect(MacTypography.chatGreetingSpec.weight == .semibold)
         #expect(MacTypography.chatInputSpec != MacTypography.pageTitleSpec)
         #expect(MacTypography.chatMessageSpec != MacTypography.pageTitleSpec)
 
         let greetingStyle = MacTypography.mixedStyle(for: .chatGreeting)
-        #expect(greetingStyle.latin.design == .serif)
-        #expect(greetingStyle.chinese.design == .defaultSystem)
-        #expect(greetingStyle.punctuation.design == .defaultSystem)
-        #expect(greetingStyle.number.design == .serif)
+        #expect(greetingStyle.latin.family == .jetBrainsMono)
+        #expect(greetingStyle.chinese.family == .jetBrainsMono)
+        #expect(greetingStyle.punctuation.family == .jetBrainsMono)
+        #expect(greetingStyle.number.family == .jetBrainsMono)
         #expect(greetingStyle.number.usesMonospacedDigits)
-        #expect(greetingStyle.technical.design == .monospaced)
+        #expect(greetingStyle.technical.family == .jetBrainsMono)
     }
 
     @Test func mixedScriptTypographySplitsGreetingByCharacterClass() {
@@ -454,7 +454,7 @@ struct ChatFeatureTests {
         ])
     }
 
-    @Test func mixedScriptTypographyKeepsNumbersSerifAndTechnicalTextMonospaced() {
+    @Test func mixedScriptTypographyKeepsNumbersAndTechnicalTextInJetBrainsMonoRuns() {
         #expect(MacMixedTextRun.runs(in: "录音 2026-05-16 12:46").map(\.kind) == [
             .chinese,
             .punctuation,

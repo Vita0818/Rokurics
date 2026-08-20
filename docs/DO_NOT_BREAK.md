@@ -11,6 +11,16 @@
 - 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
 - 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
 
+## JetBrains Mono 与公式字体禁区（2026-08-19）
+
+- 英文、数字和技术文本的 exact 依赖固定为官方 JetBrains Mono `v2.304`，四个 TTF 的 PostScript 名称与 SHA-256 见 `docs/FONT_DEPENDENCY.md`。不得用 SF Mono、Menlo、system serif/default、另一下载源、另一版本或自制字体替代。
+- `Fonts/` 必须作为同一 folder resource 同时进入 `Rokurics`、`RokuricsMac` 与 `RokuricsLiveActivities`。不得只让开发机系统安装字体后构建成功，也不得删掉 OFL 文本。
+- iPhone 与 Live Activity 的 `UIAppFonts`、Mac 的 `ATSApplicationFontsPath` 必须与 bundle 内 `Fonts/` 路径一致。任一 target 增删字体文件时必须同步注册项、PostScript 启动校验、checksum 文档和产物检查。
+- `JetBrainsMonoFont.ensureAvailable()` 必须 fail closed；不得捕获失败后返回 `.system`、缓存旧字体、从网络下载或继续显示不完整替代 UI。
+- JetBrains Mono 不含 CJK glyph 是预期边界。中文必须继续由 Apple system cascade 解析为 PingFang，不得嵌入苹方、把中文转成图片、用日文字体/另一中文字体替代，或为了“统一”强行修改中文字形。
+- LaTeX 公式不得进入 JetBrains Mono 替换。`$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]` span 必须保留当前公式字体；不得把 delimiter scanner 扩展成第一方 LaTeX parser/renderer，也不得改变既有公式依赖或数学布局。
+- 剩余 `.font(.system(...))` 只能服务 SF Symbols 或明确的公式保留路径。新增普通可见英文文本不得绕过 `RokuricsTypography` / `MacTypography` / `RokuricsSharedText` 使用系统英文字体。
+
 ## iPhone 上传 ownership 与恢复禁区（2026-08-09）
 
 - `activeStatuses`、display snapshot、metadata `uploadStatus` 和 durable ledger state 都是状态投影，不是当前进程 Task ownership。不得再以 `.uploading` / `.inProgress` 单字段阻止真正 owner 的首个 metadata 请求。
