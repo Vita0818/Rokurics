@@ -18,7 +18,7 @@ struct MacRecordingSessionView: View {
             elapsedSeconds: recordingManager.elapsedSeconds,
             isPaused: recordingManager.phase.isPaused,
             errorMessage: recordingManager.phase == .failed ? recordingManager.lastErrorMessage : nil,
-            transcriptText: recordingManager.liveTranscriptText,
+            transcriptText: "",
             pauseButtonTitle: pauseButtonTitle,
             pauseButtonSystemImage: pauseButtonSystemImage,
             canPauseOrResume: canPauseOrResume,

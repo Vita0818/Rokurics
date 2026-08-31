@@ -410,8 +410,7 @@ struct MacAudioInboxListRow: View {
             actionArea(
                 action: action,
                 noteAction: noteAction,
-                regenerateNoteAction: regenerateNoteAction,
-                displaySyncState: displaySyncState
+                regenerateNoteAction: regenerateNoteAction
             )
         }
         .padding(.horizontal, 16)
@@ -501,11 +500,11 @@ struct MacAudioInboxListRow: View {
     private func actionArea(
         action: MacAudioInboxRowAction,
         noteAction: MacAudioInboxNoteRowAction?,
-        regenerateNoteAction: MacAudioInboxNoteRowAction?,
-        displaySyncState: CanonicalDisplaySyncState?
+        regenerateNoteAction: MacAudioInboxNoteRowAction?
     ) -> some View {
         let width = actionGroupWidth(noteAction: noteAction, regenerateNoteAction: regenerateNoteAction)
-        if displaySyncState?.canDisplayAsComplete != true,
+        if !item.hasAudio,
+           !item.isTranscribed,
            let transfer = item.localNetworkReceiveTransferProgress,
            transfer.isVisibleInActionArea {
             StudyRecordingTransferProgressView(transfer: transfer)
@@ -638,10 +637,10 @@ struct MacAudioInboxRowAction: Equatable {
 
     static func resolve(
         for item: MacRecordingInboxItem,
-        displaySyncState: CanonicalDisplaySyncState?,
+        displaySyncState _: CanonicalDisplaySyncState?,
         isTranscribing: Bool
     ) -> MacAudioInboxRowAction {
-        if isTranscribing || item.isTranscriptionActive {
+        if isTranscribing {
             return MacAudioInboxRowAction(label: RokuricsCopy.text("转写中", "Transcribing"), intent: .wait, isEnabled: false)
         }
 
@@ -652,7 +651,7 @@ struct MacAudioInboxRowAction: Equatable {
         return MacAudioInboxRowAction(
             label: RokuricsCopy.text("转写", "Transcribe"),
             intent: .startTranscription,
-            isEnabled: displaySyncState?.canDisplayAsComplete == true
+            isEnabled: item.hasAudio
         )
     }
 }
@@ -676,7 +675,7 @@ struct MacAudioInboxNoteRowAction: Equatable {
             return nil
         }
 
-        if isGenerating || item.isNoteGenerating {
+        if isGenerating {
             return MacAudioInboxNoteRowAction(label: RokuricsCopy.text("生成中", "Generating"), intent: .wait, isEnabled: false)
         }
 
@@ -697,8 +696,7 @@ struct MacAudioInboxNoteRowAction: Equatable {
     ) -> MacAudioInboxNoteRowAction? {
         guard item.isTranscribed,
               item.isNoteGenerated,
-              !isGenerating,
-              !item.isNoteGenerating else {
+              !isGenerating else {
             return nil
         }
 

@@ -80,7 +80,7 @@ git status --short
 - iPhone 录音与上传链路：`RecordingManager`、`AudioFileStore`、`RecordingUploadCoordinator`、`RecordingUploadClient`、`SecureMacUploadClient`。
 - Mac 接收与处理链路：`SecureReceiverService`、`SecureLocalHTTPSServer`、`RequestVerifier`、`MacRecordingFileStore`、`AudioInboxStore`。
 - 学习库与同步链路：`StudyFilingModels`、`StudyLibraryStore`、`StudyLibrarySyncModels`、`StudyLibrarySyncCoordinator`、`ConnectionSyncStateStores`。
-- 转写/笔记/聊天链路：`TranscriptionCoordinator`、`WhisperCppTranscriptionProvider`、`NoteGenerationCoordinator`、`ChatCoordinator`、`RokuricsShared/ChatModels.swift`。
+- 转写/总结链路：`RokuricsAIConfiguration`、`RokuricsAIRuntime`、`RokuricsAISettingsView`、`TranscriptionCoordinator`、`TranscriptStore`、`NoteGenerationCoordinator`、`NoteStore`。独立 AI Chat、Mock、whisper/ffmpeg 与旧 provider-specific clients 已删除；历史生成物 schema 只读兼容必须保留。
 - 安全与文件访问：`KeychainStore`、`MacIdentityManager`、`PairingManager`、`SecurityScopedFileAccess`、`RokuricsMac/RokuricsMac.entitlements`。
 
 ## 文档索引

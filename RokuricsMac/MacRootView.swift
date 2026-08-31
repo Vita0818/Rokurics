@@ -15,12 +15,9 @@ struct MacRootView: View {
     @ObservedObject private var secureReceiverService: SecureReceiverService
     @StateObject private var audioInboxStore = AudioInboxStore()
     @StateObject private var recordingManager = MacRecordingManager()
-    @StateObject private var transcriptionQueue = TranscriptionQueue()
     @StateObject private var transcriptionCoordinator = TranscriptionCoordinator()
     @StateObject private var noteGenerationCoordinator = NoteGenerationCoordinator()
-    @StateObject private var chatCoordinator = ChatCoordinator()
-    @StateObject private var transcriptionSettingsStore = TranscriptionSettingsStore.shared
-    @StateObject private var noteGenerationSettingsStore = NoteGenerationSettingsStore.shared
+    @StateObject private var aiConfigurationStore = RokuricsAIConfigurationStore.shared
     @StateObject private var userProfileStore = MacUserProfileStore()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -40,10 +37,7 @@ struct MacRootView: View {
         } detail: {
             if isSettingsSelected {
                 MacSettingsView(
-                    audioInboxStore: audioInboxStore,
-                    transcriptionQueue: transcriptionQueue,
-                    transcriptionSettingsStore: transcriptionSettingsStore,
-                    noteGenerationSettingsStore: noteGenerationSettingsStore,
+                    aiConfigurationStore: aiConfigurationStore,
                     userProfileStore: userProfileStore
                 )
             } else {
@@ -64,6 +58,7 @@ struct MacRootView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                aiConfigurationStore.reload()
                 secureReceiverService.appBecameActive()
             } else {
                 secureReceiverService.appBecameInactive()
@@ -81,10 +76,6 @@ struct MacRootView: View {
                     isSettingsSelected = false
                     selection = .studyLibrary
                 },
-                onOpenAIChat: {
-                    isSettingsSelected = false
-                    selection = .aiChat
-                },
                 onOpenIPhoneConnection: {
                     isSettingsSelected = false
                     selection = .iPhoneConnection
@@ -94,7 +85,7 @@ struct MacRootView: View {
             MacDashboardView(
                 secureReceiverService: secureReceiverService,
                 audioInboxStore: audioInboxStore,
-                noteGenerationSettingsStore: noteGenerationSettingsStore,
+                aiConfigurationStore: aiConfigurationStore,
                 onOpenIPhoneConnection: {
                     isSettingsSelected = false
                     selection = .iPhoneConnection
@@ -111,8 +102,7 @@ struct MacRootView: View {
                 studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
-                noteGenerationCoordinator: noteGenerationCoordinator,
-                onImportContext: activateAIChatContext
+                noteGenerationCoordinator: noteGenerationCoordinator
             )
         case .studyLibrary:
             MacStudyLibraryView(
@@ -120,15 +110,7 @@ struct MacRootView: View {
                 studyLibraryStore: secureReceiverService.studyLibraryStore,
                 audioInboxStore: audioInboxStore,
                 transcriptionCoordinator: transcriptionCoordinator,
-                noteGenerationCoordinator: noteGenerationCoordinator,
-                onImportContext: activateAIChatContext
-            )
-        case .aiChat:
-            MacAIChatView(
-                chatCoordinator: chatCoordinator,
-                studyLibraryStore: secureReceiverService.studyLibraryStore,
-                userProfileStore: userProfileStore,
-                isSidebarCollapsed: isSidebarCollapsed
+                noteGenerationCoordinator: noteGenerationCoordinator
             )
         }
     }
@@ -137,11 +119,6 @@ struct MacRootView: View {
         columnVisibility == .detailOnly
     }
 
-    private func activateAIChatContext(_ context: ChatContext) {
-        chatCoordinator.importContext(context)
-        isSettingsSelected = false
-        selection = .aiChat
-    }
 }
 
 private struct MacPlaceholderWorkspace: View {

@@ -10,7 +10,7 @@ import SwiftUI
 struct MacDashboardView: View {
     @ObservedObject var secureReceiverService: SecureReceiverService
     @ObservedObject var audioInboxStore: AudioInboxStore
-    @ObservedObject var noteGenerationSettingsStore: NoteGenerationSettingsStore
+    @ObservedObject var aiConfigurationStore: RokuricsAIConfigurationStore
     let onOpenIPhoneConnection: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
@@ -49,7 +49,7 @@ struct MacDashboardView: View {
         case .audioInbox:
             MacAudioInboxCard(audioInboxStore: audioInboxStore, secureReceiverService: secureReceiverService)
         case .aiProcessing:
-            MacAIProcessingCard(noteGenerationSettingsStore: noteGenerationSettingsStore)
+            MacAIProcessingCard(aiConfigurationStore: aiConfigurationStore)
         }
     }
 
@@ -95,7 +95,7 @@ enum MacDashboardCardKind: String, CaseIterable, Identifiable {
     MacDashboardView(
         secureReceiverService: SecureReceiverService(),
         audioInboxStore: AudioInboxStore(),
-        noteGenerationSettingsStore: NoteGenerationSettingsStore(),
+        aiConfigurationStore: RokuricsAIConfigurationStore.shared,
         onOpenIPhoneConnection: {}
     )
 }

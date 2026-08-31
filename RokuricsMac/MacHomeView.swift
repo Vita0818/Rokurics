@@ -10,7 +10,6 @@ import SwiftUI
 struct MacHomeView: View {
     @ObservedObject var recordingManager: MacRecordingManager
     let onOpenStudyLibrary: () -> Void
-    let onOpenAIChat: () -> Void
     let onOpenIPhoneConnection: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -42,7 +41,6 @@ struct MacHomeView: View {
 
                     MacHomeNavigationCard(
                         onOpenStudyLibrary: onOpenStudyLibrary,
-                        onOpenAIChat: onOpenAIChat,
                         onOpenIPhoneConnection: onOpenIPhoneConnection
                     )
                 }
@@ -87,7 +85,6 @@ struct MacHomeView: View {
 
 private struct MacHomeNavigationCard: View {
     let onOpenStudyLibrary: () -> Void
-    let onOpenAIChat: () -> Void
     let onOpenIPhoneConnection: () -> Void
 
     var body: some View {
@@ -97,15 +94,6 @@ private struct MacHomeNavigationCard: View {
                 systemImage: "books.vertical",
                 tint: MacTheme.aqua,
                 action: onOpenStudyLibrary
-            )
-
-            MacHomeNavigationDivider()
-
-            MacHomeNavigationButton(
-                title: RokuricsCopy.text("AI 对话", "AI Chat"),
-                systemImage: "bubble.left.and.bubble.right",
-                tint: MacTheme.mint,
-                action: onOpenAIChat
             )
 
             MacHomeNavigationDivider()
@@ -173,7 +161,6 @@ private struct MacHomeNavigationDivider: View {
     MacHomeView(
         recordingManager: MacRecordingManager(),
         onOpenStudyLibrary: {},
-        onOpenAIChat: {},
         onOpenIPhoneConnection: {}
     )
 }

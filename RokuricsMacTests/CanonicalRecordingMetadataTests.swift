@@ -186,6 +186,7 @@ struct CanonicalRecordingMetadataTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = StudyLibraryStore(rootURL: root, listenForInboxChanges: false)
         try await store.applySyncManifest(Self.studyManifest(title: "Mac Legacy Title"), localDeviceID: "mac-local")
+        let businessUpdatedAt = try #require(store.businessModifiedAt(recordingID: "recording-01"))
         let canonical = MacCanonicalReadRuntimeAdapter.makeCanonicalManifest(Self.studyManifest(title: "Mac Canonical Title"))
         let result = store.configureCanonicalReadRuntime(
             configuration: .explicitGuardedCanonicalRead(allowDivergentGuardedReadForTests: true),
@@ -196,6 +197,14 @@ struct CanonicalRecordingMetadataTests {
         #expect(result.returnedSource == .canonical)
         #expect(store.effectiveStudyItems.first?.title == "Mac Canonical Title")
         #expect(store.allStudyItems.first?.title == "Mac Legacy Title")
+        #expect(SyncTimestampPolicy.matches(
+            try #require(store.effectiveStudyItems.first?.updatedAt),
+            businessUpdatedAt
+        ))
+        #expect(SyncTimestampPolicy.matches(
+            try #require(store.businessModifiedAt(recordingID: "recording-01")),
+            businessUpdatedAt
+        ))
         #expect(result.storeMutated == false)
         #expect(result.syncOrUploadTriggered == false)
         #expect(result.uploadJobCreated == false)

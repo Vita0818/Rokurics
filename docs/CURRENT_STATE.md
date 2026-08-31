@@ -1,6 +1,38 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-08-19
+最近一次自查日期：2026-08-21
+
+## 2026-08-21 设置 Debug UI 清理与 Mac 本机操作解锁
+
+iPhone 与 Mac 设置首页已经移除全部可见 Debug 区、Debug 操作按钮和 production-root 确认弹窗。Mac 设置首页现在只保留个人资料、AI 服务入口和关于；AI 行继续进入 Rokurics 自己的 provider/model 配置。按本轮范围，原有 Debug 配置 key、pilot runtime、proof driver 和底层诊断能力均未删除或改写，只是不再从设置 UI 暴露。
+
+Mac 学习库此前错误地用跨设备 `CanonicalDisplaySyncState.canDisplayAsComplete` 决定本机播放和转写是否可点；因此本机 `audio.m4a` 已真实存在时，只要 peer proof 尚未成为 completed，播放/转写仍会变灰，甚至整组本机操作会被“正在接收”取代。转写和总结按钮还把 `receive.json` 中可跨重启残留的 `queued/transcribing/generating` 当作当前进程仍有 Task，导致异常退出或重启后永久锁住。
+
+现在本机动作与同步展示分离：播放、转写只读取 `MacRecordingInboxItem.hasAudio`（由 Store 扫描真实本机音频文件得到）；查看文字稿、AI 总结和查看旧总结读取既有 transcript/note 路径；只有 `TranscriptionCoordinator.activeTaskRecordingIDs` / `NoteGenerationCoordinator.activeTaskRecordingIDs` 中当前进程真实运行的任务会临时禁用对应按钮。历史 active status 仍保留用于解码、状态展示和诊断，但不再充当并发锁；已有文字稿路径即使伴随中断状态，也可再次总结，实际文件缺失仍由 loader 明确失败。Mac -> iPhone 上传按钮继续要求既有 reconciliation/canonical proof，本轮没有放宽内容传输安全或同步完成语义。
+
+本轮 iOS Simulator Debug 与 Mac arm64 Debug app build 均退出 0；改动 Swift 文件 `swiftc -parse` 通过；`RokuricsAIConfigurationTests` 6/6 通过。尚未运行 UI 截图、真实点击验收、完整测试套件、paired 真机、Release、archive 或 soak。
+
+## 2026-08-20 AI 设置、转写与总结第一版切换
+
+独立 AI Chat 产品入口已从 iPhone 与 Mac 删除：双端首页、Mac sidebar、学习库导入 Chat、聊天页面、会话/上下文/附件存储和 Chat provider runtime 均不再进入产品或编译。历史 `chats/` 用户数据不做自动删除。录音期间原先的模拟实时转写也已删除；Mac 保存录音不再把模拟文本写成可信 `transcribed` artifact，iPhone/Mac 录音 surface 暂不显示实时文字。
+
+Mac 现在只有一套独立的 Rokurics AI 设置，界面与配置行为沿用 Intatis 的 provider-list/detail、active model、connection、model management、Save/Test Provider 和 Open Config 流程，但两个 App 没有运行时连接，也不读取彼此的配置或凭据。Rokurics 使用自己 Application Support 下 owner-only `rokurics.json/jsonc`（或显式 `ROKURICS_CONFIG`）和同一 OpenCode-shaped schema；顶层 `model` 驱动总结，`transcription_model` 驱动转写。支持 JSONC、`{env:...}`、`{file:...}`、provider/model 表、model options 和 compatible/OpenRouter adapter；缺 role、provider、model、credential 或 adapter 时明确失败，不回退 Mock、whisper、另一模型或旧客户端。
+
+`TranscriptionCoordinator` 现在把现有录音文件交给新的 file-transcription runtime；compatible/OpenAI route 使用 owner-only disk-backed multipart `/audio/transcriptions`，OpenRouter route 使用 JSON-base64 `input_audio`，响应必须是 JSON `text`。当前单文件上限与 Intatis 第一版一致为 25 MiB，超限明确失败；旧本地 whisper/ffmpeg/helper、bookmark/settings/runtime、长音频自制 chunking 和 build phase 已物理删除。提交前后比较录音 hash+size，录音变化时拒绝迟到结果；成功仍写既有 `TranscriptStore` JSON/Markdown 和 `receive.json` 字段。
+
+`NoteGenerationCoordinator` 现在读取当前 transcript，使用顶层 `model` 向同一套 provider runtime 发送一次 `tools=[]` 等价的无工具文本请求：Rokurics 内置固定总结 prompt，transcript 被明确包成不可信数据，返回完成且非空的 Markdown 才写既有 `NoteStore`/`summary.json`。请求前后比较 transcript SHA-256，文字稿变化时拒绝迟到结果。旧 Mock、OpenAI-compatible/Anthropic 专用 clients/providers/settings、字符分段总结和本地拼接 runtime 已删除；旧 transcript/note/summary 路径、status 字段、artifact kind、读取 UI和同步解码继续保留。
+
+本轮离线回归 `RokuricsAIConfigurationTests` 6/6 通过，覆盖 JSONC role 解析、owner-only config 写入、缺 transcription role 不借 summary model、无工具总结请求、disk-backed multipart 转写，以及真实 `MacRecordingFileStore` 上的“录音 -> transcript 落盘 -> summary 落盘”。iOS/Mac Debug 与 Release app build 均退出 0，全部改动 Swift 文件 `swiftc -parse`、Info.plist/entitlements `plutil -lint` 和 `git diff --check` 通过。尚未运行真实 provider/credential/network、真实长录音、paired 真机 generated-artifact 同步、UI 截图、完整测试套件、archive 或 soak。
+
+## 2026-08-20 canonicalFullSync 上传业务时钟 CAS 修复
+
+当前 Debug/internal `canonicalFullSync` 曾存在一个与网络、配对、磁盘、文件大小和 Mac receiver 无关的双向上传确定性阻断。同步 reconciliation 正确保存 source 文件 hash、size 和微秒级业务 `sourceModifiedAt`；但 iPhone `RecordingUploadCoordinator` 与 Mac `SecureReceiverService.queueUploadToIPhone` 在真正创建/发送内容任务前，通过 `StudyLibraryStore.item(recordingID:)` 读取当前版本。该 API 返回 `effectiveStudyItems`，canonical read served 时属于 UI/read projection。旧 projection 又把 backing `StudyItemMetadata.updatedAt` 改写为 read snapshot 的 `generatedAt`，所以上传把业务版本时间与观察时间做微秒精确 CAS，必然得到 `sync_source_version_stale` / `proofMismatch`。iPhone 在 `/upload-recording-metadata` 前返回，Mac 在 durable offer enqueue 前返回；连接与同步仍可正常完成。
+
+双端 `StudyLibraryStore` 现在提供只读 `businessModifiedAt(recordingID:)`，只从 legacy/persisted backing `allStudyItems` 取得与 inventory/reconciliation 同源的业务时钟。iPhone 与 Mac 两个上传 CAS 均改读该 API，不再读取 UI/effective projection。canonical recording/library read overlay 同时保留已有 backing item 的业务 `updatedAt`；snapshot `generatedAt` 只作为观察时刻，不再污染已有对象的业务版本。该修复不改 route、wire schema、hash/size、target/source CAS、TLS/HMAC/pinning/timestamp/nonce/body hash、`RequestVerifier`、root containment、no-overwrite 或 completion proof。
+
+共享 `SyncReconciliationStore` 还会在新 inventory 重新产生相同 record ID 时，把历史 `.staleSourceVersion` 按新 plan 重新武装为 incoming pending 状态；只继续携带 `.queued`、`.transferring`、`.transferredAwaitingVerification` 的真实活动进度与 proof。这样已被旧 bug 标 stale 的现有用户数据可通过下一轮同步恢复，不需要删除 ledger、录音或重新配对。
+
+新增/加强回归覆盖：iPhone 在 canonical read 确实 served 后，matching reconciliation 的公开上传主路径仍调用 client 并写 `transferredAwaitingVerification`；fresh reconciliation 会重新武装旧 `.staleSourceVersion`；Mac 在 `canonicalFullSync` + canonical read served 下仍可创建 durable Mac -> iPhone offer；双端 Store canonical overlay 必须保持 backing business `updatedAt`。iPhone `SyncReconciliationClosedLoopTests` 22/22 通过，iPhone canonical Store overlay 1/1 通过，Mac 两项新/加强测试 2/2 通过；iOS generic simulator Debug 与 Mac arm64 Debug build 均退出 0。尚未运行 paired 真机双向文件闭环、完整测试套件、Release、TSan 或 soak。
 
 ## 2026-08-19 全局英文 JetBrains Mono 与公式字体保留
 
@@ -128,13 +160,13 @@ hash cache 本身在问题日志中正常命中：iPhone 54 次、Mac 53 次，�
 
 新增 `Scripts/collect_development_diagnostics.sh`，通过 `devicectl` 收集 iPhone Diagnostics/Sync、Mac local/production Diagnostics/Sync、旧 upload trace，并生成 collection manifest、warning 和逐文件 JSONL 完整性报告。详细流程见 `docs/DEVELOPMENT_DIAGNOSTICS.md`。
 
-## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写保留范围
+## 2026-07-08 历史记录：Mac 首页与共享模拟实时转写（已被 2026-08-20 替代）
 
 当前工作区以 `4a940f6 v9.24` 为基线，只保留 v10.0 的 Mac 首页、本地录音、共享录音界面和模拟实时转写改动。此前临时出现的 no-legacy fallback / canonical runtime / 设置页切换删除 / 测试 source regression 改动已按文件级恢复到 v9.24，不再是当前源码事实。
 
 保留的 v10.0 行为是：Mac 默认进入 `MacHomeView`，侧边栏新增首页入口，点击共享录音 orb 打开 `MacRecordingSessionView` 并启动 `MacRecordingManager` 本地录音。Mac 录音使用 `AVAudioRecorder` 生成 m4a，新增麦克风 entitlement 与 `NSMicrophoneUsageDescription`，保存时复用 `MacRecordingFileStore.saveMetadata`、`temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload` 和 `saveAudio(temporaryFileURL:)`，不新增 route、反向连接、上传协议或收件箱 schema。
 
-实时转写当前仍是模拟 provider：`RokuricsShared/SharedLiveTranscriptionModels.swift` 提供 `RokuricsSimulatedLiveTranscriptionSession`，录音期间发布增量文本给共享录音界面。Mac 保存时把模拟 snapshot 写入 `TranscriptStore` 并更新 transcription status；iPhone `RecordingManager` 也复用同一模拟 session 只用于录音界面显示，不改 `RecordingMetadata`、上传队列、同步 proof 或学习库 schema。该状态不代表真实 OpenAI Realtime、FunASR 或 whisper streaming 已接入。
+该版本当时使用模拟 provider 并把 Mac snapshot 写入 `TranscriptStore`。2026-08-20 已删除对应 source、UI 接线和持久化行为；本段只保留历史，不是当前源码事实。
 
 ## 2026-07-04 Rokurics v9.24 / 双端中英显示文案
 
@@ -1244,10 +1276,10 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 - Mac 请求鉴权：`RequestVerifier` 校验 method、path、content-type、body size、security headers、timestamp、nonce、body hash 和 HMAC。
 - Mac 收件箱：`MacRecordingFileStore` 保存 metadata/audio/receive.json/index/log，支持冲突检测、可恢复上传 session、soft delete/restore/permanent delete。
 - Mac 学习库：`StudyLibraryStore` 支持 receive.json 派生 item、stored item/folder metadata、移动/重命名/颜色/废纸篓、sync manifest。
-- 转写：`TranscriptionCoordinator` 支持 mock 与 whisper.cpp provider；`LongAudioTranscriptionPlanner` 对长录音分块；`TranscriptStore` 写 JSON/Markdown。
+- 转写：`TranscriptionCoordinator` 只调用统一 `RokuricsAIRuntime` 的 exact `transcription_model` file route；`TranscriptStore` 继续写 JSON/Markdown。Mock、whisper 与自制长录音分块已删除。
 - 音频预处理：`AudioPreprocessor` 默认 native conversion，必要时支持 ffmpeg；安全范围书签和 sandbox 诊断有测试覆盖。
-- 笔记生成：`NoteGenerationCoordinator` 支持 mock、OpenAI-compatible、Anthropic Messages；长 transcript 可分段生成并组合最终 note。
-- AI Chat：`ChatCoordinator` 支持会话、上下文导入、附件本地保存、provider 调用、标题生成；共享模型在 `RokuricsShared/ChatModels.swift`。
+- 笔记生成：`NoteGenerationCoordinator` 只使用统一 runtime + 顶层 `model` 做一次无工具总结请求；旧 provider-specific clients 和字符分段拼接已删除。
+- AI Chat：产品入口与 runtime 已删除；历史磁盘数据不自动清理。
 - 本地网络同步：iPhone active 时通过 heartbeat、inventory、metadata/artifact diff、artifact download、缺失 audio upload 和 retry drainer 进行同步；Git-backed sync 默认禁用。Canonical Kernel Completion v1 在双端 canonical manifest 有效时接管 recording metadata diff、audio bootstrap candidate、Mac generated artifact transfer decision、folder/study item metadata/tombstone planning 与 metadata manifest 桥接；缺失或不兼容时回退 legacy plan。
 - Canonical Shadow/Diagnostics：iPhone sync tick 与 Mac `/sync/inventory` 会基于已经加载的旧模型事实生成 canonical manifest、shadow report、inventory coverage、transfer state projection、object projection 和 readiness 诊断；这些报告仅用于观察，不驱动 UI/retry/Mac pending sync/receive 写入；generated artifact/library object 诊断只写 kind、size、hash prefix、object id 和 logical name 等安全字段。
 - Canonical Runtime Kernel Offline：共享 SyncCore 现在有可测试的离线 file/transport/upload/apply/conflict/harness runtime，可验证 root token/path 安全、hash/size 前后校验、no-overwrite/idempotent write、soft tombstone、route allowlist/capability/body hash/idempotency、resumable chunk offset/retry/finalize、generated artifact download/apply、metadata blob apply/send 和 unresolved conflict policy。该能力仍是离线 harness，不是生产 runtime owner。
@@ -1267,8 +1299,7 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 
 ## 当前未完成或占位能力
 
-- `TranscriptionQueue` 当前是占位状态对象，真实任务调度在 `TranscriptionCoordinator`。
-- `TranscriptionProviderKind` 中存在 `mlxWhisper`、`localHTTP`、`cloudAPI`、`customCommand` 等 provider kind，但 `TranscriptionCoordinator.currentProvider()` 对这些路径抛 unsupported。
+- 旧 `TranscriptionQueue`、provider kind 与 unsupported 占位 backend 已删除；真实任务由 `TranscriptionCoordinator` 持有并可取消/drain。
 - Git-backed study sync 默认禁用；相关 store、endpoint 和测试存在，但不是默认运行路径。
 - UI tests 主要是 Xcode 模板级 launch/performance，尚未覆盖真实录音、配对、上传、转写、笔记、学习库和聊天流程。
 - CI/自动化构建入口未发现；当前确认的是 Xcode scheme 和本地命令。
@@ -1291,7 +1322,7 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 - Canonical v8.1 Read-Only Transport Probe Live Wiring 仍是 default-off diagnostics/live probe seam：只有 explicit internal config 才能发送 marked signed read-only request；marked mutating/unknown/default-disabled route 必须 blocked。该 probe 不新增真实 route、不绕过 `RequestVerifier`、不把 manifestHash 当 auth、不写 receive.json/upload session/study store/pending sync，也不能解释为 production cutover、runtime switch、legacy replacement、upload migration 或 apply migration。
 - 本地网络同步仍需真机验证：Mac 手动同步依赖 iPhone 前台 heartbeat，peer metadata-only/missing 会按 inventory 补音频，retry drainer 依赖 scheduler gate 和 backoff。
 - 同步 UI 卡顿风险已降低但未消除：audio SHA256 已加 checksum cache/off-main 计算，学习库 manifest、录音 reload、Mac inbox 扫描和诊断写入仍可能成为大库瓶颈。
-- Mac build phase 和 `Scripts/embed_whisper_helper.sh` 依赖仓库外本地 whisper.cpp 产物或 `WHISPER_CPP_ROOT`；不同机器可能无法直接构建 Mac app。
+- Mac 已无仓库外 whisper.cpp/ffmpeg/helper build 依赖；AI 运行需要用户自己的有效 config、credential、provider 和网络。
 - iPhone/Mac 双端有部分同名但不完全一致的模型文件，改同步协议或存储 schema 时容易单端遗漏。
 - 转写、笔记、聊天会写 Application Support / Documents 下真实用户数据；调试时不能随意删除、重置或迁移这些目录。
 - 文档中不记录完整本机私有路径、密钥、指纹或 shared secret；源码和脚本中如已有本机路径，只在文档中抽象描述。
@@ -1304,7 +1335,7 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 3. 若继续推进 shadow migration，下一步应先在真实设备上观察 `recordingMetadata` 单域 shadow diagnostics，确认 no-op/apply/send/conflict/tombstone/equivalence 与 legacy 行为一致；不应直接 cutover。
 4. 若继续推进 execution shadow，下一步应先做 controlled real-root execution/canary 设计、人工批准、rollback 和真实设备验证计划；不要把本轮 shadow copy/probe 结果直接接入 production runtime、UI canonical read 或 legacy retirement。
 5. 若继续推进 `libraryMetadata` pilot，下一步只能在真实设备/真实数据上观察 v8.17 read-side parallel diff 与 v8.16 staged write-side evidence 的关联，确认 divergence 为 0、fallback 可用、diagnostics redacted、Mac report-only 边界稳定；不得直接切 UI/read path、默认启用 guarded read、删除 legacy 或扩到其它 domain。
-6. 为 Mac build phase 补充可复现的 whisper.cpp 依赖说明或 CI 友好方案，但不要在未确认前改脚本。
+6. 为真实 provider 增加 opt-in smoke 与长录音产品决策；超过当前 25 MiB 上限时继续明确失败，不能恢复旧 whisper/chunk fallback。
 7. 若继续改同步协议，先补齐 iPhone/Mac 双端模型兼容测试，再改实现。
 8. 若继续改 UI，优先补关键 flow 的 UI/manual 验证记录。
 
@@ -1312,7 +1343,7 @@ git root: /Users/vita/Vitemis/Vela/Rokurics
 
 - 高可信：target/scheme、入口文件、核心 Swift 类型、路径约定、测试目录、已存在 build phase、权限配置。
 - 中等可信：手动验证矩阵、推荐命令；部分命令未实际运行构建/测试，只依据 Xcode scheme 和配置推导。
-- 需要后续确认：CI 环境、具体可用 iOS simulator 名称、whisper.cpp 依赖安装约定、视觉诊断资产生命周期。
+- 需要后续确认：CI 环境、具体可用 iOS simulator 名称、真实 provider/model 可用性与计费、长录音限制、视觉诊断资产生命周期。
 
 ## 源码与旧文档冲突记录
 

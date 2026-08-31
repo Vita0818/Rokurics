@@ -44,7 +44,6 @@ struct MacStudyLibraryView: View {
     @ObservedObject var audioInboxStore: AudioInboxStore
     @ObservedObject var transcriptionCoordinator: TranscriptionCoordinator
     @ObservedObject var noteGenerationCoordinator: NoteGenerationCoordinator
-    let onImportContext: (ChatContext) -> Void
 
     @State private var navigationState = MacStudyLibraryNavigationState()
     @State private var selectedTranscriptItem: MacRecordingInboxItem?
@@ -195,9 +194,6 @@ struct MacStudyLibraryView: View {
                     noteGenerationCoordinator.startNoteGeneration(recordingID: detailItem.id)
                     statusMessage = RokuricsCopy.text("笔记任务已提交", "Note queued")
                 },
-                onImportToChat: {
-                    importRecordingToChat(detailItem)
-                },
                 canUploadToIPhone: secureReceiverService.canUploadSelectedVersionToIPhone(recordingID: detailItem.id),
                 onUploadToIPhone: {
                     queueUploadToIPhone(detailItem)
@@ -247,12 +243,6 @@ struct MacStudyLibraryView: View {
             }
                 .help(newFolderHelpText)
                 .accessibilityLabel(RokuricsCopy.text("新建文件夹", "New Folder"))
-
-            MacStudyToolbarIconButton(systemImage: "bubble.left.and.bubble.right", isEnabled: true) {
-                importCurrentBrowseContext()
-            }
-            .help(RokuricsCopy.text("导入 AI 对话上下文", "Import to AI Chat"))
-            .accessibilityLabel(RokuricsCopy.text("导入 AI 对话上下文", "Import to AI Chat"))
 
             MacStudyToolbarIconButton(systemImage: "trash", isEnabled: true) {
                 isTrashSheetPresented = true
@@ -335,9 +325,6 @@ struct MacStudyLibraryView: View {
                                             onGenerateNote: {
                                                 noteGenerationCoordinator.startNoteGeneration(recordingID: inboxItem.id)
                                             },
-                                            onImportToChat: {
-                                                importStudyItemToChat(item.mergedWithCurrentInboxItem(inboxItem))
-                                            },
                                             onUploadToIPhone: {
                                                 queueUploadToIPhone(inboxItem)
                                             },
@@ -354,9 +341,6 @@ struct MacStudyLibraryView: View {
                                     } else {
                                         MacStudyStandaloneNoteCard(
                                             item: item,
-                                            onImportToChat: {
-                                                importStudyItemToChat(item)
-                                            },
                                             onRename: { title in
                                                 renameStudyItem(itemID: item.itemID, to: title)
                                             }
@@ -498,23 +482,6 @@ struct MacStudyLibraryView: View {
         } catch {
             operationErrorMessage = error.localizedDescription
         }
-    }
-
-    private func importCurrentBrowseContext() {
-        let exporter = StudyLibraryContextExporter(rootURL: studyLibraryStore.libraryRootURL)
-        let context = exporter.export(items: studyLibraryStore.effectiveStudyItems, path: navigationState.browsePath)
-        onImportContext(context)
-    }
-
-    private func importStudyItemToChat(_ item: StudyItemMetadata) {
-        let exporter = StudyLibraryContextExporter(rootURL: studyLibraryStore.libraryRootURL)
-        onImportContext(exporter.export(item: item))
-    }
-
-    private func importRecordingToChat(_ item: MacRecordingInboxItem) {
-        let metadata = studyLibraryStore.item(recordingID: item.id)?.mergedWithCurrentInboxItem(item)
-            ?? StudyItemMetadata.defaultMetadata(for: item)
-        importStudyItemToChat(metadata)
     }
 
     private func renameFolder(_ folder: StudyBrowseFolder, to rawName: String) {
@@ -1192,7 +1159,6 @@ private final class SecondaryClickCaptureView: NSView {
 
 private struct MacStudyStandaloneNoteCard: View {
     let item: StudyItemMetadata
-    let onImportToChat: () -> Void
     let onRename: (String) -> Void
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1235,14 +1201,6 @@ private struct MacStudyStandaloneNoteCard: View {
             }
 
             Spacer(minLength: 10)
-
-            MacStudyCardIconButton(
-                systemImage: "bubble.left.and.bubble.right",
-                isEnabled: true,
-                tint: MacTheme.aqua,
-                helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
-                action: onImportToChat
-            )
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1268,7 +1226,6 @@ private struct MacStudyRecordingCard: View {
     let onPlay: () -> Void
     let onTranscribe: () -> Void
     let onGenerateNote: () -> Void
-    let onImportToChat: () -> Void
     let onUploadToIPhone: () -> Void
     let onOpenDetail: () -> Void
     let onRename: (String) -> Void
@@ -1341,16 +1298,17 @@ private struct MacStudyRecordingCard: View {
     }
 
     private var canUseTranscriptionButton: Bool {
-        displayAudioAvailable && !isTranscribing && !item.isTranscriptionActive
+        item.hasAudio && !isTranscribing
     }
 
     private var canUseNoteButton: Bool {
-        item.canStartNoteGeneration && !isGeneratingNote
+        item.isTranscribed && !isGeneratingNote
     }
 
     @ViewBuilder
     private var actionArea: some View {
-        if !displayAudioAvailable,
+        if !item.hasAudio,
+           !item.isTranscribed,
            let transfer = item.localNetworkReceiveTransferProgress,
            transfer.isVisibleInActionArea {
             StudyRecordingTransferProgressView(transfer: transfer)
@@ -1358,7 +1316,7 @@ private struct MacStudyRecordingCard: View {
             HStack(spacing: 8) {
                 MacStudyCardIconButton(
                     systemImage: "play.fill",
-                    isEnabled: displayAudioAvailable,
+                    isEnabled: item.hasAudio,
                     tint: MacTheme.leaf,
                     helpText: RokuricsCopy.text("播放录音", "Play Recording"),
                     action: onPlay
@@ -1368,7 +1326,7 @@ private struct MacStudyRecordingCard: View {
                     systemImage: item.isTranscribed ? "arrow.clockwise" : "waveform.and.magnifyingglass",
                     isEnabled: canUseTranscriptionButton,
                     tint: MacTheme.aqua,
-                    helpText: item.isTranscribed ? RokuricsCopy.text("重新转写", "Transcribe Again") : transcriptionHelpText,
+                    helpText: transcriptionHelpText,
                     action: onTranscribe
                 )
 
@@ -1376,7 +1334,7 @@ private struct MacStudyRecordingCard: View {
                     systemImage: item.isNoteGenerated ? "sparkles.rectangle.stack" : "sparkles",
                     isEnabled: canUseNoteButton,
                     tint: MacTheme.mint,
-                    helpText: item.isNoteGenerated ? RokuricsCopy.text("重新总结", "Summarize Again") : noteHelpText,
+                    helpText: noteHelpText,
                     action: onGenerateNote
                 )
 
@@ -1390,13 +1348,6 @@ private struct MacStudyRecordingCard: View {
                     action: onUploadToIPhone
                 )
 
-                MacStudyCardIconButton(
-                    systemImage: "bubble.left.and.bubble.right",
-                    isEnabled: true,
-                    tint: MacTheme.aqua,
-                    helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
-                    action: onImportToChat
-                )
             }
         }
     }
@@ -1406,15 +1357,19 @@ private struct MacStudyRecordingCard: View {
     }
 
     private var transcriptionHelpText: String {
-        if isTranscribing || item.isTranscriptionActive {
+        if isTranscribing {
             return RokuricsCopy.text("转写中", "Transcribing")
+        }
+
+        if item.isTranscribed {
+            return RokuricsCopy.text("重新转写", "Transcribe Again")
         }
 
         return item.transcriptionActionText
     }
 
     private var noteHelpText: String {
-        if isGeneratingNote || item.isNoteGenerating {
+        if isGeneratingNote {
             return RokuricsCopy.text("总结中", "Summarizing")
         }
 
@@ -1574,7 +1529,6 @@ private struct MacStudyRecordingDetailPage: View {
     let onTranscribe: () -> Void
     let onViewNote: () -> Void
     let onGenerateNote: () -> Void
-    let onImportToChat: () -> Void
     let canUploadToIPhone: Bool
     let onUploadToIPhone: () -> Void
     let onMoveToTrash: () -> Void
@@ -1604,7 +1558,7 @@ private struct MacStudyRecordingDetailPage: View {
                     MacStudyDetailActionButton(
                         title: noteActionTitle,
                         systemImage: item.isNoteGenerated ? "sparkles.rectangle.stack" : "sparkles",
-                        isEnabled: item.canStartNoteGeneration && !isGeneratingNote,
+                        isEnabled: item.isTranscribed && !isGeneratingNote,
                         action: onGenerateNote
                     )
 
@@ -1668,14 +1622,6 @@ private struct MacStudyRecordingDetailPage: View {
             )
 
             MacStudySheetCircularIconButton(
-                systemImage: "bubble.left.and.bubble.right",
-                tint: MacTheme.aqua,
-                helpText: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
-                role: nil,
-                action: onImportToChat
-            )
-
-            MacStudySheetCircularIconButton(
                 systemImage: "trash",
                 tint: MacTheme.coral,
                 helpText: RokuricsCopy.text("移入废纸篓", "Move to Trash"),
@@ -1695,15 +1641,11 @@ private struct MacStudyRecordingDetailPage: View {
     }
 
     private var canUseTranscriptionButton: Bool {
-        displayAudioAvailable && !isTranscribing && !item.isTranscriptionActive
-    }
-
-    private var displayAudioAvailable: Bool {
-        displaySyncState?.canDisplayAsComplete == true
+        item.hasAudio && !isTranscribing
     }
 
     private var transcriptionActionTitle: String {
-        if isTranscribing || item.isTranscriptionActive {
+        if isTranscribing {
             return RokuricsCopy.text("转写中", "Transcribing")
         }
 
@@ -1715,7 +1657,7 @@ private struct MacStudyRecordingDetailPage: View {
     }
 
     private var noteActionTitle: String {
-        if isGeneratingNote || item.isNoteGenerating {
+        if isGeneratingNote {
             return RokuricsCopy.text("总结中", "Summarizing")
         }
 
@@ -1754,11 +1696,11 @@ enum MacStudyRecordingDetailDisplayModel {
 
     static func advancedFileStatusRows(
         for item: MacRecordingInboxItem,
-        displaySyncState: CanonicalDisplaySyncState?
+        displaySyncState _: CanonicalDisplaySyncState?
     ) -> [RokuricsDocumentMetadataRow] {
         [
             RokuricsDocumentMetadataRow("recordingID", item.id, isTechnical: true),
-            RokuricsDocumentMetadataRow("audio", displaySyncState?.canDisplayAsComplete == true ? RokuricsCopy.text("可用", "Available") : RokuricsCopy.text("缺失", "Missing")),
+            RokuricsDocumentMetadataRow("audio", item.hasAudio ? RokuricsCopy.text("可用", "Available") : RokuricsCopy.text("缺失", "Missing")),
             RokuricsDocumentMetadataRow("audio path", item.audioRelativePath, isTechnical: true),
             RokuricsDocumentMetadataRow("transcript", transcriptStatusText(for: item)),
             RokuricsDocumentMetadataRow("transcript path", item.transcriptMarkdownRelativePath ?? item.transcriptRelativePath, isTechnical: true),

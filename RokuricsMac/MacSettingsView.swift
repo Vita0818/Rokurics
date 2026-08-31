@@ -9,22 +9,11 @@ import AppKit
 import SwiftUI
 
 struct MacSettingsView: View {
-    @ObservedObject var audioInboxStore: AudioInboxStore
-    @ObservedObject var transcriptionQueue: TranscriptionQueue
-    @ObservedObject var transcriptionSettingsStore: TranscriptionSettingsStore
-    @ObservedObject var noteGenerationSettingsStore: NoteGenerationSettingsStore
+    @ObservedObject var aiConfigurationStore: RokuricsAIConfigurationStore
     @ObservedObject var userProfileStore: MacUserProfileStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var activeDetail: MacSettingsDetail?
     @State private var storageOpenError: String?
-#if DEBUG
-    @AppStorage(CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotModeKey)
-    private var libraryMetadataDebugPilotMode = CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotOffMode
-    @State private var pendingProductionRootPilotMode: String?
-    @State private var isProductionRootPilotConfirmationPresented = false
-    @State private var isCanonicalSwitchBackProofRunning = false
-    @State private var canonicalSwitchBackProofSummary: CanonicalSwitchBackProofUISummary?
-#endif
 
     private var versionText: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.23"
@@ -69,26 +58,6 @@ struct MacSettingsView: View {
         } message: {
             Text(storageOpenError ?? "")
         }
-#if DEBUG
-        .alert(RokuricsCopy.text("确认真实学习库 metadata 写入", "Confirm Real Metadata Write"), isPresented: $isProductionRootPilotConfirmationPresented) {
-            Button(RokuricsCopy.text("取消", "Cancel"), role: .cancel) {
-                pendingProductionRootPilotMode = nil
-            }
-            Button(RokuricsCopy.text("确认开启", "Enable"), role: .destructive) {
-                libraryMetadataDebugPilotMode = CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotExecuteProductionRootN1Mode
-                UserDefaults.standard.set(
-                    true,
-                    forKey: CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotProductionRootConfirmedKey
-                )
-                pendingProductionRootPilotMode = nil
-            }
-        } message: {
-            Text(RokuricsCopy.text(
-                "这会允许写真实学习库 metadata 根；仍只限 libraryMetadata，仍只限 N=1，仍保留 rollback 与 legacy fallback。这是第一次真实写。",
-                "This allows one real library metadata root write. It is still limited to libraryMetadata, N=1, rollback, and legacy fallback."
-            ))
-        }
-#endif
     }
 
     private var settingsHome: some View {
@@ -118,229 +87,23 @@ struct MacSettingsView: View {
 
     private var settingsList: some View {
         VStack(spacing: 16) {
-            transcriptionGroup
             aiGroup
-#if DEBUG
-            debugCanonicalKernelSwitchGroup
-            debugLibraryMetadataPilotGroup
-#endif
             aboutGroup
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var transcriptionGroup: some View {
-        MacSettingsHomeGroup(title: MacSettingsSection.transcription.title) {
-            MacSettingsHomeRow(
-                title: MacSettingsHomeSummary.transcriptionRows[0],
-                valueText: transcriptionSettingsStore.selectedProviderDisplayName
-            ) {
-                activeDetail = .transcriptionProvider
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsHomeRow(
-                title: MacSettingsHomeSummary.transcriptionRows[1],
-                valueText: MacSettingsHomeSummary.transcriptionModelSummary(
-                    providerKind: transcriptionSettingsStore.selectedProviderKind,
-                    whisperConfiguration: transcriptionSettingsStore.whisperConfiguration
-                )
-            ) {
-                activeDetail = .transcriptionModel
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsHomeRow(
-                title: MacSettingsHomeSummary.transcriptionRows[2],
-                valueText: transcriptionSettingsStore.lastValidationStatus.displayText
-            ) {
-                activeDetail = .transcriptionAuthorization
-            }
-        }
     }
 
     private var aiGroup: some View {
         MacSettingsHomeGroup(title: MacSettingsSection.ai.title) {
             MacSettingsHomeRow(
                 title: MacSettingsHomeSummary.aiRows[0],
-                valueText: noteGenerationSettingsStore.selectedProviderDisplayName
+                valueText: aiConfigurationStore.catalog.selectedProvider?.title
+                    ?? RokuricsCopy.text("未配置", "Not configured")
             ) {
-                activeDetail = .aiProvider
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsHomeRow(
-                title: MacSettingsHomeSummary.aiRows[1],
-                valueText: MacSettingsHomeSummary.aiModelSummary(
-                    providerKind: noteGenerationSettingsStore.selectedProviderKind,
-                    openAIConfiguration: noteGenerationSettingsStore.openAIConfiguration,
-                    anthropicConfiguration: noteGenerationSettingsStore.anthropicConfiguration
-                )
-            ) {
-                activeDetail = .aiModel
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsHomeRow(title: MacSettingsHomeSummary.aiRows[2], valueText: RokuricsCopy.text("查看", "View")) {
-                activeDetail = .aiAPI
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsHomeRow(title: MacSettingsHomeSummary.aiRows[3], valueText: RokuricsCopy.text("查看", "View")) {
-                activeDetail = .aiTest
+                activeDetail = .aiConfiguration
             }
         }
     }
-
-#if DEBUG
-    private var debugCanonicalKernelSwitchGroup: some View {
-        MacSettingsHomeGroup(title: RokuricsCopy.text("Debug · 同步内核", "Debug · Sync Kernel")) {
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("状态", "Status"),
-                bodyText: debugCanonicalKernelSwitchStatusText
-            )
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("安全边界", "Safety"),
-                bodyText: CanonicalKernelSwitchConfiguration.safetyText
-            )
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("Legacy 兜底", "Legacy Fallback"),
-                bodyText: CanonicalKernelSwitchConfiguration.emergencyOldKernelSwitchBackText
-            )
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("诊断文件", "Diagnostics File"),
-                bodyText: CanonicalKernelSwitchConfiguration.diagnosticsPathText
-            )
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugActionRow(
-                title: RokuricsCopy.text("运行新旧内核切回证明", "Run Switchback Proof"),
-                valueText: canonicalSwitchBackProofActionText,
-                systemImage: isCanonicalSwitchBackProofRunning ? "hourglass" : "play.circle.fill",
-                isDisabled: isCanonicalSwitchBackProofRunning
-            ) {
-                runCanonicalSwitchBackProof()
-            }
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("切回证明", "Switchback Proof"),
-                bodyText: canonicalSwitchBackProofSummaryText
-            )
-        }
-    }
-
-    private var debugLibraryMetadataPilotGroup: some View {
-        MacSettingsHomeGroup(title: RokuricsCopy.text("Debug · 学习库迁移试点（高级限制/诊断）", "Debug · Library Migration Pilot")) {
-            Picker(RokuricsCopy.text("高级限制", "Guardrail"), selection: debugPilotModeBinding) {
-                ForEach(CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotModeChoices, id: \.rawValue) { choice in
-                    Text(choice.title)
-                        .font(MacTypography.body(size: 13, weight: .medium))
-                        .tag(choice.rawValue)
-                }
-            }
-            .pickerStyle(.menu)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 11)
-            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("诊断文件", "Diagnostics File"),
-                bodyText: CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDiagnosticsPathText
-            )
-
-            MacSettingsHomeDivider()
-
-            MacSettingsDebugTextRow(
-                title: RokuricsCopy.text("生效范围", "Scope"),
-                bodyText: RokuricsCopy.text(
-                    "专项高级开关只能降级、阻断或生成诊断，不能越过固定 canonicalFullSync runtime，不能单独打开 productionRoot write。默认 off；Release 不显示此区。",
-                    "This debug switch can only downgrade, block, or write diagnostics. It cannot bypass canonicalFullSync or independently enable productionRoot writes."
-                )
-            )
-        }
-    }
-
-    private var debugCanonicalKernelSwitchStatusText: String {
-        let result = CanonicalKernelSwitchConfiguration.runtimeConfigurationFromStoredDefaults().resolve()
-        if result.isBlocked {
-            let blockers = result.blockers.map(\.rawValue).joined(separator: ", ")
-            return "blocked · \(blockers)"
-        }
-        return "\(result.effectiveMode.displayTitle) · owner=\(result.ownerState.rawValue) · legacy fallback retained"
-    }
-
-    private var debugPilotModeBinding: Binding<String> {
-        Binding {
-            CanonicalLibraryMetadataDebugPilotConfiguration.normalizedMacRealDeviceDebugPilotMode(libraryMetadataDebugPilotMode)
-        } set: { newValue in
-            let normalized = CanonicalLibraryMetadataDebugPilotConfiguration.normalizedMacRealDeviceDebugPilotMode(newValue)
-            if normalized == CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotExecuteProductionRootN1Mode {
-                pendingProductionRootPilotMode = normalized
-                isProductionRootPilotConfirmationPresented = true
-            } else {
-                libraryMetadataDebugPilotMode = normalized
-                UserDefaults.standard.set(
-                    false,
-                    forKey: CanonicalLibraryMetadataDebugPilotConfiguration.macRealDeviceDebugPilotProductionRootConfirmedKey
-                )
-            }
-        }
-    }
-
-    private var canonicalSwitchBackProofActionText: String {
-        if isCanonicalSwitchBackProofRunning {
-            return RokuricsCopy.text("运行中", "Running")
-        }
-        return canonicalSwitchBackProofSummary?.status.rawValue ?? RokuricsCopy.text("未运行", "Not run")
-    }
-
-    private var canonicalSwitchBackProofSummaryText: String {
-        if isCanonicalSwitchBackProofRunning {
-            return RokuricsCopy.text(
-                "running · 使用真实库副本创建 temp clone，不直接写当前生产库，不重启 receiver，不改 route，不触发 transcription/note。",
-                "running · Uses a real-library temp clone; does not write production, restart receiver, change routes, or trigger transcription/note."
-            )
-        }
-        guard let summary = canonicalSwitchBackProofSummary else {
-            return RokuricsCopy.text(
-                "未运行 · 使用真实库副本；proof 只在 safe temp clone 上执行，不直接写当前生产库，不改变当前 canonicalFullSync 运行时。",
-                "Not run · Uses a real-library temp clone only; no production write and no canonicalFullSync runtime change."
-            )
-        }
-        return summary.displayText
-    }
-
-    private func runCanonicalSwitchBackProof() {
-        guard !isCanonicalSwitchBackProofRunning else { return }
-        isCanonicalSwitchBackProofRunning = true
-        Task {
-            let summary = await MacCanonicalSwitchBackProofDriver().run()
-            await MainActor.run {
-                canonicalSwitchBackProofSummary = summary
-                isCanonicalSwitchBackProofRunning = false
-            }
-        }
-    }
-#endif
 
     private var aboutGroup: some View {
         MacSettingsHomeGroup(title: MacSettingsSection.about.title) {
@@ -367,20 +130,8 @@ struct MacSettingsView: View {
         switch detail {
         case .profile:
             EmptyView()
-        case .transcriptionProvider:
-            MacTranscriptionSettingsView(settingsStore: transcriptionSettingsStore, mode: .provider)
-        case .transcriptionModel:
-            MacTranscriptionSettingsView(settingsStore: transcriptionSettingsStore, mode: .model)
-        case .transcriptionAuthorization:
-            MacTranscriptionSettingsView(settingsStore: transcriptionSettingsStore, mode: .authorizationAndTest)
-        case .aiProvider:
-            MacNoteGenerationSettingsView(settingsStore: noteGenerationSettingsStore, mode: .provider)
-        case .aiModel:
-            MacNoteGenerationSettingsView(settingsStore: noteGenerationSettingsStore, mode: .model)
-        case .aiAPI:
-            MacNoteGenerationSettingsView(settingsStore: noteGenerationSettingsStore, mode: .api)
-        case .aiTest:
-            MacNoteGenerationSettingsView(settingsStore: noteGenerationSettingsStore, mode: .test)
+        case .aiConfiguration:
+            RokuricsAISettingsView(store: aiConfigurationStore)
         case .privacyPolicy:
             privacyPolicyDetail
         case .copyright:
@@ -436,7 +187,6 @@ struct MacSettingsView: View {
 
 enum MacSettingsSection: String, CaseIterable {
     case userProfile
-    case transcription
     case ai
     case about
 
@@ -444,8 +194,6 @@ enum MacSettingsSection: String, CaseIterable {
         switch self {
         case .userProfile:
             return RokuricsCopy.text("用户资料", "Profile")
-        case .transcription:
-            return RokuricsCopy.text("转写", "Transcription")
         case .ai:
             return "AI"
         case .about:
@@ -455,67 +203,18 @@ enum MacSettingsSection: String, CaseIterable {
 }
 
 enum MacSettingsHomeSummary {
-    static let sectionOrder: [MacSettingsSection] = [.userProfile, .transcription, .ai, .about]
+    static let sectionOrder: [MacSettingsSection] = [.userProfile, .ai, .about]
 
-    static var transcriptionRows: [String] { ["Provider", RokuricsCopy.text("模型", "Model"), RokuricsCopy.text("授权与测试", "Access & Test")] }
-    static var aiRows: [String] { ["Provider", RokuricsCopy.text("模型", "Model"), RokuricsCopy.text("API 设置", "API Settings"), RokuricsCopy.text("测试", "Test")] }
+    static var aiRows: [String] { [RokuricsCopy.text("服务与模型", "Providers & Models")] }
     static var aboutRows: [String] { [RokuricsCopy.text("存储", "Storage"), RokuricsCopy.text("隐私政策", "Privacy Policy"), RokuricsCopy.text("版权", "Copyright")] }
 
-    static func transcriptionModelSummary(
-        providerKind: TranscriptionProviderKind,
-        whisperConfiguration: WhisperCppTranscriptionConfiguration
-    ) -> String {
-        switch providerKind {
-        case .whisperCpp:
-            return whisperConfiguration.currentModelDisplayName
-        default:
-            return providerKind.displayName
-        }
-    }
-
-    static func aiModelSummary(
-        providerKind: NoteGenerationProviderKind,
-        openAIConfiguration: OpenAICompatibleNoteGenerationConfiguration,
-        anthropicConfiguration: AnthropicMessagesConfiguration
-    ) -> String {
-        switch providerKind {
-        case .mock:
-            return "mock-note-local"
-        case .openAICompatible:
-            return compact(openAIConfiguration.trimmedModelName, fallback: RokuricsCopy.text("未选择模型", "No model selected"))
-        case .anthropicMessages:
-            return compact(anthropicConfiguration.trimmedModelName, fallback: RokuricsCopy.text("未选择模型", "No model selected"))
-        }
-    }
-
-    static func homepageSummaryTexts(
-        transcriptionProviderKind: TranscriptionProviderKind,
-        whisperConfiguration: WhisperCppTranscriptionConfiguration,
-        noteProviderKind: NoteGenerationProviderKind,
-        openAIConfiguration: OpenAICompatibleNoteGenerationConfiguration,
-        anthropicConfiguration: AnthropicMessagesConfiguration
-    ) -> [String] {
+    static func homepageSummaryTexts(catalog: RokuricsAICatalog) -> [String] {
         [
-            MacSettingsSection.transcription.title,
-            transcriptionRows[0],
-            transcriptionProviderKind.displayName,
-            transcriptionRows[1],
-            transcriptionModelSummary(
-                providerKind: transcriptionProviderKind,
-                whisperConfiguration: whisperConfiguration
-            ),
-            transcriptionRows[2],
             MacSettingsSection.ai.title,
             aiRows[0],
-            noteProviderKind.displayName,
-            aiRows[1],
-            aiModelSummary(
-                providerKind: noteProviderKind,
-                openAIConfiguration: openAIConfiguration,
-                anthropicConfiguration: anthropicConfiguration
-            ),
-            aiRows[2],
-            aiRows[3],
+            catalog.selectedProvider?.title ?? "",
+            catalog.summaryModelReference?.configurationValue ?? "",
+            catalog.transcriptionModel?.configurationValue ?? "",
             MacSettingsSection.about.title,
             aboutRows[0],
             aboutRows[1],
@@ -531,13 +230,7 @@ enum MacSettingsHomeSummary {
 
 enum MacSettingsDetail: String, CaseIterable, Identifiable {
     case profile
-    case transcriptionProvider
-    case transcriptionModel
-    case transcriptionAuthorization
-    case aiProvider
-    case aiModel
-    case aiAPI
-    case aiTest
+    case aiConfiguration
     case privacyPolicy
     case copyright
 
@@ -547,20 +240,8 @@ enum MacSettingsDetail: String, CaseIterable, Identifiable {
         switch self {
         case .profile:
             return RokuricsCopy.text("编辑个人资料", "Edit Profile")
-        case .transcriptionProvider:
-            return RokuricsCopy.text("转写 Provider", "Transcription Provider")
-        case .transcriptionModel:
-            return RokuricsCopy.text("转写模型", "Transcription Model")
-        case .transcriptionAuthorization:
-            return RokuricsCopy.text("授权与测试", "Access & Test")
-        case .aiProvider:
-            return "AI Provider"
-        case .aiModel:
-            return RokuricsCopy.text("AI 模型", "AI Model")
-        case .aiAPI:
-            return RokuricsCopy.text("API 设置", "API Settings")
-        case .aiTest:
-            return RokuricsCopy.text("测试", "Test")
+        case .aiConfiguration:
+            return RokuricsCopy.text("AI 服务", "AI Providers")
         case .privacyPolicy:
             return RokuricsCopy.text("隐私政策", "Privacy Policy")
         case .copyright:
@@ -910,70 +591,6 @@ private struct MacSettingsHomeDivider: View {
             .padding(.leading, 18)
     }
 }
-
-#if DEBUG
-private struct MacSettingsDebugTextRow: View {
-    let title: String
-    let bodyText: String
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(MacTypography.chineseBody(size: 14, weight: .semibold))
-                .foregroundStyle(MacTheme.deepText(for: colorScheme))
-
-            Text(bodyText)
-                .font(MacTypography.chineseCaption(size: 12, weight: .medium))
-                .foregroundStyle(MacTheme.softText(for: colorScheme))
-                .lineLimit(nil)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct MacSettingsDebugActionRow: View {
-    let title: String
-    let valueText: String
-    let systemImage: String
-    let isDisabled: Bool
-    let action: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(isDisabled ? MacTheme.tertiaryText(for: colorScheme) : MacTheme.aqua)
-                    .frame(width: 22)
-
-                Text(title)
-                    .font(MacTypography.chineseBody(size: 14, weight: .semibold))
-                    .foregroundStyle(MacTheme.deepText(for: colorScheme))
-                    .lineLimit(2)
-
-                Spacer(minLength: 12)
-
-                Text(valueText)
-                    .font(MacTypography.chineseBody(size: 13, weight: .medium))
-                    .foregroundStyle(MacTheme.softText(for: colorScheme))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-    }
-}
-#endif
 
 struct RokuricsSettingsDetailSheet<Content: View>: View {
     let title: String
@@ -1577,10 +1194,7 @@ extension View {
 
 #Preview {
     MacSettingsView(
-        audioInboxStore: AudioInboxStore(),
-        transcriptionQueue: TranscriptionQueue(),
-        transcriptionSettingsStore: TranscriptionSettingsStore(),
-        noteGenerationSettingsStore: NoteGenerationSettingsStore(),
+        aiConfigurationStore: RokuricsAIConfigurationStore.shared,
         userProfileStore: MacUserProfileStore()
     )
 }

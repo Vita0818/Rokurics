@@ -375,6 +375,14 @@ final class StudyLibraryStore: ObservableObject {
         effectiveStudyItems.first { $0.recordingID == recordingID }
     }
 
+    /// Returns the persisted business clock used by inventory and
+    /// reconciliation. Upload CAS must not read `effectiveStudyItems`, because
+    /// that collection may be a canonical/UI projection with runtime-only
+    /// fields.
+    func businessModifiedAt(recordingID: String) -> Date? {
+        allStudyItems.first { $0.recordingID == recordingID }?.updatedAt
+    }
+
     func item(itemID: StudyItemID) -> StudyItemMetadata? {
         effectiveStudyItems.first { $0.itemID == itemID || $0.recordingID == itemID }
     }
@@ -1135,12 +1143,13 @@ final class StudyLibraryStore: ObservableObject {
     ) -> StudyItemMetadata {
         let filing = canonicalFilingPath(from: filingComponents)
         let resolvedKind: StudyItemKind = kind == .recordingBundle ? .recordingBundle : .standaloneNote
+        let businessUpdatedAt = legacy?.updatedAt ?? generatedAt
         var item = legacy ?? StudyItemMetadata(
             itemID: itemID,
             kind: resolvedKind,
             title: title,
             createdAt: generatedAt,
-            updatedAt: generatedAt,
+            updatedAt: businessUpdatedAt,
             filing: filing,
             tags: canonicalTags(tags),
             folderIDs: folderIDs.isEmpty ? StudyItemMetadata.defaultFolderIDs(for: filing) : folderIDs,
@@ -1154,7 +1163,7 @@ final class StudyLibraryStore: ObservableObject {
         item.tags = canonicalTags(tags)
         item.folderIDs = folderIDs.isEmpty ? StudyItemMetadata.defaultFolderIDs(for: filing) : folderIDs
         item.isTrashed = isDeleted
-        item.updatedAt = generatedAt
+        item.updatedAt = businessUpdatedAt
         item.modifiedByDeviceID = "canonicalReadRuntime"
         return item
     }
@@ -1183,7 +1192,9 @@ final class StudyLibraryStore: ObservableObject {
         if item.isTrashed, item.trashedAt == nil {
             item.trashedAt = generatedAt
         }
-        item.updatedAt = generatedAt
+        // `generatedAt` is the read-snapshot observation time, not the
+        // recording's business version. Preserve the backing business clock so
+        // read projection cannot invalidate upload/reconciliation CAS.
         item.modifiedByDeviceID = "canonicalReadRuntime"
         return item
     }

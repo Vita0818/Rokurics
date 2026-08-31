@@ -1,5 +1,44 @@
 # TESTING
 
+## 2026-08-21 设置 Debug UI 与本机动作验证
+
+实际执行并通过：
+
+- `swiftc -parse`：`IPhoneSettingsView.swift`、`MacSettingsView.swift`、`MacRecordingInboxItem.swift`、`MacAudioInboxView.swift`、`MacStudyLibraryView.swift`、`NoteGenerationCoordinator.swift` 通过。
+- iOS generic Simulator Debug app build：退出 0。
+- Mac arm64 Debug app build：退出 0。
+- `RokuricsAIConfigurationTests`：6 passed / 0 failed / 0 skipped；其中真实 Store 的 audio -> transcript -> summary 落盘闭环继续通过，证明总结输入就绪规则调整未破坏统一 AI runtime。
+- 静态 UI 边界检查：在两个 Settings View 本体结束前均不存在 Debug/canonical/diagnostics 可见构造；Mac 正常设置仍保留 AI provider/model 入口。Mac 本机播放/转写读取 `item.hasAudio`，总结读取 transcript artifact，上传按钮仍保留 `displayAudioAvailable && canUploadToIPhone`。
+
+按仓库规则本轮未修改测试源码。`RokuricsMacTests/CanonicalEffectiveStatusUIProjectionTests.swift` 中“本机按钮必须读取 peer canonical proof”的历史源码断言，以及双端 `CanonicalSwitchBackTests.swift` 中“Settings 必须显示 Debug proof 按钮”的历史源码断言，与本轮用户明确指定的新产品行为冲突；本轮以当前产品源码为准，未运行这两个旧 suite。Mac 定向测试仍使用既有 canonical canary source exclusions，仅用于绕开 Xcode 27 已记录的无关 test-target actor fixture 阻断。
+
+构建继续输出仓库既有 actor-isolation/deprecation warnings；本轮未新增编译错误。未运行完整测试套件、UI screenshot/自动点击、真实 provider/network、paired iPhone/Mac、Release、archive、TSan 或 soak。
+
+## 2026-08-20 AI 单路径第一版验证
+
+实际执行并通过：
+
+- `RokuricsAIConfigurationTests`：6 passed / 0 failed / 0 skipped。覆盖 Intatis-compatible JSONC、独立 `model`/`transcription_model`、owner-only `0600` config、缺 transcription role fail closed、无 tools 的单次总结 request、disk-backed multipart 转写，以及真实 Store 上 transcript/note/summary 落盘闭环。
+- iOS generic simulator Debug build、Mac arm64 Debug build：退出 0。
+- iOS generic simulator `build-for-testing`（使用已记录的无关 canonical fixture exclusions）：退出 0，证明删除 iPhone Chat/settings source 后 app 与测试 target 仍可编译。
+- iOS generic simulator Release build、Mac arm64 Release build：退出 0；Mac Release 仍有既有 App Category warning。
+- 本轮全部改动 Swift 源码/测试 `swiftc -parse` 通过；`RokuricsMac.entitlements`、双端 Info.plist `plutil -lint` 通过；`git diff --check` 通过。
+- 静态扫描确认产品 Swift 源码无 AI Chat/import-to-chat，Xcode/Script/Mac runtime 无 whisper helper、Mock 或旧 OpenAI/Anthropic summary client 引用。
+
+Mac 定向测试继续使用既有 `EXCLUDED_SOURCE_FILE_NAMES`，只排除 Xcode 27 已记录的 canonical canary global-actor fixture 编译阻断；未修改或宣称这些测试通过。未执行真实 provider、credential、network、25 MiB 边界实传、长录音、paired 真机、UI screenshot、完整测试套件、archive、TSan 或 soak。
+
+## 2026-08-20 canonicalFullSync 上传业务时钟回归
+
+本轮修复验证 canonical UI/read projection 不再污染双向上传 source-version CAS。实际执行结果：
+
+- iPhone `SyncReconciliationClosedLoopTests`：22 passed / 0 failed / 0 skipped。该 suite 包含 `enforcedUploadUsesBusinessClockWhileCanonicalReadServesProjection()`，确认 canonical read served、matching mark、hash/size/business time 全部成立时 client 被调用且 reconciliation 写入 `transferredAwaitingVerification`；`freshReconciliationRearmsPreviouslyStaleSourceVersion()` 确认旧 stale 数据经 fresh sync 恢复 pending。既有 stale-source、completion proof、ownership、stale ledger、bounded/corrupt ledger 回归继续纳入同组。
+- iPhone `CanonicalRecordingMetadataTests/iPhoneStoreCanonicalReadOverlayUpdatesExistingRecordingMetadataWithoutMutation()`：1/1 通过；除 canonical title overlay/legacy backing 不变外，新增断言 effective item 与 `businessModifiedAt` 均保持 backing 微秒业务时间。
+- Mac `macToIPhoneQueueUsesBusinessClockWhileCanonicalReadServesProjection()` 与 `macStoreCanonicalReadOverlayUpdatesExistingRecordingMetadataWithoutMutation()`：2 passed / 0 failed / 0 skipped。前者实际构造 paired target、Mac inbox audio、matching reconciliation、`canonicalFullSync` guarded canonical read 和真实 `MacToIPhoneUploadStore`，确认 offer 入队且 record 进入 queued。
+- iOS generic simulator Debug App build 退出 0；Mac arm64 Debug App build 退出 0。构建仍输出仓库既有 Swift actor-isolation/deprecation warnings。
+- `swiftc -parse` 覆盖本轮全部 Swift 源码/测试文件，`git diff --check` 通过。
+
+定向 iOS test build 继续使用 2026-08-09 已记录的 `EXCLUDED_SOURCE_FILE_NAMES`，只排除 Xcode 27 下与本轮无关的 canonical canary actor/global-actor fixture 编译阻断；正式 Swift Testing 标识必须使用 `SyncReconciliationClosedLoopTests` suite 名，而不是外层 `RokuricsTests`。Mac 定向 test build 使用同一组无关 fixture 排除项。未运行完整测试套件、paired 真机、Release、TSan、弱网或 soak；不能以模拟器/本机回归代替双端重装后的真实文件闭环。
+
 ## 外部依赖与禁止兜底验证（Vitemis 强制规则）
 
 本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。涉及外部能力的变更必须验证：
@@ -2178,20 +2217,16 @@ git status --short
 - macOS deployment target：26.4。
 - Swift build setting：`SWIFT_VERSION = 5.0`。
 - Mac app 需要 App Sandbox entitlements：`RokuricsMac/RokuricsMac.entitlements`。
-- Mac 转写的 whisper.cpp helper：
-  - 构建阶段执行 `Scripts/embed_whisper_helper.sh`。
-  - 脚本优先读取 `WHISPER_CPP_ROOT`，否则回落到仓库外本地默认位置。
-  - 需要已编译的 `whisper-cli` 和相关 dylib。
-  - 文档不记录具体个人路径。
+- Mac 转写/总结需要 Rokurics 自己的 `rokurics.json/jsonc`、有效 credential 和可访问 provider；app build 不需要模型或网络。
 - iOS 测试需要可用 iOS Simulator；本轮确认可用 `iPhone 17 Pro` / iOS 26.5。
 
 ## 依赖安装方式
 
-未发现 `Package.swift`、`Package.resolved`、CocoaPods、Carthage checkout、npm/yarn/pnpm 等依赖入口。当前项目主要依赖 Apple SDK/frameworks 和仓库外 whisper.cpp 编译产物。
+未发现 `Package.swift`、`Package.resolved`、CocoaPods、Carthage checkout、npm/yarn/pnpm 等依赖入口。当前项目主要依赖 Apple SDK/frameworks；AI runtime 是仓内 Swift source，不依赖 Intatis App 或仓库外二进制。
 
 需要后续确认：
 
-- whisper.cpp 在新机器或 CI 上的安装/编译方式。
+- 真实 AI provider/credential/network 的 opt-in smoke 环境。
 - 是否存在未提交或未纳入仓库的本地依赖准备步骤。
 
 ## 构建命令
@@ -2212,7 +2247,7 @@ xcodebuild -project Rokurics.xcodeproj -scheme RokuricsMac -configuration Debug 
 
 注意：
 
-- `RokuricsMac` build 会执行 `Embed whisper.cpp Helper`，缺少仓库外 whisper.cpp 产物或 `WHISPER_CPP_ROOT` 时可能失败。
+- `RokuricsMac` build 不再执行 whisper helper；无 AI credential 时仍可离线构建，运行时对应动作明确失败。
 - Mac Debug product name 在 scheme 中显示为 `RokuricsMac Local.app`。
 
 ## 单元测试命令
@@ -2321,14 +2356,12 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 
 ### Mac 转写和笔记
 
-- Mock transcription。
-- whisper.cpp bundled helper。
-- 外部 debug fallback。
-- m4a 转 WAV。
-- 35-45 分钟触发 chunked transcription。
-- 2-3 小时长录音按 `docs/LongRecordingTestPlan.md` 验证。
-- note generation mock/OpenAI-compatible/Anthropic。
-- 长 transcript 分段生成 sections 后合并 final note。
+- Intatis-compatible JSON/JSONC 配置中 `model` 与 `transcription_model` 均可解析，Rokurics 不读取 Intatis 文件。
+- 缺 role/provider/model/credential、unsupported adapter、非 JSON、空结果、非完成 finish 均明确失败且不回退。
+- compatible multipart 与 OpenRouter JSON-base64 transcription request；临时 body owner-only 且结束后清理。
+- audio 超过当前 25 MiB 上限时明确失败，不恢复 whisper/chunk fallback。
+- transcript 完成后可生成并持久化 summary；audio/transcript 在请求期间变化时拒绝迟到结果。
+- 真实 provider、网络、计费、长录音和生成物跨端同步需独立手动验证。
 
 ### 学习库和同步
 
@@ -2393,22 +2426,16 @@ Swift 编译级静态检查建议使用对应 `xcodebuild ... build` 或 `xcodeb
 
 ### AI Chat
 
-- 新建/切换/删除会话。
-- 从学习库 folder/item 导入上下文。
-- note summary 优先，transcript preview fallback。
-- 大上下文截断。
-- 附件保存和不支持附件时本地保留提示。
-- provider 配置缺失、超时、空响应。
+产品入口和 runtime 已删除；回归只需静态确认双端无 Chat 导航、学习库无 import-to-chat、历史 `chats/` 不被自动删除或扫描。
 
 ## 常见失败原因
 
-- Mac build 找不到仓库外 whisper.cpp 编译产物；需要设置 `WHISPER_CPP_ROOT` 或准备本机 helper/dylib。
+- AI config/credential/provider 缺失会让用户动作明确失败，但不影响 App 构建。
 - iOS test 未指定存在的 simulator 名称。
-- Mac sandbox 缺少安全范围书签，导致 whisper-cli/model/ffmpeg 访问失败。
 - TLS identity 未生成、app-local TLS private key/certificate 不可读，或 `SecIdentityCreate` 失败，导致 HTTPS listener 启动失败。
 - iPhone 保存的 certificate fingerprint 与 Mac 当前 TLS certificate 不一致，导致 pinning failure。
 - HMAC 请求 timestamp 超过窗口、nonce 重放、body hash 不匹配、content type 不匹配、路径不在 allowlist。
-- 长录音转写 provider timeout 或模型路径/权限错误。
+- 长录音超过当前 provider file limit、provider timeout 或 exact model/credential 错误。
 - LLM provider base URL、model name、API key、max_tokens 配置错误。
 
 ## 2026-06-03 Recording Metadata Cutover 验证

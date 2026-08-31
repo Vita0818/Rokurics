@@ -14,7 +14,6 @@ struct RokuricsHomeView: View {
     @StateObject private var uploadCoordinator = RecordingUploadCoordinator()
     @State private var isRecordingSessionPresented = false
     @State private var isRecordingLibraryPresented = false
-    @State private var isAIChatPresented = false
     @State private var isMacConnectionPresented = false
     @State private var isSettingsPresented = false
 
@@ -60,7 +59,6 @@ struct RokuricsHomeView: View {
                         scale: metrics.dashboardScale,
                         isMacPaired: macConnectionStore.isPaired,
                         onOpenRecordingLibrary: openRecordingLibrary,
-                        onOpenAIChat: openAIChat,
                         onOpenMacConnection: openMacConnection
                     )
                         .padding(.bottom, metrics.homeBottomPadding)
@@ -79,12 +77,6 @@ struct RokuricsHomeView: View {
                 recordingManager: recordingManager,
                 macConnectionStore: macConnectionStore,
                 uploadCoordinator: uploadCoordinator
-            )
-        }
-        .navigationDestination(isPresented: $isAIChatPresented) {
-            IPhoneAIChatView(
-                studyLibraryStore: recordingManager.studyLibraryStore,
-                userProfileStore: userProfileStore
             )
         }
         .navigationDestination(isPresented: $isMacConnectionPresented) {
@@ -130,11 +122,6 @@ struct RokuricsHomeView: View {
         print("[RokuricsNavigation] open recording library")
         recordingManager.reloadRecordings()
         isRecordingLibraryPresented = true
-    }
-
-    private func openAIChat() {
-        print("[RokuricsNavigation] open AI chat")
-        isAIChatPresented = true
     }
 
     private func openMacConnection() {
@@ -540,7 +527,6 @@ private struct RokuricsHomeNavigationCard: View {
     let scale: CGFloat
     let isMacPaired: Bool
     let onOpenRecordingLibrary: () -> Void
-    let onOpenAIChat: () -> Void
     let onOpenMacConnection: () -> Void
 
     var body: some View {
@@ -553,17 +539,6 @@ private struct RokuricsHomeNavigationCard: View {
                 action: onOpenRecordingLibrary
             )
             .accessibilityLabel(RokuricsCopy.text("打开学习库", "Open Library"))
-
-            RokuricsHomeDashboardDivider(scale: scale)
-
-            RokuricsHomeNavigationButton(
-                title: RokuricsCopy.text("AI 对话", "AI Chat"),
-                systemImage: "bubble.left.and.bubble.right",
-                tint: RokuricsColors.mint,
-                scale: scale,
-                action: onOpenAIChat
-            )
-            .accessibilityLabel(RokuricsCopy.text("打开 AI 对话", "Open AI Chat"))
 
             RokuricsHomeDashboardDivider(scale: scale)
 

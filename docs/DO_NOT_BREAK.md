@@ -1,5 +1,32 @@
 # DO_NOT_BREAK
 
+## 设置 UI 与本机操作可用性禁区（2026-08-21）
+
+- iPhone/Mac 设置页不得重新显示 canonical kernel、library metadata pilot、switchback proof、诊断路径或 production-root 确认等 Debug UI。当前底层 Debug key/runtime/driver 保留不等于允许恢复产品入口；若未来删除底层能力需另立范围。
+- Mac 播放和转写是本机动作，只能由真实本机 audio availability 与当前 coordinator live task 决定。不得再用 peer completion、canonical display proof、reconciliation transfer state、receive status 或持久 `queued/transcribing` 阻止本机已有音频的操作。
+- AI 总结只需要当前可读取的本机 transcript artifact 与当前 note-generation live task。持久 `generating` 不能充当跨重启锁；旧 transcript/note 路径存在时允许查看旧结果或重新运行。loader 缺文件、空内容、unsafe path 或 digest 变化仍必须 fail closed。
+- `CanonicalDisplaySyncState.canDisplayAsComplete` 继续用于跨设备完成/对端持有语义；Mac -> iPhone 上传仍必须通过 reconciliation direction、source version、hash/size、target CAS 和 completion proof。不得因本机按钮解锁而把本机文件存在当作 peer proof 或放宽上传安全。
+- 当前进程任务只能由 `TranscriptionCoordinator` / `NoteGenerationCoordinator` 的 live ownership 暂时禁用按钮。持久 status 可用于展示、诊断、历史 schema 和同步，但不得再次成为并发锁。
+
+## AI 单路径与 Intatis 同构配置禁区（2026-08-20）
+
+- Rokurics 与 Intatis 是独立 App。可以保持同一设置交互和 config schema，但 Rokurics 不得读取/写入 Intatis 的 Application Support、UserDefaults、auth/config 文件或 live runtime；Intatis 也不是 Rokurics 的运行时服务。
+- Rokurics AI 设置只能使用 provider list/detail + active `model` + config-file `transcription_model` 的同构行为。不得新增第二套 Rokurics provider picker、独立 summary model 字段、旧式 transcription/AI 多页设置或隐藏默认 route。
+- 独立 AI Chat、聊天入口、conversation/context/attachment runtime、学习库 import-to-chat、Agent/tools/permission/Cowork/EventLog 不得恢复。历史 chat 文件可以不删，但不得作为当前功能 fallback 或被后台加载。
+- 模拟实时转写、Mock transcription/note、whisper/ffmpeg/helper、旧 OpenAI/Anthropic summary clients 和自制 chunking 不得恢复。缺配置、超 25 MiB、unsupported adapter、网络/响应错误必须明确失败，不得切换旧 backend、另一 provider/model、cache 或假内容。
+- `model` 只用于总结，`transcription_model` 只用于转写；两者不得互相回退。exact provider/model/adapter/credential 在每次动作开始时冻结，credential 不得进入日志、diagnostics、transcript/note/summary、sync payload 或 UserDefaults。
+- 转写提交前后必须证明 audio hash+size 未变；总结提交前后必须证明 transcript hash 未变。迟到的旧结果不得覆盖新输入。成功后继续写既有 TranscriptStore/NoteStore 与 generated artifact 合同。
+- 旧 transcript/note/summary 文件、relative path、status、artifact kind 和 chunk/section decode 字段必须继续可读；保留旧数据解码不是允许旧生成 runtime 复活。
+
+## canonical read 与上传业务时钟禁区（2026-08-20）
+
+- `StudyLibraryStore.item(recordingID:)` / `effectiveStudyItems` 是 UI/read projection API，不是上传 CAS 的业务真相源。iPhone `RecordingUploadCoordinator` 与 Mac `queueUploadToIPhone` 必须继续读取 `businessModifiedAt(recordingID:)` 或等价 persisted backing fact。
+- canonical read snapshot 的 `generatedAt` 是观察时刻，不得覆盖已有 recording/study item 的业务 `updatedAt`，不得进入 reconciliation source/target version、upload job/offer CAS、LWW winner 或 completion proof。
+- canonical overlay 可以改变 read-side title/filing/tags/display projection，但对已有 backing item 必须保留 persisted business clock。canonical-only 对象如果没有可信业务时间，不得伪造 snapshot time 来授权上传。
+- UI refresh、read cache rebuild、canonical/legacy source switch 和 status projection 变化不得把 matching reconciliation record 标成 `staleSourceVersion`。只有 persisted source hash、size 或 business modified time 的真实变化才可使 source-version CAS 失败。
+- 双向回归必须在 canonical read 确实 served 的条件下分别证明：iPhone matching upload 到达 client；Mac matching upload 创建 durable offer。只测 Store projection或只测 fake upload client 的 old-kernel 路径均不足以覆盖该接缝。
+- `.staleSourceVersion` 不得跨 fresh reconciliation 永久继承；新 plan 重新证明 source 后必须恢复 incoming pending 状态。queued/transferring/awaiting-verification 以外的状态不得携带旧 transfer ID 或 completion proof。
+
 ## 外部依赖优先与禁止功能兜底（Vitemis 强制规则）
 
 本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。本节是强制约束，不是建议。
@@ -94,7 +121,7 @@
 - v10.0 当前只保留 Mac 首页、本地录音、共享录音界面和模拟实时转写改动；不得把该范围扩大成 canonical runtime、fallback、旧内核删除、设置页开关删除或同步/上传/apply/read 行为变更。
 - `MacRecordingManager` 保存音频必须继续走 `MacRecordingFileStore` 既有 metadata-first inbox path：`saveMetadata`、`temporaryAudioUploadURL`、`checksumForTemporaryAudioUpload`、`saveAudio(temporaryFileURL:)`。不得绕过 receive record、checksum/fileSize 更新或 inbox 根目录约束。
 - Mac 本地录音默认只作为 Mac 本机 inbox 来源。用户在 Mac 学习库明确点击“上传到 iPhone”后，允许创建独立 durable content-transfer offer；网络拓扑必须继续是 iPhone client 拉取 Mac HTTPS server，禁止 Mac 主动反向连接 iPhone。heartbeat 只可携带短 offer descriptor，不得携带文件 bytes；内容只能走经过 `RequestVerifier` 的 upload-layer route，不能回塞 sync route。
-- 实时转写当前必须标记为模拟 provider：`shared-live-simulated-asr` / `simulated-live-asr`。不得把模拟文本标成真实 OpenAI、FunASR、whisper.cpp 或用户音频的可信 ASR 输出。
+- 模拟实时转写已删除。不得重新加入任何定时生成的占位文字，更不得把假文本标成可信 transcript。
 - iPhone 录音页可以显示共享模拟实时转写文本，但不得新增 `RecordingMetadata` 字段、不得写 transcript artifact、不得创建 upload job、不得改变上传队列、学习库 schema、同步 proof 或 Mac 接收 route。
 - 共享录音 UI 应继续复用 `RokuricsSharedRecordingSessionSurface`；Mac wrapper 只处理生命周期，iPhone wrapper 保留 iPhone 专属 filing/低电量 overlay。不要在 Mac 首页重写第二套录音 session 控制面板。
 - 未来接入 OpenAI Realtime、FunASR streaming 或其他实时 ASR 时，必须单独设计 provider/settings/secret storage/redaction，不得把 API key、完整 provider response、raw audio、完整转写文本、完整 hash 或绝对路径写入文档/诊断。
@@ -1070,8 +1097,7 @@ BODY_SHA256
 - 不把 shared secret、device id、fingerprint 从 Keychain 降级存到 UserDefaults。
 - 不在日志、文档、诊断报告中输出完整 shared secret、API key、证书私钥、完整 provider response JSON、完整 transcript。
 - 不在日志、文档、诊断报告中输出 TLS private key JSON 的 base64 私钥内容。
-- 不删除 Mac sandbox entitlements 中 user-selected executable/read-only、app-scope bookmarks、network client/server，除非有替代权限设计。
-- 不绕过安全范围书签访问 whisper-cli/model/ffmpeg。
+- Mac sandbox 必须保留录音所需 audio-input 与网络 client/server；旧 whisper 专用 executable/read-only/bookmark entitlements 已删除，不得无业务理由恢复。
 
 ## 不得随意重构的核心模块
 
@@ -1097,7 +1123,7 @@ BODY_SHA256
 - `RokuricsMac/WhisperCppTranscriptionProvider.swift`
 - `RokuricsMac/AudioPreprocessor.swift`
 - `RokuricsMac/NoteGenerationCoordinator.swift`
-- `RokuricsMac/ChatCoordinator.swift`
+- 独立 Chat runtime 已删除；不得恢复。
 - `RokuricsShared/ChatModels.swift`
 - `Rokurics/StudyFilingModels.swift`
 - `RokuricsShared/SyncCore/CanonicalLibraryMetadataCutover.swift`
@@ -1331,10 +1357,10 @@ BODY_SHA256
 - Mac receiver：`RokuricsMac/SecureReceiverService.swift`、`RokuricsMac/SecureLocalHTTPSServer.swift`、`RokuricsMac/RequestVerifier.swift`、`RokuricsMac/MacRecordingFileStore.swift`。
 - 学习库：`Rokurics/StudyFilingModels.swift`、`Rokurics/StudyLibraryStore.swift`、`RokuricsMac/StudyLibraryStore.swift`。
 - 同步：两端 `StudyLibrarySyncModels.swift`、两端 `ConnectionSyncStateStores.swift`、`Rokurics/StudyLibrarySyncCoordinator.swift`、`RokuricsMac/GitBackedStudyMetadataStore.swift`。
-- 转写：`RokuricsMac/TranscriptionCoordinator.swift`、`RokuricsMac/WhisperCppTranscriptionProvider.swift`、`RokuricsMac/AudioPreprocessor.swift`、`RokuricsMac/TranscriptStore.swift`、`RokuricsMac/LongProcessingModels.swift`。
-- 笔记：`RokuricsMac/NoteGenerationCoordinator.swift`、`RokuricsMac/NoteStore.swift`、`RokuricsMac/OpenAICompatibleNoteGeneration*`、`RokuricsMac/AnthropicMessages*`。
-- 聊天：`RokuricsMac/ChatCoordinator.swift`、`RokuricsMac/ChatProvider.swift`、`RokuricsShared/ChatModels.swift`。
-- 构建/权限：`Rokurics.xcodeproj/project.pbxproj`、`RokuricsMac/RokuricsMac.entitlements`、`Scripts/embed_whisper_helper.sh`。
+- 转写：`RokuricsMac/RokuricsAIConfiguration.swift`、`RokuricsMac/RokuricsAIRuntime.swift`、`RokuricsMac/TranscriptionCoordinator.swift`、`RokuricsMac/TranscriptStore.swift`。
+- 笔记：`RokuricsMac/RokuricsAIConfiguration.swift`、`RokuricsMac/RokuricsAIRuntime.swift`、`RokuricsMac/NoteGenerationCoordinator.swift`、`RokuricsMac/NoteStore.swift`。
+- AI：只允许 `RokuricsAIConfiguration` / `RokuricsAIRuntime` / 两个 recording coordinator；独立 Chat/Agent/tool runtime 不在范围内。
+- 构建/权限：`Rokurics.xcodeproj/project.pbxproj`、`RokuricsMac/RokuricsMac.entitlements`。
 
 ## 回归验证要求
 
@@ -1344,8 +1370,7 @@ BODY_SHA256
 - iPhone 录音/学习库：运行 `RokuricsTests` 中相关 Swift Testing；手动验证录音保存、列表、学习库和废纸篓。
 - 上传/安全：运行 iPhone upload tests 和 Mac receiver/security tests；手动验证 pairing、health、small upload、resumable upload。
 - Mac receiver：运行 `RokuricsMacTests/RokuricsMacTests.swift` 中 pairing/HMAC/resumable/delete 相关测试。
-- 转写/音频：运行 `AudioPreprocessorTests`、`NativeAudioPreprocessorTests`、`WhisperCppRuntimeResolverTests`、`LongProcessingTests` 中相关测试；必要时手动跑 mock/whisper。
-- 笔记/AI：运行 `LongProcessingTests`、`ChatFeatureTests`、note generation provider 相关测试；手动验证 provider 配置错误和成功路径。
+- 转写/总结：运行 `RokuricsAIConfigurationTests`，并手动验证 app-local config、真实 transcription/summary provider、超限失败和旧 artifact 读取。
 - 同步：运行两端 sync tests；手动验证 metadata-only sync 不删音频、artifact download 不含 audio、peer unknown deferred、retry drainer 到期恢复、Mac 手动同步 pending/ack/timeout。
 - UI：运行对应 scheme UI tests；关键 flow 仍需手动验证。
 

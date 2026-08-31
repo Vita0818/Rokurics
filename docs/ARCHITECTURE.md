@@ -11,7 +11,37 @@
 - 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
 - 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
 
-最近自查日期：2026-08-19
+最近自查日期：2026-08-21
+
+## 2026-08-21 本机动作、运行中任务与跨设备证明边界
+
+Mac 录音卡片同时承载本机文件动作与跨设备上传动作，两类动作不能共用一个 availability gate。本机播放和 file transcription 的前置事实是 Store 已确认本机 `audio.m4a` 存在；AI 总结的前置事实是本机 transcript JSON 或 Markdown 有安全相对路径并可由 loader 读取。它们不需要 peer inventory、finalize proof、dual ACK 或 `CanonicalDisplaySyncState.canDisplayAsComplete`。反过来，“已同步/对端已持有”展示和 Mac -> iPhone 上传仍必须消费 canonical/reconciliation proof，本机文件存在不能替代对端证明。
+
+任务 ownership 只存在于当前进程 coordinator：`TranscriptionCoordinator.activeTaskRecordingIDs` 与 `NoteGenerationCoordinator.activeTaskRecordingIDs` 决定对应动作是否正在运行。`receive.json` 的 `queued/transcribing/generating` 是持久展示/恢复事实，应用被终止后不能证明 Task 仍存活，也不能永久锁 UI。若中断发生在重新转写或重新总结期间，旧 transcript/note 路径仍代表当前可读取 artifact；用户可以查看旧结果或重新执行，新的 coordinator 会覆盖 status。输入文件缺失、配置错误或运行失败继续明确报错，不生成 fallback 内容。
+
+设置层只公开产品设置。Mac 的 AI 行进入 app-local provider/model 配置；iPhone 与 Mac 的 canonical/pilot/proof Debug runtime 暂时继续编译和读取原配置，但没有设置页入口、操作按钮或确认弹窗。这是 UI 隐藏，不是底层迁移、数据清理或 runtime 删除。
+
+## 2026-08-20 录音 AI 单路径架构
+
+Rokurics 不再提供独立 AI Chat。产品 AI 只有两条用户显式动作：`recording audio -> transcript` 与 `current transcript + built-in prompt -> note/summary`。两条动作由 Mac 执行，iPhone 只读取和同步既有 generated artifact；录音、上传、同步、学习库和历史生成物读取合同不因移除 Chat 改名。
+
+配置与 Intatis 同构但完全 app-local。`RokuricsAIConfigurationStore` 只读取 Rokurics 自己的 owner-only `rokurics.json/jsonc` 或显式 `ROKURICS_CONFIG`，使用相同 provider/model 配置 shape；顶层 `model` 是总结 route，`transcription_model` 是语音转写 route。设置 UI复用同一 provider list/detail、active model、connection/model disclosure、Save/Test/Open Config 行为。两个 App 不共享 UserDefaults、Application Support、credential 或运行时对象。
+
+唯一网络能力位于 `RokuricsAIRuntime`：exact provider/model/adapter/credential 在动作开始前冻结；credential 只在请求边界解析；HTTP redirect 被拒绝；非流式请求有 timeout、有限 retry、严格 HTTP/JSON/finish/content 验收和 bounded/redacted error。转写使用 Intatis 同型 file request；总结只发送 system + transcript data 两条 message，不创建 conversation，不注册 tools，不进入 Agent、permission、Cowork、EventLog 或 web search。缺配置或不支持的 exact adapter 直接停止能力，无 legacy/Mock/whisper/另一 provider fallback。
+
+Rokurics 领域层仍拥有输入和落盘：转写前后校验 audio hash+size，写 `TranscriptStore`；总结前后校验 transcript hash，写 `NoteStore`。`receive.json`、`StudyItemMetadata`、generated artifact inventory/sync 和历史 JSON/Markdown schema 保持兼容。旧 `transcriptionMode/chunks`、`noteGenerationMode/sections` 仅保留 decode 所需的数据结构，新 runtime 始终写 `.single`，不恢复自制长音频或长文本分块实现。
+
+独立 Chat runtime、双端 Chat UI、Chat data model、学习库 Chat context export、模拟 live transcription、whisper/ffmpeg 进程 runtime、旧 provider-specific summary clients 和相关 sandbox entitlement/build phase 均已删除。历史 `chats/` 目录不主动扫描或删除；这是窄数据保留，不是功能 fallback。
+
+## 2026-08-20 上传 CAS 与 canonical read 的时钟边界
+
+上传的 source-version CAS 必须读取与 inventory/reconciliation 同源的 persisted business clock，不能读取 UI/read projection。双端 `StudyLibraryStore.item(recordingID:)` 继续表示当前 effective read model，可在 `canonicalFullSync` guarded read 成功时返回 canonical projection；上传专用版本事实改由 `businessModifiedAt(recordingID:)` 从 backing `allStudyItems` 提供。这样 canonical UI owner、legacy fallback 和上传 owner 可以共存，而不会让 read snapshot observation time 进入业务决策。
+
+canonical effective projection 对已有 backing recording/library item 必须保留其 `updatedAt`。`CanonicalReadSnapshot.generatedAt` 只描述 snapshot 何时生成，不是对象何时发生业务修改；它不能覆盖 LWW/CAS clock。iPhone -> Mac 在创建 job/client call 前比较 reconciliation `sourceModifiedAt` 与 persisted business clock；Mac -> iPhone 在 durable offer enqueue 前做同一比较。任一真实业务版本变化仍 fail closed 为 stale source 并要求重新同步；仅 UI projection refresh 不得使 matching record 失效。
+
+`.staleSourceVersion` 只终止产生它的旧 reconciliation 事实，不是永久对象状态。下一轮 inventory 若重新计算出可执行 record，即使 record ID 因内容版本确实相同而未变化，也表示当前 source hash/size/business time 已重新核对，因此 incoming pending 状态重新生效。只有 queued/transferring/transferred-awaiting-verification 可跨同 record ID 的 fresh plan 保留 transfer ID/proof。
+
+网络与安全拓扑不变：iPhone -> Mac 仍走 metadata -> resumable start/status/chunk/finalize；Mac -> iPhone 仍由 heartbeat 发送短 offer、iPhone 拉 chunk 并 ACK。TLS pinning、HMAC、timestamp、nonce、body hash、`RequestVerifier`、checksum/size、target CAS、root containment、no-overwrite 和 finalize proof 均不因业务时钟取值修复而改变。
 
 ## 2026-08-19 字体与公式排版边界
 
@@ -142,7 +172,7 @@ UI 语义必须固定：连接页“立即同步”运行 inventory exchange、d
 
 收集链路独立于局域网同步：Mac 脚本读取本机 app container，并通过 USB `devicectl` 读取 iPhone app data container。因此即使配对、连接或同步本身失败，仍可收集两端证据。该层不读取安全凭据或用户文件内容。
 
-## 2026-07-08 Rokurics v10.0 / Mac 首页与共享录音实时转写架构
+## 2026-07-08 历史架构：共享模拟实时转写（已被 2026-08-20 替代）
 
 v10.0 当前保留的是 UI/本地录音层改动，不改变同步、上传、安全或 canonical runtime 架构。Mac `MacRootView` 默认进入 `MacHomeView`；`MacSidebarItem.home` 只是本地导航项。点击首页的共享录音 orb 会进入 `MacRecordingSessionView`，由 `MacRecordingManager` 在本机请求麦克风权限并使用 `AVAudioRecorder` 录制 m4a。
 
@@ -150,7 +180,7 @@ v10.0 当前保留的是 UI/本地录音层改动，不改变同步、上传、�
 
 Mac 本地录音保存复用现有 inbox 存储语义：`IncomingRecordingMetadata` 先写入 `MacRecordingFileStore.saveMetadata`，音频进入 `temporaryAudioUploadURL`，通过 `checksumForTemporaryAudioUpload(...)` 计算 checksum 后再调用 `saveAudio(temporaryFileURL:)`。该链路写 Mac 本地 inbox 和 transcript，不调用 iPhone upload client，不新增 Mac -> iPhone 连接，不改 `/sync/*`、upload route、`RequestVerifier`、TLS/HMAC/pinning/nonce/body hash、Keychain 或 pairing。
 
-实时转写目前是 provider-shaped 的模拟实现。`RokuricsSimulatedLiveTranscriptionSession` 在录音期间定时发布 `RokuricsLiveTranscriptionSnapshot`，用于验证共享 UI 滚动文本和 Mac transcript 持久化链路。Mac 保存时把 snapshot 转成 `TranscriptionResult` 写入 `TranscriptStore` 并更新 receive record 的 transcription status。iPhone 只显示模拟文本，不写 transcript artifact、不改 `RecordingMetadata`、不改上传队列或同步 proof。真实 OpenAI Realtime、FunASR streaming 或 whisper streaming 接入仍是后续独立任务。
+该版本当时存在 provider-shaped 模拟实现。2026-08-20 已删除模拟 session、录音 UI 注入和 Mac 持久化；当前只允许录音结束后由用户显式触发真实 file transcription。本段只保留历史。
 
 此前 no-legacy fallback / canonical runtime / 设置页切换删除方向的改动已恢复到 v9.24，不属于当前 v10.0 架构事实。当前旧内核、fallback、同步/上传/apply/read runtime 的行为以 v9.24 源码为准。
 
@@ -1105,7 +1135,7 @@ canary mode 的默认 budget 为 0。v8.7 显式内部 N=1 时，selector 只选
 Rokurics 是一个 Swift/Xcode 多端项目：
 
 - iPhone app 负责本地录音、录音 metadata、学习库浏览、Mac 配对、上传录音、展示 Mac 侧同步回来的转写/笔记、以及前台心跳/本地网络同步。
-- macOS app 负责生成本机 TLS 身份、启动本地 HTTPS receiver、配对 iPhone、验证 HMAC 签名、接收 metadata/audio、维护 Audio Inbox/学习库、调用 whisper.cpp 或 mock 转写、调用本地/云端兼容 LLM 生成笔记、提供 AI Chat。
+- macOS app 负责生成本机 TLS 身份、启动本地 HTTPS receiver、配对 iPhone、验证 HMAC 签名、接收 metadata/audio、维护 Audio Inbox/学习库，并通过统一 exact-route AI runtime 执行转写与总结；不再提供 AI Chat。
 - `RokuricsShared/` 承担跨端 UI 和共享模型。当前共享边界还不完整，iPhone/Mac 两边仍有部分同名模型或 store 文件。
 - Live Activity extension 展示录音状态，attributes 放在 `RokuricsLiveActivitiesShared/`。
 
@@ -1113,7 +1143,7 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 
 ### iPhone 侧
 
-- UI 层：`RokuricsHomeView`、`RecordingSessionView`、`RecordingLibraryView`、`RecordingStudyDetailPage`、`MacConnectionView`、`IPhoneSettingsView`、`IPhoneAIChatView`。
+- UI 层：`RokuricsHomeView`、`RecordingSessionView`、`RecordingLibraryView`、`RecordingStudyDetailPage`、`MacConnectionView`、`IPhoneSettingsView`；独立 AI Chat view 已删除。
 - 录音域：`RecordingManager` 使用 `AVAudioRecorder` 管理状态机、计时、暂停/恢复、保存与 Live Activity 更新。
 - 本地存储：`AudioFileStore` 管理 app Documents 下 `Rokurics/Recordings` 和 `Rokurics/Metadata`；所有相对路径都基于 Rokurics 根目录校验。
 - 学习库：`StudyLibraryStore` 在本地 `study/` 下维护 items/folders/index/hierarchy rules，并从录音 metadata 合并视图。
@@ -1123,15 +1153,15 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 
 ### Mac 侧
 
-- UI 层：`MacRootView` 使用 `NavigationSplitView` 组织 dashboard、iPhone connection、study library、AI chat、settings。
+- UI 层：`MacRootView` 使用 `NavigationSplitView` 组织 dashboard、iPhone connection、study library 和 settings；无 AI Chat。
 - HTTPS receiver：`SecureReceiverService` 持有 identity、paired devices、request verifier、file stores 和 `SecureLocalHTTPSServer`。
 - 路由层：`SecureLocalHTTPSServer` 直接基于 Network.framework 处理 TLS listener、HTTP parsing、health/fingerprint/pair/upload/sync routes。
 - 安全层：`MacIdentityManager` 生成/加载本机 signing key、app-local TLS private key JSON 和自签证书，并创建 `SecIdentity` 给 Network.framework；`RequestVerifier` 执行 path/content-type/body-size/header/HMAC/timestamp/nonce 校验。
 - 文件层：`MacRecordingFileStore` 管理 Application Support 下 audio inbox、upload sessions、transcripts、metadata index、receive log；`AudioInboxStore` 将文件状态映射到 UI。
-- 转写层：`TranscriptionCoordinator` 读取收件箱 source，使用 `TranscriptionSettingsStore` 选择 mock 或 whisper.cpp provider，输出到 `TranscriptStore`。
-- 音频预处理：`AudioPreprocessor` 对非 wav 输入生成 whisper-compatible WAV；默认 native preferred，可按配置使用 ffmpeg。
-- 笔记层：`NoteGenerationCoordinator` 加载 transcript，按长度选择单次或分段生成，输出到 `NoteStore`。
-- 聊天层：`ChatCoordinator` 管理会话、上下文、附件、本地保存和 provider 调用；共享模型在 `RokuricsShared/ChatModels.swift`。
+- 转写层：`TranscriptionCoordinator` 读取收件箱 source，冻结 app-local `transcription_model` route，调用 `RokuricsAIRuntime.transcribeFile` 并输出到 `TranscriptStore`。
+- 音频请求：现有 m4a/wav 等受支持文件直接进入 exact transcription provider；不再有本地 whisper-compatible 转码或 ffmpeg fallback。
+- 笔记层：`NoteGenerationCoordinator` 加载完整 transcript，执行一次无工具总结请求并输出到 `NoteStore`。
+- 聊天层：已删除，不再是产品架构层。
 - 学习库层：`StudyLibraryStore` 从 receive.json、transcript/note 结果和 stored metadata 构造学习库，支持文件夹、标签、移动、重命名、废纸篓和 sync manifest。
 
 ## 主要数据模型
@@ -1144,7 +1174,7 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 - `StudyFolderMetadata`：学习库 folder metadata，基于 level/path 生成稳定 folderID。
 - `StudyLibrarySyncManifest`：跨设备学习库同步包，包含 items/folders/tombstones/pendingUploads 和 checksum。
 - `LocalNetworkSyncInventory`：本地网络同步 inventory，包含 device、recordings、folders、studyItems、artifacts、可选 legacy manifest，以及可选 `canonicalManifest`。`canonicalManifest` 缺失时必须兼容旧客户端/旧服务端。
-- `ChatConversation`、`ChatContext`、`ChatAttachment`：AI Chat 本地会话、学习库上下文、附件模型。
+- 历史 `chats/` 文件不再有 live model/runtime；不自动删除。
 
 ## 关键业务链路
 
@@ -1183,19 +1213,19 @@ Rokurics 是一个 Swift/Xcode 多端项目：
 1. `MacStudyLibraryView` 或 Audio Inbox 触发 `TranscriptionCoordinator.startTranscription(recordingID:)`。
 2. `TranscriptionCoordinator` 将 receive.json status 写为 queued/transcribing。
 3. 读取 `MacRecordingFileStore.transcriptionSource`，决定输出目录。
-4. `LongAudioTranscriptionPlanner` 对超过 30 分钟的音频使用 15 分钟 chunk plan。
-5. `WhisperCppTranscriptionProvider` 解析 runtime：优先 app bundle 内 `Contents/Helpers/rokurics-whisper`，否则使用外部 debug 配置。
-6. `AudioPreprocessor` 将 m4a/aac 等转换为 WAV，chunk 模式按时间段转换。
-7. `TranscriptStore` 写入 `transcript.json`、`transcript.md`，chunk 模式还写入 `chunks/chunk_*.json/md`。
+4. coordinator 从 app-local config 冻结 exact `transcription_model` route，并校验源 audio hash+size。
+5. `RokuricsAIRuntime` 通过 compatible multipart 或 OpenRouter JSON-base64 file request 调用 provider；25 MiB 超限明确失败。
+6. provider 返回严格 JSON `text` 后再次校验源版本。
+7. `TranscriptStore` 写入 `transcript.json`、`transcript.md`。
 8. `MacRecordingFileStore.updateTranscriptionStatus` 回写 receive.json。
 
 ### Mac 笔记生成链路
 
 1. `NoteGenerationCoordinator.startNoteGeneration(recordingID:)` 要求 transcriptionStatus 为 `transcribed`。
 2. `NoteGenerationTranscriptLoader` 加载 transcript JSON 或 markdown。
-3. `LongNoteGenerationPlanner` 对超过阈值的 transcript 使用分段生成。
-4. Provider 可为 mock、OpenAI-compatible 或 Anthropic Messages。
-5. `NoteStore` 写入 `note.md`、`summary.json`；chunk 模式写入 `sections/section_*.md` 后组合最终 note。
+3. 完整 transcript 作为不可信数据进入一次无工具请求；provider 返回长度/上下文错误时明确失败。
+4. Provider 只由 app-local config exact route 决定；无 Mock、Anthropic 专用旁路或 fallback。
+5. `NoteStore` 写入 `note.md`、`summary.json`。
 6. receive.json 更新 note status、provider、model、endpoint description、sections。
 
 ### 本地网络同步链路
@@ -1417,13 +1447,9 @@ Canonical fallback 语义：
 
 下一阶段仍应保持分阶段：先用真实设备验证 Canonical Kernel Completion v1 的 metadata/no-op/audio bootstrap/generated artifact download/folder/study item metadata bridge 行为稳定；production ports/dry-run report 只能作为迁移设计输入。真正迁移需要单独审计、人工批准、root-bound production adapter、shadow migration、rollback 和真实设备验证。迁移完成前，不要把 UI、retry、Mac pending sync 或旧 `RecordingMetadata` vs `StudyItemMetadata` diff 继续作为补丁主战场，也不要把 dry-run 等价或 port declared 解读为 runtime switch 许可。
 
-### AI Chat 链路
+### 已删除的 AI Chat 链路
 
-1. Mac `MacAIChatView` 使用 `ChatCoordinator`。
-2. 用户可从学习库导入 folder/item，上下文由 `StudyLibraryContextExporter` 和 `ChatContextBuilder` 生成。
-3. `ChatCoordinator` 保存 conversations/contexts/attachments 到 Application Support `chats/`。
-4. Provider 与笔记生成设置共用：mock、OpenAI-compatible、Anthropic Messages。
-5. 当前 provider 只发送文字和支持的附件；不支持的附件保留本地并给提示。
+双端 Chat view、ChatCoordinator/provider、conversation/context/attachment model 和学习库 import-to-chat 已删除。旧 `chats/` 目录只作为未主动删除的历史用户数据存在，不再扫描、展示、发送或参与当前 AI 设置。
 
 ## 本地存储与路径约定
 
@@ -1459,13 +1485,13 @@ Canonical fallback 语义：
 - shared secret、device id、fingerprint 在 iPhone Keychain 中保存，不应回落到 UserDefaults。
 - Mac TLS private key 当前保存在 app-local security directory 的 `tls-private-key.json`，TLS certificate 保存为 `tls-certificate.der`；源码再通过 `SecIdentityCreate(nil, certificate, privateKey)` 创建 Network.framework 使用的 identity。旧文档曾写 Data Protection Keychain，与当前源码不符。
 - Mac sandbox entitlements 包含 network client/server、user-selected executable/read-only 和 app-scope bookmarks。
-- whisper.cpp/ffmpeg/model 访问依赖安全范围书签或 bundle helper。
+- AI credential 来自 Rokurics owner-only config literal/env/file reference；不得进入用户生成物或日志。
 
 ## 当前架构风险与不确定点
 
 - iPhone 与 Mac 有部分同名模型/store 源码但内容不同，例如 `StudyLibrarySyncModels.swift`、`ConnectionSyncStateStores.swift`、`RecordingTitleEditing.swift`。修改协议或数据结构时必须双端审查。
 - Git-backed study sync 默认禁用，但代码和测试仍存在；不要误以为本地网络同步和 Git-backed sync 是同一套开关。
-- Mac build phase 依赖仓库外本地 whisper.cpp 编译产物或 `WHISPER_CPP_ROOT`；新机器/CI 可复现性需要确认。
+- Mac 不再有仓库外 whisper.cpp build phase；真实 provider/model/network 和长录音限制仍需环境验证。
 - `TranscriptionQueue` 目前只是占位状态对象，真实转写由 `TranscriptionCoordinator` 执行。
 - retry drainer、Mac pending sync 超时/ack 以及 checksum cache 已有单元测试覆盖，但 Mac 点击同步到 iPhone 前台执行 tick 的完整真机链路仍需手动验证。
 - UI 测试覆盖很轻，核心保障主要来自 Swift Testing 单元测试。

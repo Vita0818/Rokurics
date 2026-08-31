@@ -1,0 +1,1083 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		04EE232FF3DB8E83A6D48917 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = E42BD5D6D1F4CE896B388410 /* Workspace.swift */; };
+		05E7C4D4C39C1A9EA8E46648 /* RendererFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40F078961211497AFC2C0FC /* RendererFixtureView.swift */; };
+		0A641ACF2C79B02EFBF23997 /* IntatisMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870089C36A589071D8ED6EC /* IntatisMacApp.swift */; };
+		0AA61226EDEC2CBEBD841887 /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = C9C0C6B6E75EFABED4D3C9DF /* NOTICE.md */; };
+		0EBBA99A232F638745751E18 /* MCPAppSessionSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4D3A9617FC39D80BC95506B /* MCPAppSessionSurfaces.swift */; };
+		117379C35B4C7E6D64E5B492 /* IntatisArtifacts in Frameworks */ = {isa = PBXBuildFile; productRef = E55A2C94ACB7BE4F13EF4289 /* IntatisArtifacts */; };
+		11EC860C45F604539E7D3A4E /* MCPImportSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = D92288F52EDE7BDB3A5269D0 /* MCPImportSurfaces.swift */; };
+		122F929B476B3218A4D84699 /* Intatis.icon in Resources */ = {isa = PBXBuildFile; fileRef = 5A331CDC0C2DD43C502CC067 /* Intatis.icon */; };
+		13E27DA06E978F5E86F92B29 /* IntatisCore in Frameworks */ = {isa = PBXBuildFile; productRef = 898312F2D0F6AB9C4439DF7F /* IntatisCore */; };
+		1560B4AEC2A5F80D5700DC4F /* SessionRuntimeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35C5E752DABCE156D6C7838 /* SessionRuntimeManager.swift */; };
+		15F4DE3F2D38EE41AAC6F586 /* IntatisProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = C418F71307784EC9E4863DBC /* IntatisProtocol */; };
+		177BD74137D54068148111F2 /* IntatisCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5F401AFDF1BD7A9C2255E7B4 /* IntatisCore */; };
+		1C201C95970B11276198857D /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = C9C0C6B6E75EFABED4D3C9DF /* NOTICE.md */; };
+		1C210BBBF0D46F7EA3981C4E /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 91D5FD314C36E14D60FE4B59 /* Localizable.xcstrings */; };
+		1C4DF8F29242F3F9E1DF8461 /* IntatisTools in Frameworks */ = {isa = PBXBuildFile; productRef = A846A3F03DE6EF7B45F4F871 /* IntatisTools */; };
+		1CF0442350E0BFD1A771C13D /* IntatisSkills in Frameworks */ = {isa = PBXBuildFile; productRef = 38596545FC5DE4070B652D63 /* IntatisSkills */; };
+		2037C782572AB7C9DEAAE90D /* SessionRuntimeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35C5E752DABCE156D6C7838 /* SessionRuntimeManager.swift */; };
+		210C06F47EA5426B9D193562 /* MCPConversationSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ECB81A7A8FDC290A237D998 /* MCPConversationSurfaces.swift */; };
+		23559736736D69D0C4A82426 /* CoworkProjectSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7FEF09F58679B208FFEF87A /* CoworkProjectSettings.swift */; };
+		23F9BEB7CD70AACEECBF5E40 /* IntatisDiagnosticExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2626A777E89C1659A8875F6E /* IntatisDiagnosticExportService.swift */; };
+		252B52BB0BD056A879466A42 /* IntatisArtifacts in Frameworks */ = {isa = PBXBuildFile; productRef = 94E4C98C37F700C33C21B661 /* IntatisArtifacts */; };
+		2AA66574D354AE1AE2E46590 /* CodeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB8034FA4E41DE4827CD18B /* CodeViewModel.swift */; };
+		2B610FAF7F0CA06B7B3C7173 /* MCPProductIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCF9E02429C663F12F038F3 /* MCPProductIntegration.swift */; };
+		30921B1F4697AF4AD411C05F /* IntatisMacRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C94CA881689A9096A8E959B /* IntatisMacRootView.swift */; };
+		38C2F419380AB76916FE60B5 /* IntatisArtifacts in Frameworks */ = {isa = PBXBuildFile; productRef = 5261DCC201EDCE99E95753E9 /* IntatisArtifacts */; };
+		3AE91BB269CBE1AFB24EDE7D /* MCPInteractionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C58AD15A7B8F17A12083AA7 /* MCPInteractionCenter.swift */; };
+		3D138CFEFC3C0533147BEEA6 /* KnowledgeAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = D919B2B9DAE89C9D991C6DD3 /* KnowledgeAccess.swift */; };
+		4067A136E9985FA7AD00B4B5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C33C1F0F2F24947F1D434F /* Keychain.swift */; };
+		425BB4D37E53799BE379918A /* IntatisMCPStdio in Frameworks */ = {isa = PBXBuildFile; productRef = A3C1490A51FEAB519010A328 /* IntatisMCPStdio */; };
+		4273FA94275252C7931BC011 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 91D5FD314C36E14D60FE4B59 /* Localizable.xcstrings */; };
+		48BC3D2EEBE6F4AC8B182D87 /* IntatisProcessDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C35181EEC98BCA95576ED16 /* IntatisProcessDiagnostics.swift */; };
+		4A5454F119D56652489CB503 /* IntatisConversation in Frameworks */ = {isa = PBXBuildFile; productRef = 30EE3E6ABD473FB4534BAD50 /* IntatisConversation */; };
+		4BB52BE561B38D045AFFEA3F /* MCPConversationSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ECB81A7A8FDC290A237D998 /* MCPConversationSurfaces.swift */; };
+		55BBA0CFC9363DB552552FA9 /* IntatisChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07631C7E8D80B5CABA640CD7 /* IntatisChatScreen.swift */; };
+		59AE57AD1BA8703B12380501 /* IntatisProviders in Frameworks */ = {isa = PBXBuildFile; productRef = D7D30C61D3901ECFF518350D /* IntatisProviders */; };
+		5C56426860C5CC7D99F6BDA7 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 8D17766C13C4325CEB86972A /* InfoPlist.strings */; };
+		5E0A3802C36DCA34B099A796 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 91D5FD314C36E14D60FE4B59 /* Localizable.xcstrings */; };
+		622C8A90F7A46619879B1E40 /* MCPConversationRuntimeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = E314CC6F9D69EAD2E5AFF604 /* MCPConversationRuntimeHost.swift */; };
+		62EFEB06243DE9D67FBF655B /* IOSConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B6F58B0D7B837F1A123A7C /* IOSConfig.swift */; };
+		62FF2288DE28416CA5E91A1F /* IntatisDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9B9934C9C37B1197922718 /* IntatisDesign.swift */; };
+		62FF6F99542DFA36436101D3 /* IntatisProcessDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C35181EEC98BCA95576ED16 /* IntatisProcessDiagnostics.swift */; };
+		656A35C56787D29DF52C3C5B /* IntatisDiagnosticExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2626A777E89C1659A8875F6E /* IntatisDiagnosticExportService.swift */; };
+		677F7E0A4F17AEF1F32110A4 /* IntatisPermission in Frameworks */ = {isa = PBXBuildFile; productRef = 4C5EDC7A345BFE5FB255F1E1 /* IntatisPermission */; };
+		6933020CA971E78F7856B0FE /* IntatisProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 7F1FA7299F5B453395930360 /* IntatisProtocol */; };
+		6D4A5C9C8B6F623CCA295754 /* IntatisKnowledge in Frameworks */ = {isa = PBXBuildFile; productRef = 8329F6FDFCED71854FF29DF7 /* IntatisKnowledge */; };
+		6E71D141E213EA334FEC7181 /* ComposerAttachmentSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36197C2C3D4E6D53CB634CF6 /* ComposerAttachmentSurfaces.swift */; };
+		732BC2B800460C097BF7C3AB /* IntatisCowork in Frameworks */ = {isa = PBXBuildFile; productRef = 15C8A751FAD795FFCBFB8ED1 /* IntatisCowork */; };
+		74ACCCE71F20E6984351BEDB /* IntatisMultimodal in Frameworks */ = {isa = PBXBuildFile; productRef = 7E7559562509795DA3C10054 /* IntatisMultimodal */; };
+		761796A4EE6E7796F7304E59 /* RendererFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40F078961211497AFC2C0FC /* RendererFixtureView.swift */; };
+		7A0ED92268F8FC9B284351E9 /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = 65AE470BC6772A85F837D96E /* ThirdPartyNotices */; };
+		7EBFC73DFB9A3AB3C1C7254B /* PhaseCPermissionFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E64B5499BD9F49441FB2AF2 /* PhaseCPermissionFixtureView.swift */; };
+		7FAEE2153916B1D891856C99 /* IntatisCowork in Frameworks */ = {isa = PBXBuildFile; productRef = B19E9C89CB303FC0E7B7FA52 /* IntatisCowork */; };
+		7FD14B3C16C4B306A57B096E /* CoworkAgentConversationFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF91D70A967683127AFDBAF /* CoworkAgentConversationFixtureView.swift */; };
+		8160FC3512F7AF7C4B0ABBE7 /* IntatisSharedUI in Frameworks */ = {isa = PBXBuildFile; productRef = A1A94C9C35D204B6A4B878B9 /* IntatisSharedUI */; };
+		83446373AC81CF7870DBCD4E /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0228A6E0DA8B6D29966E2D7D /* AppConfig.swift */; };
+		83745BB4D21CF13086C4B384 /* IntatisSharedUI in Frameworks */ = {isa = PBXBuildFile; productRef = 332919228CE14CF9692C573C /* IntatisSharedUI */; };
+		84C1804304AF925EC7179B73 /* AppInferenceCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F95DD47C14DB3B8F3E2AD9 /* AppInferenceCatalog.swift */; };
+		84D56595F50962F534DAF162 /* Intatis.icon in Resources */ = {isa = PBXBuildFile; fileRef = 5A331CDC0C2DD43C502CC067 /* Intatis.icon */; };
+		88285E70CB0F23E8E43D64F8 /* MCPProductIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCF9E02429C663F12F038F3 /* MCPProductIntegration.swift */; };
+		8B9E58F57EFE7833F2CD36E6 /* IntatisCore in Frameworks */ = {isa = PBXBuildFile; productRef = 98E5BF3BB85EEFC159516232 /* IntatisCore */; };
+		8C2C6C659A0EF75FC6D6343B /* CodeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB8034FA4E41DE4827CD18B /* CodeViewModel.swift */; };
+		8CEFC060D3F15C2BD6023A2F /* IntatisSharedUI in Frameworks */ = {isa = PBXBuildFile; productRef = 8F24BFDC5D0171F9EFBC1105 /* IntatisSharedUI */; };
+		8E6BD7181461365ED7E23D04 /* CoworkViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB25FDB66BDCD186A8D39911 /* CoworkViewModel.swift */; };
+		94BE6F95F8F965A625B89B8B /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = 65AE470BC6772A85F837D96E /* ThirdPartyNotices */; };
+		950C2960532FF641F88D27D9 /* MCPProjectSettingsSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9696C8B4F2DA6D9DB9BF3A1A /* MCPProjectSettingsSurfaces.swift */; };
+		9605D1838C67737F710399C9 /* IntatisProviders in Frameworks */ = {isa = PBXBuildFile; productRef = D60699D5C24C870764D0539B /* IntatisProviders */; };
+		96B16363056E160B53A8A4FA /* AppInferenceCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F95DD47C14DB3B8F3E2AD9 /* AppInferenceCatalog.swift */; };
+		98F390AAC6698154FD9DDA8F /* IntatisMultimodal in Frameworks */ = {isa = PBXBuildFile; productRef = 1AE99F796534FD26595F09F4 /* IntatisMultimodal */; };
+		9A15905E8E75AC28D2AA5E06 /* IntatisAgentKernel in Frameworks */ = {isa = PBXBuildFile; productRef = 844720562275655F78C40521 /* IntatisAgentKernel */; };
+		9F30D7DE8CAFED933779449C /* IntatisProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 7C1BF4D202905C4E9C8AAC41 /* IntatisProtocol */; };
+		9FC9B70370C5F6994196F876 /* KnowledgeAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = D919B2B9DAE89C9D991C6DD3 /* KnowledgeAccess.swift */; };
+		A3A76832D2DFE07BA61B485A /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = E42BD5D6D1F4CE896B388410 /* Workspace.swift */; };
+		A5A279219769A5AF93778C41 /* IntatisMultimodal in Frameworks */ = {isa = PBXBuildFile; productRef = AE6C2E99B00C72BE368BCE45 /* IntatisMultimodal */; };
+		A6B24DECE5D732CCAC78FC9D /* IntatisPermission in Frameworks */ = {isa = PBXBuildFile; productRef = 4BF6AEAB72254EF643B07F00 /* IntatisPermission */; };
+		A8850FE6EB3D50876CF0814B /* IntatisProviders in Frameworks */ = {isa = PBXBuildFile; productRef = F1C6264D8CDD4208AC00D2AF /* IntatisProviders */; };
+		A91B7FF6E3372598E2F6451E /* IntatisMCP in Frameworks */ = {isa = PBXBuildFile; productRef = 4B52F479A36E271A5C702C38 /* IntatisMCP */; };
+		B03F0AD1A8B9CABE908FB35C /* IntatisChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07631C7E8D80B5CABA640CD7 /* IntatisChatScreen.swift */; };
+		B2409C5853A9743688F40562 /* IntatisMacRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C94CA881689A9096A8E959B /* IntatisMacRootView.swift */; };
+		B7AF37DEA82700ADE41A1C16 /* IntatisConversation in Frameworks */ = {isa = PBXBuildFile; productRef = 0ADCF6099209D89856A52875 /* IntatisConversation */; };
+		B7FF574D7EBA8AD335D692EA /* IntatisMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870089C36A589071D8ED6EC /* IntatisMacApp.swift */; };
+		BAF811C6FFCD91F1657DD2D6 /* MCPImportSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = D92288F52EDE7BDB3A5269D0 /* MCPImportSurfaces.swift */; };
+		BE01D340120F8D133A72D090 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0228A6E0DA8B6D29966E2D7D /* AppConfig.swift */; };
+		BF15FDFCA01190A43B717EDD /* PhaseLSessionLifecycleFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26F425518A228063E60B672 /* PhaseLSessionLifecycleFixtureView.swift */; };
+		C4AE2F1988955E91FF7856D6 /* PhaseCPermissionFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E64B5499BD9F49441FB2AF2 /* PhaseCPermissionFixtureView.swift */; };
+		C7FDFFBD55C6B3296E3139FF /* ComposerAttachmentSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36197C2C3D4E6D53CB634CF6 /* ComposerAttachmentSurfaces.swift */; };
+		C8E3A80BA9F3690CA7F19DA6 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 29179480D0D24EBC2F6BA80E /* Settings.bundle */; };
+		C9F670AB962ED47284186349 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 049B03E7EC7D9BE9580B63DE /* Keychain.swift */; };
+		CAB6F394D364721186A37334 /* IntatisMCP in Frameworks */ = {isa = PBXBuildFile; productRef = 280BDB17B3AA8F25A3D251FC /* IntatisMCP */; };
+		CB5398834DE691A0D597FFB2 /* CoworkViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB25FDB66BDCD186A8D39911 /* CoworkViewModel.swift */; };
+		CC8B049C31627D10C49308E0 /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = C9C0C6B6E75EFABED4D3C9DF /* NOTICE.md */; };
+		CF1C918F45FC04A14B7F8C8B /* IntatisAgentKernel in Frameworks */ = {isa = PBXBuildFile; productRef = 32DD6ADC83DF5E1689CF1742 /* IntatisAgentKernel */; };
+		CFE597F0C15F8B6EAAE78573 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C33C1F0F2F24947F1D434F /* Keychain.swift */; };
+		D0197BBA5F476B99A23954CE /* MCPInteractionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C58AD15A7B8F17A12083AA7 /* MCPInteractionCenter.swift */; };
+		D1C10DD713C63D1189B5A625 /* MCPAppOAuthIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F468B7D521A61BB0829B92B3 /* MCPAppOAuthIntegration.swift */; };
+		D46342147718D5E4A4D4BD6E /* MCPAppSessionSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4D3A9617FC39D80BC95506B /* MCPAppSessionSurfaces.swift */; };
+		D7E2383602DD0EA4A1BF2DD8 /* MCPAppOAuthIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F468B7D521A61BB0829B92B3 /* MCPAppOAuthIntegration.swift */; };
+		D7F307B3D7D80903FA12C3AC /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 3915037F0761D583EBEF541F /* InfoPlist.strings */; };
+		DA91076037BF36A2405BB927 /* IntatisiOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D23E99CA6FDE7B5FF73FF9E2 /* IntatisiOSApp.swift */; };
+		DE2F7387908B90C9F6D67862 /* MCPConversationRuntimeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = E314CC6F9D69EAD2E5AFF604 /* MCPConversationRuntimeHost.swift */; };
+		DE3D252556AF029FCA8D477B /* MCPProjectSettingsSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9696C8B4F2DA6D9DB9BF3A1A /* MCPProjectSettingsSurfaces.swift */; };
+		E731B4D427AF0C7DB7C7AE1C /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = 65AE470BC6772A85F837D96E /* ThirdPartyNotices */; };
+		E91EE156E9FB5F497ED5CA8D /* PhaseLSessionLifecycleFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26F425518A228063E60B672 /* PhaseLSessionLifecycleFixtureView.swift */; };
+		EC2FD5ADE4A436772CF6752E /* IntatisConversation in Frameworks */ = {isa = PBXBuildFile; productRef = DD462BC79453BD18AF824F40 /* IntatisConversation */; };
+		EF707E20A7AEA857EA22FE62 /* IntatisDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9B9934C9C37B1197922718 /* IntatisDesign.swift */; };
+		F10B19EE07FFE9A706B0EA12 /* IntatisTools in Frameworks */ = {isa = PBXBuildFile; productRef = 88D438B83F6FD6C83BB606DC /* IntatisTools */; };
+		F15BF797D8C0ADDD898643C4 /* IntatisSkills in Frameworks */ = {isa = PBXBuildFile; productRef = F50CB93AB11FAAC3381AC5F2 /* IntatisSkills */; };
+		FD3D7BF5AD0F80D4EB23BD6F /* CoworkAgentConversationFixtureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF91D70A967683127AFDBAF /* CoworkAgentConversationFixtureView.swift */; };
+		FFC9C7D79B4907A2739AB9AF /* CoworkProjectSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7FEF09F58679B208FFEF87A /* CoworkProjectSettings.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0228A6E0DA8B6D29966E2D7D /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		049B03E7EC7D9BE9580B63DE /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		07631C7E8D80B5CABA640CD7 /* IntatisChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisChatScreen.swift; sourceTree = "<group>"; };
+		0ECB81A7A8FDC290A237D998 /* MCPConversationSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPConversationSurfaces.swift; sourceTree = "<group>"; };
+		2626A777E89C1659A8875F6E /* IntatisDiagnosticExportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisDiagnosticExportService.swift; sourceTree = "<group>"; };
+		29179480D0D24EBC2F6BA80E /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = wrapper.cfbundle; path = Settings.bundle; sourceTree = "<group>"; };
+		2C58AD15A7B8F17A12083AA7 /* MCPInteractionCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPInteractionCenter.swift; sourceTree = "<group>"; };
+		2E64B5499BD9F49441FB2AF2 /* PhaseCPermissionFixtureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseCPermissionFixtureView.swift; sourceTree = "<group>"; };
+		35F95DD47C14DB3B8F3E2AD9 /* AppInferenceCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppInferenceCatalog.swift; sourceTree = "<group>"; };
+		36197C2C3D4E6D53CB634CF6 /* ComposerAttachmentSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachmentSurfaces.swift; sourceTree = "<group>"; };
+		43B6F58B0D7B837F1A123A7C /* IOSConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSConfig.swift; sourceTree = "<group>"; };
+		488E8B712FDF3BEF19679F25 /* Intatis */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Intatis; path = .; sourceTree = SOURCE_ROOT; };
+		54087E04709733B093B73F56 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		5A331CDC0C2DD43C502CC067 /* Intatis.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = Intatis.icon; sourceTree = "<group>"; };
+		5C94CA881689A9096A8E959B /* IntatisMacRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisMacRootView.swift; sourceTree = "<group>"; };
+		65AE470BC6772A85F837D96E /* ThirdPartyNotices */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ThirdPartyNotices; sourceTree = SOURCE_ROOT; };
+		6C35181EEC98BCA95576ED16 /* IntatisProcessDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisProcessDiagnostics.swift; sourceTree = "<group>"; };
+		7CB8034FA4E41DE4827CD18B /* CodeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeViewModel.swift; sourceTree = "<group>"; };
+		7E431EE9C0248571E93BFEB3 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		91D5FD314C36E14D60FE4B59 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		9696C8B4F2DA6D9DB9BF3A1A /* MCPProjectSettingsSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPProjectSettingsSurfaces.swift; sourceTree = "<group>"; };
+		9F9B9934C9C37B1197922718 /* IntatisDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisDesign.swift; sourceTree = "<group>"; };
+		9FCF9E02429C663F12F038F3 /* MCPProductIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPProductIntegration.swift; sourceTree = "<group>"; };
+		A26F425518A228063E60B672 /* PhaseLSessionLifecycleFixtureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseLSessionLifecycleFixtureView.swift; sourceTree = "<group>"; };
+		A6C33C1F0F2F24947F1D434F /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		AB25FDB66BDCD186A8D39911 /* CoworkViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoworkViewModel.swift; sourceTree = "<group>"; };
+		B6A16446E11879BB3929FE63 /* IntatisiOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IntatisiOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BCFF2967F022449E5DDC35D6 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		C180D9BD81D88AB2A38C51AE /* IntatisMacAppStore.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = IntatisMacAppStore.app; path = Intatis.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C4D3A9617FC39D80BC95506B /* MCPAppSessionSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPAppSessionSurfaces.swift; sourceTree = "<group>"; };
+		C9C0C6B6E75EFABED4D3C9DF /* NOTICE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = NOTICE.md; sourceTree = "<group>"; };
+		D23E99CA6FDE7B5FF73FF9E2 /* IntatisiOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisiOSApp.swift; sourceTree = "<group>"; };
+		D35C5E752DABCE156D6C7838 /* SessionRuntimeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRuntimeManager.swift; sourceTree = "<group>"; };
+		D870089C36A589071D8ED6EC /* IntatisMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntatisMacApp.swift; sourceTree = "<group>"; };
+		D919B2B9DAE89C9D991C6DD3 /* KnowledgeAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeAccess.swift; sourceTree = "<group>"; };
+		D92288F52EDE7BDB3A5269D0 /* MCPImportSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPImportSurfaces.swift; sourceTree = "<group>"; };
+		DD6885459F7E3A5DD9F57246 /* IntatisMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IntatisMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E314CC6F9D69EAD2E5AFF604 /* MCPConversationRuntimeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPConversationRuntimeHost.swift; sourceTree = "<group>"; };
+		E42BD5D6D1F4CE896B388410 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
+		EDF91D70A967683127AFDBAF /* CoworkAgentConversationFixtureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoworkAgentConversationFixtureView.swift; sourceTree = "<group>"; };
+		F2B57FCC183F452D8E7DA818 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		F40F078961211497AFC2C0FC /* RendererFixtureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RendererFixtureView.swift; sourceTree = "<group>"; };
+		F468B7D521A61BB0829B92B3 /* MCPAppOAuthIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPAppOAuthIntegration.swift; sourceTree = "<group>"; };
+		F7FEF09F58679B208FFEF87A /* CoworkProjectSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoworkProjectSettings.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		67AB9E8CC08972237CAB395F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				177BD74137D54068148111F2 /* IntatisCore in Frameworks */,
+				6933020CA971E78F7856B0FE /* IntatisProtocol in Frameworks */,
+				9605D1838C67737F710399C9 /* IntatisProviders in Frameworks */,
+				B7AF37DEA82700ADE41A1C16 /* IntatisConversation in Frameworks */,
+				117379C35B4C7E6D64E5B492 /* IntatisArtifacts in Frameworks */,
+				98F390AAC6698154FD9DDA8F /* IntatisMultimodal in Frameworks */,
+				8160FC3512F7AF7C4B0ABBE7 /* IntatisSharedUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C190901BE75D3FB8574907C9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				13E27DA06E978F5E86F92B29 /* IntatisCore in Frameworks */,
+				9F30D7DE8CAFED933779449C /* IntatisProtocol in Frameworks */,
+				59AE57AD1BA8703B12380501 /* IntatisProviders in Frameworks */,
+				4A5454F119D56652489CB503 /* IntatisConversation in Frameworks */,
+				252B52BB0BD056A879466A42 /* IntatisArtifacts in Frameworks */,
+				74ACCCE71F20E6984351BEDB /* IntatisMultimodal in Frameworks */,
+				8CEFC060D3F15C2BD6023A2F /* IntatisSharedUI in Frameworks */,
+				1C4DF8F29242F3F9E1DF8461 /* IntatisTools in Frameworks */,
+				677F7E0A4F17AEF1F32110A4 /* IntatisPermission in Frameworks */,
+				9A15905E8E75AC28D2AA5E06 /* IntatisAgentKernel in Frameworks */,
+				F15BF797D8C0ADDD898643C4 /* IntatisSkills in Frameworks */,
+				732BC2B800460C097BF7C3AB /* IntatisCowork in Frameworks */,
+				A91B7FF6E3372598E2F6451E /* IntatisMCP in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DF996B2863DC4D73D30E7CBA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B9E58F57EFE7833F2CD36E6 /* IntatisCore in Frameworks */,
+				15F4DE3F2D38EE41AAC6F586 /* IntatisProtocol in Frameworks */,
+				A8850FE6EB3D50876CF0814B /* IntatisProviders in Frameworks */,
+				EC2FD5ADE4A436772CF6752E /* IntatisConversation in Frameworks */,
+				38C2F419380AB76916FE60B5 /* IntatisArtifacts in Frameworks */,
+				A5A279219769A5AF93778C41 /* IntatisMultimodal in Frameworks */,
+				83745BB4D21CF13086C4B384 /* IntatisSharedUI in Frameworks */,
+				F10B19EE07FFE9A706B0EA12 /* IntatisTools in Frameworks */,
+				6D4A5C9C8B6F623CCA295754 /* IntatisKnowledge in Frameworks */,
+				A6B24DECE5D732CCAC78FC9D /* IntatisPermission in Frameworks */,
+				CF1C918F45FC04A14B7F8C8B /* IntatisAgentKernel in Frameworks */,
+				1CF0442350E0BFD1A771C13D /* IntatisSkills in Frameworks */,
+				7FAEE2153916B1D891856C99 /* IntatisCowork in Frameworks */,
+				CAB6F394D364721186A37334 /* IntatisMCP in Frameworks */,
+				425BB4D37E53799BE379918A /* IntatisMCPStdio in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2480710EE72573AC6B1D7064 /* IntatisiOS */ = {
+			isa = PBXGroup;
+			children = (
+				4E0BFAEB3D79C31C6E6A079D /* Resources */,
+				E242BD01EB80C438E7DB917F /* Sources */,
+			);
+			path = IntatisiOS;
+			sourceTree = "<group>";
+		};
+		2BDF8BDF0E1B8C49B41600D7 /* Internal Modules */ = {
+			isa = PBXGroup;
+			children = (
+				488E8B712FDF3BEF19679F25 /* Intatis */,
+			);
+			name = "Internal Modules";
+			sourceTree = "<group>";
+		};
+		2D78EBEF09F7FB276681D923 = {
+			isa = PBXGroup;
+			children = (
+				5A331CDC0C2DD43C502CC067 /* Intatis.icon */,
+				C9C0C6B6E75EFABED4D3C9DF /* NOTICE.md */,
+				65AE470BC6772A85F837D96E /* ThirdPartyNotices */,
+				ECC7EFD25C4F70345E7854EC /* Apps */,
+				2BDF8BDF0E1B8C49B41600D7 /* Internal Modules */,
+				701AAF387439908E7B68523E /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4E0BFAEB3D79C31C6E6A079D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				29179480D0D24EBC2F6BA80E /* Settings.bundle */,
+				3915037F0761D583EBEF541F /* InfoPlist.strings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		701AAF387439908E7B68523E /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B6A16446E11879BB3929FE63 /* IntatisiOS.app */,
+				DD6885459F7E3A5DD9F57246 /* IntatisMac.app */,
+				C180D9BD81D88AB2A38C51AE /* IntatisMacAppStore.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9C14D5DC66CF6CE6633ECFB0 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				8D17766C13C4325CEB86972A /* InfoPlist.strings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		E242BD01EB80C438E7DB917F /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				D23E99CA6FDE7B5FF73FF9E2 /* IntatisiOSApp.swift */,
+				43B6F58B0D7B837F1A123A7C /* IOSConfig.swift */,
+				049B03E7EC7D9BE9580B63DE /* Keychain.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		EC5B711B1695CBA97CC5309E /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				0228A6E0DA8B6D29966E2D7D /* AppConfig.swift */,
+				35F95DD47C14DB3B8F3E2AD9 /* AppInferenceCatalog.swift */,
+				7CB8034FA4E41DE4827CD18B /* CodeViewModel.swift */,
+				36197C2C3D4E6D53CB634CF6 /* ComposerAttachmentSurfaces.swift */,
+				EDF91D70A967683127AFDBAF /* CoworkAgentConversationFixtureView.swift */,
+				F7FEF09F58679B208FFEF87A /* CoworkProjectSettings.swift */,
+				AB25FDB66BDCD186A8D39911 /* CoworkViewModel.swift */,
+				07631C7E8D80B5CABA640CD7 /* IntatisChatScreen.swift */,
+				9F9B9934C9C37B1197922718 /* IntatisDesign.swift */,
+				2626A777E89C1659A8875F6E /* IntatisDiagnosticExportService.swift */,
+				D870089C36A589071D8ED6EC /* IntatisMacApp.swift */,
+				5C94CA881689A9096A8E959B /* IntatisMacRootView.swift */,
+				6C35181EEC98BCA95576ED16 /* IntatisProcessDiagnostics.swift */,
+				A6C33C1F0F2F24947F1D434F /* Keychain.swift */,
+				D919B2B9DAE89C9D991C6DD3 /* KnowledgeAccess.swift */,
+				F468B7D521A61BB0829B92B3 /* MCPAppOAuthIntegration.swift */,
+				C4D3A9617FC39D80BC95506B /* MCPAppSessionSurfaces.swift */,
+				E314CC6F9D69EAD2E5AFF604 /* MCPConversationRuntimeHost.swift */,
+				0ECB81A7A8FDC290A237D998 /* MCPConversationSurfaces.swift */,
+				D92288F52EDE7BDB3A5269D0 /* MCPImportSurfaces.swift */,
+				2C58AD15A7B8F17A12083AA7 /* MCPInteractionCenter.swift */,
+				9FCF9E02429C663F12F038F3 /* MCPProductIntegration.swift */,
+				9696C8B4F2DA6D9DB9BF3A1A /* MCPProjectSettingsSurfaces.swift */,
+				2E64B5499BD9F49441FB2AF2 /* PhaseCPermissionFixtureView.swift */,
+				A26F425518A228063E60B672 /* PhaseLSessionLifecycleFixtureView.swift */,
+				F40F078961211497AFC2C0FC /* RendererFixtureView.swift */,
+				D35C5E752DABCE156D6C7838 /* SessionRuntimeManager.swift */,
+				E42BD5D6D1F4CE896B388410 /* Workspace.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		ECC7EFD25C4F70345E7854EC /* Apps */ = {
+			isa = PBXGroup;
+			children = (
+				2480710EE72573AC6B1D7064 /* IntatisiOS */,
+				F1A466B502CECD7ABB5C0FDB /* IntatisMac */,
+				FFEC7665D1292C43971758C9 /* SharedResources */,
+			);
+			path = Apps;
+			sourceTree = "<group>";
+		};
+		F1A466B502CECD7ABB5C0FDB /* IntatisMac */ = {
+			isa = PBXGroup;
+			children = (
+				9C14D5DC66CF6CE6633ECFB0 /* Resources */,
+				EC5B711B1695CBA97CC5309E /* Sources */,
+			);
+			path = IntatisMac;
+			sourceTree = "<group>";
+		};
+		FFEC7665D1292C43971758C9 /* SharedResources */ = {
+			isa = PBXGroup;
+			children = (
+				91D5FD314C36E14D60FE4B59 /* Localizable.xcstrings */,
+			);
+			path = SharedResources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		47D9CFD071D2189939265601 /* IntatisiOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A35CBC6F248AF140BDAFD2A4 /* Build configuration list for PBXNativeTarget "IntatisiOS" */;
+			buildPhases = (
+				536FB6DA6913919A33D4EA67 /* Sources */,
+				A0EA16BBEFB8BA4ACD438CB7 /* Resources */,
+				67AB9E8CC08972237CAB395F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IntatisiOS;
+			packageProductDependencies = (
+				5F401AFDF1BD7A9C2255E7B4 /* IntatisCore */,
+				7F1FA7299F5B453395930360 /* IntatisProtocol */,
+				D60699D5C24C870764D0539B /* IntatisProviders */,
+				0ADCF6099209D89856A52875 /* IntatisConversation */,
+				E55A2C94ACB7BE4F13EF4289 /* IntatisArtifacts */,
+				1AE99F796534FD26595F09F4 /* IntatisMultimodal */,
+				A1A94C9C35D204B6A4B878B9 /* IntatisSharedUI */,
+			);
+			productName = IntatisiOS;
+			productReference = B6A16446E11879BB3929FE63 /* IntatisiOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D77B2D088C10F4D65875E16F /* IntatisMacAppStore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8216138351AD34540454BAAA /* Build configuration list for PBXNativeTarget "IntatisMacAppStore" */;
+			buildPhases = (
+				5E7EFABA56075590583510E9 /* Sources */,
+				0E4E0BEE0F28A1BC0432E352 /* Resources */,
+				C190901BE75D3FB8574907C9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IntatisMacAppStore;
+			packageProductDependencies = (
+				898312F2D0F6AB9C4439DF7F /* IntatisCore */,
+				7C1BF4D202905C4E9C8AAC41 /* IntatisProtocol */,
+				D7D30C61D3901ECFF518350D /* IntatisProviders */,
+				30EE3E6ABD473FB4534BAD50 /* IntatisConversation */,
+				94E4C98C37F700C33C21B661 /* IntatisArtifacts */,
+				7E7559562509795DA3C10054 /* IntatisMultimodal */,
+				8F24BFDC5D0171F9EFBC1105 /* IntatisSharedUI */,
+				A846A3F03DE6EF7B45F4F871 /* IntatisTools */,
+				4C5EDC7A345BFE5FB255F1E1 /* IntatisPermission */,
+				844720562275655F78C40521 /* IntatisAgentKernel */,
+				F50CB93AB11FAAC3381AC5F2 /* IntatisSkills */,
+				15C8A751FAD795FFCBFB8ED1 /* IntatisCowork */,
+				4B52F479A36E271A5C702C38 /* IntatisMCP */,
+			);
+			productName = IntatisMacAppStore;
+			productReference = C180D9BD81D88AB2A38C51AE /* IntatisMacAppStore.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FF5C3230098B22BDC131A720 /* IntatisMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D6BC72F662CF39BD862F5235 /* Build configuration list for PBXNativeTarget "IntatisMac" */;
+			buildPhases = (
+				ADC2313C96C35BACB6E635D9 /* Sources */,
+				209ABF35ED3D0E41170CA2AE /* Resources */,
+				DF996B2863DC4D73D30E7CBA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IntatisMac;
+			packageProductDependencies = (
+				98E5BF3BB85EEFC159516232 /* IntatisCore */,
+				C418F71307784EC9E4863DBC /* IntatisProtocol */,
+				F1C6264D8CDD4208AC00D2AF /* IntatisProviders */,
+				DD462BC79453BD18AF824F40 /* IntatisConversation */,
+				5261DCC201EDCE99E95753E9 /* IntatisArtifacts */,
+				AE6C2E99B00C72BE368BCE45 /* IntatisMultimodal */,
+				332919228CE14CF9692C573C /* IntatisSharedUI */,
+				88D438B83F6FD6C83BB606DC /* IntatisTools */,
+				8329F6FDFCED71854FF29DF7 /* IntatisKnowledge */,
+				4BF6AEAB72254EF643B07F00 /* IntatisPermission */,
+				32DD6ADC83DF5E1689CF1742 /* IntatisAgentKernel */,
+				38596545FC5DE4070B652D63 /* IntatisSkills */,
+				B19E9C89CB303FC0E7B7FA52 /* IntatisCowork */,
+				280BDB17B3AA8F25A3D251FC /* IntatisMCP */,
+				A3C1490A51FEAB519010A328 /* IntatisMCPStdio */,
+			);
+			productName = IntatisMac;
+			productReference = DD6885459F7E3A5DD9F57246 /* IntatisMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8D5B070A7469671D1ACED2A8 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					47D9CFD071D2189939265601 = {
+						ProvisioningStyle = Automatic;
+					};
+					D77B2D088C10F4D65875E16F = {
+						ProvisioningStyle = Automatic;
+					};
+					FF5C3230098B22BDC131A720 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 122D346C3D06D763773F17B5 /* Build configuration list for PBXProject "Intatis" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+				"zh-Hans",
+			);
+			mainGroup = 2D78EBEF09F7FB276681D923;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C3155E02E6BF0F6D65B37C52 /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 701AAF387439908E7B68523E /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FF5C3230098B22BDC131A720 /* IntatisMac */,
+				D77B2D088C10F4D65875E16F /* IntatisMacAppStore */,
+				47D9CFD071D2189939265601 /* IntatisiOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		0E4E0BEE0F28A1BC0432E352 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5E0A3802C36DCA34B099A796 /* Localizable.xcstrings in Resources */,
+				0AA61226EDEC2CBEBD841887 /* NOTICE.md in Resources */,
+				94BE6F95F8F965A625B89B8B /* ThirdPartyNotices in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		209ABF35ED3D0E41170CA2AE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5C56426860C5CC7D99F6BDA7 /* InfoPlist.strings in Resources */,
+				122F929B476B3218A4D84699 /* Intatis.icon in Resources */,
+				4273FA94275252C7931BC011 /* Localizable.xcstrings in Resources */,
+				CC8B049C31627D10C49308E0 /* NOTICE.md in Resources */,
+				E731B4D427AF0C7DB7C7AE1C /* ThirdPartyNotices in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A0EA16BBEFB8BA4ACD438CB7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7F307B3D7D80903FA12C3AC /* InfoPlist.strings in Resources */,
+				84D56595F50962F534DAF162 /* Intatis.icon in Resources */,
+				1C210BBBF0D46F7EA3981C4E /* Localizable.xcstrings in Resources */,
+				1C201C95970B11276198857D /* NOTICE.md in Resources */,
+				C8E3A80BA9F3690CA7F19DA6 /* Settings.bundle in Resources */,
+				7A0ED92268F8FC9B284351E9 /* ThirdPartyNotices in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		536FB6DA6913919A33D4EA67 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				62EFEB06243DE9D67FBF655B /* IOSConfig.swift in Sources */,
+				DA91076037BF36A2405BB927 /* IntatisiOSApp.swift in Sources */,
+				C9F670AB962ED47284186349 /* Keychain.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5E7EFABA56075590583510E9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BE01D340120F8D133A72D090 /* AppConfig.swift in Sources */,
+				96B16363056E160B53A8A4FA /* AppInferenceCatalog.swift in Sources */,
+				2AA66574D354AE1AE2E46590 /* CodeViewModel.swift in Sources */,
+				6E71D141E213EA334FEC7181 /* ComposerAttachmentSurfaces.swift in Sources */,
+				7FD14B3C16C4B306A57B096E /* CoworkAgentConversationFixtureView.swift in Sources */,
+				FFC9C7D79B4907A2739AB9AF /* CoworkProjectSettings.swift in Sources */,
+				CB5398834DE691A0D597FFB2 /* CoworkViewModel.swift in Sources */,
+				B03F0AD1A8B9CABE908FB35C /* IntatisChatScreen.swift in Sources */,
+				62FF2288DE28416CA5E91A1F /* IntatisDesign.swift in Sources */,
+				23F9BEB7CD70AACEECBF5E40 /* IntatisDiagnosticExportService.swift in Sources */,
+				0A641ACF2C79B02EFBF23997 /* IntatisMacApp.swift in Sources */,
+				30921B1F4697AF4AD411C05F /* IntatisMacRootView.swift in Sources */,
+				48BC3D2EEBE6F4AC8B182D87 /* IntatisProcessDiagnostics.swift in Sources */,
+				4067A136E9985FA7AD00B4B5 /* Keychain.swift in Sources */,
+				3D138CFEFC3C0533147BEEA6 /* KnowledgeAccess.swift in Sources */,
+				D7E2383602DD0EA4A1BF2DD8 /* MCPAppOAuthIntegration.swift in Sources */,
+				0EBBA99A232F638745751E18 /* MCPAppSessionSurfaces.swift in Sources */,
+				DE2F7387908B90C9F6D67862 /* MCPConversationRuntimeHost.swift in Sources */,
+				4BB52BE561B38D045AFFEA3F /* MCPConversationSurfaces.swift in Sources */,
+				BAF811C6FFCD91F1657DD2D6 /* MCPImportSurfaces.swift in Sources */,
+				3AE91BB269CBE1AFB24EDE7D /* MCPInteractionCenter.swift in Sources */,
+				88285E70CB0F23E8E43D64F8 /* MCPProductIntegration.swift in Sources */,
+				DE3D252556AF029FCA8D477B /* MCPProjectSettingsSurfaces.swift in Sources */,
+				7EBFC73DFB9A3AB3C1C7254B /* PhaseCPermissionFixtureView.swift in Sources */,
+				BF15FDFCA01190A43B717EDD /* PhaseLSessionLifecycleFixtureView.swift in Sources */,
+				05E7C4D4C39C1A9EA8E46648 /* RendererFixtureView.swift in Sources */,
+				2037C782572AB7C9DEAAE90D /* SessionRuntimeManager.swift in Sources */,
+				04EE232FF3DB8E83A6D48917 /* Workspace.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ADC2313C96C35BACB6E635D9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				83446373AC81CF7870DBCD4E /* AppConfig.swift in Sources */,
+				84C1804304AF925EC7179B73 /* AppInferenceCatalog.swift in Sources */,
+				8C2C6C659A0EF75FC6D6343B /* CodeViewModel.swift in Sources */,
+				C7FDFFBD55C6B3296E3139FF /* ComposerAttachmentSurfaces.swift in Sources */,
+				FD3D7BF5AD0F80D4EB23BD6F /* CoworkAgentConversationFixtureView.swift in Sources */,
+				23559736736D69D0C4A82426 /* CoworkProjectSettings.swift in Sources */,
+				8E6BD7181461365ED7E23D04 /* CoworkViewModel.swift in Sources */,
+				55BBA0CFC9363DB552552FA9 /* IntatisChatScreen.swift in Sources */,
+				EF707E20A7AEA857EA22FE62 /* IntatisDesign.swift in Sources */,
+				656A35C56787D29DF52C3C5B /* IntatisDiagnosticExportService.swift in Sources */,
+				B7FF574D7EBA8AD335D692EA /* IntatisMacApp.swift in Sources */,
+				B2409C5853A9743688F40562 /* IntatisMacRootView.swift in Sources */,
+				62FF6F99542DFA36436101D3 /* IntatisProcessDiagnostics.swift in Sources */,
+				CFE597F0C15F8B6EAAE78573 /* Keychain.swift in Sources */,
+				9FC9B70370C5F6994196F876 /* KnowledgeAccess.swift in Sources */,
+				D1C10DD713C63D1189B5A625 /* MCPAppOAuthIntegration.swift in Sources */,
+				D46342147718D5E4A4D4BD6E /* MCPAppSessionSurfaces.swift in Sources */,
+				622C8A90F7A46619879B1E40 /* MCPConversationRuntimeHost.swift in Sources */,
+				210C06F47EA5426B9D193562 /* MCPConversationSurfaces.swift in Sources */,
+				11EC860C45F604539E7D3A4E /* MCPImportSurfaces.swift in Sources */,
+				D0197BBA5F476B99A23954CE /* MCPInteractionCenter.swift in Sources */,
+				2B610FAF7F0CA06B7B3C7173 /* MCPProductIntegration.swift in Sources */,
+				950C2960532FF641F88D27D9 /* MCPProjectSettingsSurfaces.swift in Sources */,
+				C4AE2F1988955E91FF7856D6 /* PhaseCPermissionFixtureView.swift in Sources */,
+				E91EE156E9FB5F497ED5CA8D /* PhaseLSessionLifecycleFixtureView.swift in Sources */,
+				761796A4EE6E7796F7304E59 /* RendererFixtureView.swift in Sources */,
+				1560B4AEC2A5F80D5700DC4F /* SessionRuntimeManager.swift in Sources */,
+				A3A76832D2DFE07BA61B485A /* Workspace.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		3915037F0761D583EBEF541F /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				7E431EE9C0248571E93BFEB3 /* en */,
+				54087E04709733B093B73F56 /* zh-Hans */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+		8D17766C13C4325CEB86972A /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				BCFF2967F022449E5DDC35D6 /* en */,
+				F2B57FCC183F452D8E7DA818 /* zh-Hans */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		05ABB0E776FC4BA0BB4D8172 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 55;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.55;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		1D40716F75395F3CCF66C266 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 55;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.55;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		1DBF29CF45336C4D8A731269 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Intatis;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Intatis uses the microphone for voice input transcription.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.Intatis;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		3B812D888C6E9278DEFDCBDA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Intatis;
+				CODE_SIGN_ENTITLEMENTS = Apps/IntatisMac/IntatisMac.DeveloperID.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Intatis contributors. See NOTICE.md.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Intatis uses the microphone to turn voice into editable message drafts.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.IntatisMac;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		4CD69858B34BA3D83522F0B9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Apps/IntatisMac/IntatisMac.AppStore.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Intatis contributors. See NOTICE.md.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.IntatisMac;
+				PRODUCT_NAME = Intatis;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) INTATIS_MAC_APP_STORE";
+			};
+			name = Debug;
+		};
+		600F3417A5A38C35DD7EE6C3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Intatis;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = L5ZXXFUZTL;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Intatis uses the microphone for voice input transcription.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.Intatis;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		9C35C3130C2FBA2956984F94 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Apps/IntatisMac/IntatisMac.AppStore.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Intatis contributors. See NOTICE.md.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.IntatisMac;
+				PRODUCT_NAME = Intatis;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) INTATIS_MAC_APP_STORE";
+			};
+			name = Release;
+		};
+		A24F8D89C94D164A99D3F73A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Intatis;
+				CODE_SIGN_ENTITLEMENTS = Apps/IntatisMac/IntatisMac.DeveloperID.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Intatis;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Intatis contributors. See NOTICE.md.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Intatis uses the microphone to turn voice into editable message drafts.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.IntatisMac;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		122D346C3D06D763773F17B5 /* Build configuration list for PBXProject "Intatis" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1D40716F75395F3CCF66C266 /* Debug */,
+				05ABB0E776FC4BA0BB4D8172 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8216138351AD34540454BAAA /* Build configuration list for PBXNativeTarget "IntatisMacAppStore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4CD69858B34BA3D83522F0B9 /* Debug */,
+				9C35C3130C2FBA2956984F94 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A35CBC6F248AF140BDAFD2A4 /* Build configuration list for PBXNativeTarget "IntatisiOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				600F3417A5A38C35DD7EE6C3 /* Debug */,
+				1DBF29CF45336C4D8A731269 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D6BC72F662CF39BD862F5235 /* Build configuration list for PBXNativeTarget "IntatisMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A24F8D89C94D164A99D3F73A /* Debug */,
+				3B812D888C6E9278DEFDCBDA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		C3155E02E6BF0F6D65B37C52 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0ADCF6099209D89856A52875 /* IntatisConversation */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisConversation;
+		};
+		15C8A751FAD795FFCBFB8ED1 /* IntatisCowork */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisCowork;
+		};
+		1AE99F796534FD26595F09F4 /* IntatisMultimodal */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMultimodal;
+		};
+		280BDB17B3AA8F25A3D251FC /* IntatisMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMCP;
+		};
+		30EE3E6ABD473FB4534BAD50 /* IntatisConversation */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisConversation;
+		};
+		32DD6ADC83DF5E1689CF1742 /* IntatisAgentKernel */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisAgentKernel;
+		};
+		332919228CE14CF9692C573C /* IntatisSharedUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisSharedUI;
+		};
+		38596545FC5DE4070B652D63 /* IntatisSkills */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisSkills;
+		};
+		4B52F479A36E271A5C702C38 /* IntatisMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMCP;
+		};
+		4BF6AEAB72254EF643B07F00 /* IntatisPermission */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisPermission;
+		};
+		4C5EDC7A345BFE5FB255F1E1 /* IntatisPermission */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisPermission;
+		};
+		5261DCC201EDCE99E95753E9 /* IntatisArtifacts */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisArtifacts;
+		};
+		5F401AFDF1BD7A9C2255E7B4 /* IntatisCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisCore;
+		};
+		7C1BF4D202905C4E9C8AAC41 /* IntatisProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProtocol;
+		};
+		7E7559562509795DA3C10054 /* IntatisMultimodal */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMultimodal;
+		};
+		7F1FA7299F5B453395930360 /* IntatisProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProtocol;
+		};
+		8329F6FDFCED71854FF29DF7 /* IntatisKnowledge */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisKnowledge;
+		};
+		844720562275655F78C40521 /* IntatisAgentKernel */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisAgentKernel;
+		};
+		88D438B83F6FD6C83BB606DC /* IntatisTools */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisTools;
+		};
+		898312F2D0F6AB9C4439DF7F /* IntatisCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisCore;
+		};
+		8F24BFDC5D0171F9EFBC1105 /* IntatisSharedUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisSharedUI;
+		};
+		94E4C98C37F700C33C21B661 /* IntatisArtifacts */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisArtifacts;
+		};
+		98E5BF3BB85EEFC159516232 /* IntatisCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisCore;
+		};
+		A1A94C9C35D204B6A4B878B9 /* IntatisSharedUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisSharedUI;
+		};
+		A3C1490A51FEAB519010A328 /* IntatisMCPStdio */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMCPStdio;
+		};
+		A846A3F03DE6EF7B45F4F871 /* IntatisTools */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisTools;
+		};
+		AE6C2E99B00C72BE368BCE45 /* IntatisMultimodal */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisMultimodal;
+		};
+		B19E9C89CB303FC0E7B7FA52 /* IntatisCowork */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisCowork;
+		};
+		C418F71307784EC9E4863DBC /* IntatisProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProtocol;
+		};
+		D60699D5C24C870764D0539B /* IntatisProviders */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProviders;
+		};
+		D7D30C61D3901ECFF518350D /* IntatisProviders */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProviders;
+		};
+		DD462BC79453BD18AF824F40 /* IntatisConversation */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisConversation;
+		};
+		E55A2C94ACB7BE4F13EF4289 /* IntatisArtifacts */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisArtifacts;
+		};
+		F1C6264D8CDD4208AC00D2AF /* IntatisProviders */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisProviders;
+		};
+		F50CB93AB11FAAC3381AC5F2 /* IntatisSkills */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = IntatisSkills;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 8D5B070A7469671D1ACED2A8 /* Project object */;
+}

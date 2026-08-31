@@ -815,7 +815,7 @@ final class SecureReceiverService: ObservableObject {
             let checksum = try await Task.detached(priority: .utility) {
                 try MacSecurityUtilities.sha256Hex(fileURL: sourceURL)
             }.value
-            let currentBusinessModifiedAt = studyLibraryStore.item(recordingID: recordingID)?.updatedAt
+            let currentBusinessModifiedAt = studyLibraryStore.businessModifiedAt(recordingID: recordingID)
             let modifiedAtMatches = reconciliationRecord.sourceModifiedAt.map { expected in
                 guard let currentBusinessModifiedAt else { return false }
                 return SyncTimestampPolicy.matches(expected, currentBusinessModifiedAt)

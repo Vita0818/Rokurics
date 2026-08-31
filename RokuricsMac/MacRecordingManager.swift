@@ -15,13 +15,10 @@ final class MacRecordingManager: ObservableObject {
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var statusMessage = RokuricsCopy.text("Mac 本地录音就绪", "Local Mac recorder ready")
     @Published private(set) var lastErrorMessage: String?
-    @Published private(set) var liveTranscriptText = ""
     @Published private(set) var latestSavedItem: MacRecordingInboxItem?
 
     private let recordingFileStore: MacRecordingFileStore
-    private let transcriptStore: TranscriptStore
     private let fileManager: FileManager
-    private let liveTranscriptionSession = RokuricsSimulatedLiveTranscriptionSession()
     private var recorder: AVAudioRecorder?
     private var recordingTimer: Timer?
     private var activeRecordingID: String?
@@ -31,12 +28,10 @@ final class MacRecordingManager: ObservableObject {
 
     init(
         recordingFileStore: MacRecordingFileStore = MacRecordingFileStore(),
-        transcriptStore: TranscriptStore? = nil,
         fileManager: FileManager = .default
     ) {
         self.recordingFileStore = recordingFileStore
         self.fileManager = fileManager
-        self.transcriptStore = transcriptStore ?? TranscriptStore(fileManager: fileManager)
     }
 
     deinit {
@@ -64,7 +59,6 @@ final class MacRecordingManager: ObservableObject {
         }
 
         recorder.pause()
-        liveTranscriptionSession.pause()
         stopTimer()
         elapsedSeconds = recorder.currentTime > 0 ? recorder.currentTime : elapsedSeconds
         phase = .paused
@@ -83,7 +77,6 @@ final class MacRecordingManager: ObservableObject {
 
         phase = .recording
         statusMessage = RokuricsCopy.text("正在录音", "Recording")
-        liveTranscriptionSession.resume()
         startTimer()
     }
 
@@ -95,7 +88,6 @@ final class MacRecordingManager: ObservableObject {
         cleanupActiveRecorder(removeActiveFile: true)
         lastErrorMessage = nil
         elapsedSeconds = 0
-        liveTranscriptText = ""
         phase = .preparing
         statusMessage = RokuricsCopy.text("正在请求麦克风权限", "Requesting microphone access")
 
@@ -122,7 +114,6 @@ final class MacRecordingManager: ObservableObject {
 
         let endedAt = Date()
         let duration = recorder.currentTime > 0 ? recorder.currentTime : max(endedAt.timeIntervalSince(startedAt), elapsedSeconds)
-        let transcriptSnapshot = liveTranscriptionSession.stop(elapsedSeconds: duration)
         self.recorder = nil
 
         Task { [weak self] in
@@ -132,8 +123,7 @@ final class MacRecordingManager: ObservableObject {
                 temporaryAudioURL: audioURL,
                 createdAt: startedAt,
                 endedAt: endedAt,
-                duration: duration,
-                transcriptSnapshot: transcriptSnapshot
+                duration: duration
             )
         }
     }
@@ -182,9 +172,6 @@ final class MacRecordingManager: ObservableObject {
         phase = .recording
         statusMessage = RokuricsCopy.text("正在录音", "Recording")
         startTimer()
-        liveTranscriptionSession.start(recordingTitle: title, deviceName: "Mac") { [weak self] snapshot in
-            self?.liveTranscriptText = snapshot.text
-        }
     }
 
     private func persistFinishedRecording(
@@ -193,8 +180,7 @@ final class MacRecordingManager: ObservableObject {
         temporaryAudioURL: URL,
         createdAt: Date,
         endedAt: Date,
-        duration: TimeInterval,
-        transcriptSnapshot: RokuricsLiveTranscriptionSnapshot
+        duration: TimeInterval
     ) async {
         phase = .saving
         statusMessage = RokuricsCopy.text("正在保存到学习库", "Saving to library")
@@ -218,7 +204,7 @@ final class MacRecordingManager: ObservableObject {
                 bitrate: 96_000,
                 fileSize: fileSize,
                 uploadStatus: "localMacRecording",
-                transcriptionStatus: transcriptSnapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "notStarted" : "transcribing",
+                transcriptionStatus: "notStarted",
                 noteStatus: "notStarted",
                 tags: [RokuricsCopy.text("Mac 本地录音", "Mac Local Recording")],
                 sourceDeviceName: sourceDevice.deviceName,
@@ -243,16 +229,6 @@ final class MacRecordingManager: ObservableObject {
                 uploadTraceID: nil
             )
 
-            if !transcriptSnapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                try persistLiveTranscript(
-                    recordingID: recordingID,
-                    title: title,
-                    createdAt: createdAt,
-                    duration: duration,
-                    snapshot: transcriptSnapshot
-                )
-            }
-
             latestSavedItem = recordingFileStore.loadInboxItems().first { $0.id == recordingID }
             phase = .saved
             statusMessage = RokuricsCopy.text("录音已保存到学习库", "Recording saved to library")
@@ -263,64 +239,6 @@ final class MacRecordingManager: ObservableObject {
                 try? fileManager.removeItem(at: temporaryAudioURL)
             }
         }
-    }
-
-    private func persistLiveTranscript(
-        recordingID: String,
-        title: String,
-        createdAt: Date,
-        duration: TimeInterval,
-        snapshot: RokuricsLiveTranscriptionSnapshot
-    ) throws {
-        let source = try recordingFileStore.transcriptionSource(for: recordingID)
-        let taskID = "live-\(recordingID)"
-        let outputDirectory = try transcriptStore.outputDirectory(recordingID: recordingID, createdAt: createdAt)
-        let request = TranscriptionRequest(
-            taskID: taskID,
-            recordingID: recordingID,
-            audioFileURL: source.audioFileURL,
-            metadataFileURL: source.metadataFileURL,
-            language: nil,
-            prompt: nil,
-            outputDirectory: outputDirectory,
-            createdAt: createdAt,
-            sourceDuration: duration
-        )
-        let completedAt = Date()
-        let result = TranscriptionResult(
-            taskID: taskID,
-            recordingID: recordingID,
-            providerID: snapshot.providerID,
-            providerName: snapshot.providerName,
-            modelName: snapshot.modelName,
-            language: nil,
-            text: snapshot.text,
-            segments: snapshot.segments.map {
-                TranscriptionSegment(
-                    id: $0.id,
-                    startTime: min($0.startTime, duration),
-                    endTime: min(max($0.endTime, $0.startTime), duration),
-                    text: $0.text,
-                    confidence: $0.confidence
-                )
-            },
-            startedAt: snapshot.startedAt,
-            completedAt: completedAt,
-            status: "transcribed"
-        )
-        let saveResult = try transcriptStore.save(result: result, request: request, recordingTitle: title)
-        try recordingFileStore.updateTranscriptionStatus(
-            recordingID: recordingID,
-            status: "transcribed",
-            transcriptRelativePath: saveResult.transcriptRelativePath,
-            transcriptMarkdownRelativePath: saveResult.transcriptMarkdownRelativePath,
-            providerID: snapshot.providerID,
-            modelName: snapshot.modelName,
-            startedAt: snapshot.startedAt,
-            completedAt: completedAt,
-            errorMessage: nil,
-            mode: .single
-        )
     }
 
     private func startTimer() {
@@ -353,7 +271,6 @@ final class MacRecordingManager: ObservableObject {
 
     private func cleanupActiveRecorder(removeActiveFile: Bool) {
         stopTimer()
-        liveTranscriptionSession.cancel()
         recorder?.stop()
         recorder = nil
         if removeActiveFile, let activeRecordingURL, fileManager.fileExists(atPath: activeRecordingURL.path) {

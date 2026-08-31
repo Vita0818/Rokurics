@@ -835,8 +835,7 @@ final class RecordingUploadCoordinator: ObservableObject {
                     try SecureUploadUtilities.sha256Hex(fileURL: audioURL)
                 }.value.lowercased()
                 let currentBusinessModifiedAt = recordingManager.studyLibraryStore
-                    .item(recordingID: metadata.id)?
-                    .updatedAt
+                    .businessModifiedAt(recordingID: metadata.id)
                 let modifiedAtMatches = record.sourceModifiedAt.map { expected in
                     guard let currentBusinessModifiedAt else { return false }
                     return SyncTimestampPolicy.matches(expected, currentBusinessModifiedAt)

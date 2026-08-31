@@ -712,7 +712,7 @@ nonisolated final class SyncReconciliationStore: @unchecked Sendable {
                 var record = value
                 record.syncRunID = syncRunID ?? value.syncRunID
                 record.discoveredAt = now
-                if let old = oldByID[value.recordID], old.status != .resolved {
+                if let old = oldByID[value.recordID], Self.shouldPreserveTransferProgress(old.status) {
                     record.status = old.status
                     record.transferID = old.transferID
                     record.completionProof = old.completionProof
@@ -737,6 +737,10 @@ nonisolated final class SyncReconciliationStore: @unchecked Sendable {
 
     private static func isPending(_ status: SyncReconciliationStatus) -> Bool {
         [.pendingTransfer, .pendingMetadataUpdate, .queued, .transferring, .transferredAwaitingVerification].contains(status)
+    }
+
+    private static func shouldPreserveTransferProgress(_ status: SyncReconciliationStatus) -> Bool {
+        [.queued, .transferring, .transferredAwaitingVerification].contains(status)
     }
 
     private func loadLocked() throws -> Ledger {

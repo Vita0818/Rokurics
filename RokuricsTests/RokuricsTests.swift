@@ -8323,17 +8323,6 @@ struct RokuricsTests {
         }
     }
 
-    @Test func iphoneAIProviderPresetFiltersLocalDesktopProviders() {
-        let visible = AIProviderPreset.iPhoneVisibleCases
-
-        #expect(visible.contains(.openAI))
-        #expect(visible.contains(.deepSeek))
-        #expect(visible.contains(.gemini))
-        #expect(visible.contains(.customOpenAICompatible))
-        #expect(!visible.contains(.lmStudioLocal))
-        #expect(!visible.contains(.ollamaLocal))
-    }
-
     @Test func localNetworkSyncEngineUsesCanonicalReadOnlyPlanByDefault() async throws {
         let (audioStore, rootURL) = try makeStore()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -8855,6 +8844,48 @@ struct SyncReconciliationClosedLoopTests {
         #expect(SyncReconciliationStore(rootURL: root).snapshot().isEmpty)
     }
 
+    @Test func freshReconciliationRearmsPreviouslyStaleSourceVersion() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reconciliation-rearm-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = reconciliationInventory(
+            deviceID: "iphone",
+            object: reconciliationObject(
+                hash: "rearmed-hash",
+                modifiedAt: 350.125,
+                objectID: "recordingAudio:rearmed"
+            )
+        )
+        let target = reconciliationInventory(deviceID: "mac", objects: [])
+        let store = SyncReconciliationStore(rootURL: root)
+        let firstPlan = SyncReconciliationPlanner().plan(
+            local: source,
+            peer: target,
+            syncRunID: "stale-run"
+        )
+        try store.apply(plan: firstPlan, localDeviceID: "iphone", syncRunID: "stale-run")
+        let recordID = try #require(store.record(objectID: "recordingAudio:rearmed")?.recordID)
+        try store.update(recordID: recordID, status: .staleSourceVersion)
+
+        let freshPlan = SyncReconciliationPlanner().plan(
+            local: source,
+            peer: target,
+            syncRunID: "fresh-run"
+        )
+        try store.apply(
+            plan: freshPlan,
+            localDeviceID: "iphone",
+            syncRunID: "fresh-run",
+            now: Date(timeIntervalSince1970: 400)
+        )
+
+        let rearmed = try #require(store.record(objectID: "recordingAudio:rearmed"))
+        #expect(rearmed.recordID == recordID)
+        #expect(rearmed.status == .pendingTransfer)
+        #expect(rearmed.transferID == nil)
+        #expect(rearmed.completionProof == nil)
+    }
+
     @Test func reconciliationStoreRetiresDeviceLocalArtifactProjectionRecords() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("reconciliation-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -9080,6 +9111,74 @@ struct SyncReconciliationClosedLoopTests {
         #expect(record?.status == .transferredAwaitingVerification)
         #expect(record?.completionProof?.verifiedSHA256 == checksum)
         #expect(record?.completionProof?.verifiedSize == metadata.fileSize)
+    }
+
+    @Test func enforcedUploadUsesBusinessClockWhileCanonicalReadServesProjection() async throws {
+        let (store, rootURL) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let metadata = try saveRecording(id: "canonical-read-upload-source", title: "Canonical Read Upload", store: store)
+        let manager = RecordingManager(fileStore: store)
+        let requestedBusinessModifiedAt = Date(timeIntervalSince1970: 2_650.654_321)
+        try manager.studyLibraryStore.upsertRecordingMetadata(
+            metadata,
+            businessMutationAt: requestedBusinessModifiedAt
+        )
+        let businessModifiedAt = try #require(
+            manager.studyLibraryStore.businessModifiedAt(recordingID: metadata.id)
+        )
+        let legacyManifest = manager.studyLibraryStore.makeSyncManifest(
+            deviceID: "iphone-local",
+            generatedAt: Date(timeIntervalSince1970: 9_000)
+        )
+        let canonicalManifest = IPhoneCanonicalReadRuntimeAdapter.makeCanonicalManifest(legacyManifest)
+        let readResult = manager.studyLibraryStore.configureCanonicalReadRuntime(
+            configuration: .explicitGuardedCanonicalRead(),
+            canonicalManifest: canonicalManifest,
+            syncRunID: "canonical-read-upload-cas"
+        )
+        let effectiveModifiedAt = try #require(
+            manager.studyLibraryStore.item(recordingID: metadata.id)?.updatedAt
+        )
+
+        #expect(readResult.canonicalReadServed)
+        #expect(SyncTimestampPolicy.matches(effectiveModifiedAt, businessModifiedAt))
+
+        let settings = makePairedMacSnapshot()
+        let reconciliationStore = SyncReconciliationStore(rootURL: rootURL)
+        let checksum = try SecureUploadUtilities.sha256Hex(
+            fileURL: rootURL.appendingPathComponent(metadata.relativeAudioPath)
+        )
+        try persistSourcePlan(
+            store: reconciliationStore,
+            sourceDeviceID: settings.deviceID,
+            hash: checksum,
+            size: metadata.fileSize,
+            modifiedAt: businessModifiedAt,
+            recordingID: metadata.id
+        )
+        let client = FakeRecordingUploadClient(result: .success(RecordingUploadResult(
+            recordingID: metadata.id,
+            metadataFileName: "metadata.json",
+            audioFileName: "audio.m4a",
+            metadataDisposition: "acceptedNew",
+            audioDisposition: "acceptedNew"
+        )))
+        let coordinator = RecordingUploadCoordinator(
+            uploadClient: client,
+            jobStore: RecordingUploadJobStore(audioFileStore: store),
+            reconciliationStore: reconciliationStore,
+            enforcesReconciliationMarks: true
+        )
+
+        let status = await coordinator.uploadAndWait(
+            metadata: metadata,
+            settings: settings,
+            recordingManager: manager
+        )
+
+        #expect(status == .uploaded)
+        #expect(client.uploadRequestCount == 1)
+        #expect(reconciliationStore.record(objectID: "recordingAudio:\(metadata.id)")?.status == .transferredAwaitingVerification)
     }
 
     @Test func backToBackFireAndForgetUploadsWithMatchingReconciliationRunClientOnceAndFinishUploaded() async throws {

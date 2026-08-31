@@ -12,6 +12,7 @@ enum NoteGenerationError: LocalizedError, Equatable {
     case transcriptDocumentMissing
     case transcriptReadFailed
     case transcriptDecodeFailed
+    case transcriptChangedDuringGeneration
     case noteStoreWriteFailed(String)
     case receiveJSONUpdateFailed(String)
     case unsupportedProvider(String)
@@ -26,6 +27,11 @@ enum NoteGenerationError: LocalizedError, Equatable {
             return "无法读取转写文档"
         case .transcriptDecodeFailed:
             return "无法解析结构化转写"
+        case .transcriptChangedDuringGeneration:
+            return RokuricsCopy.text(
+                "文字稿在总结期间发生变化，请重新生成",
+                "The transcript changed while the summary was being generated"
+            )
         case .noteStoreWriteFailed(let reason):
             return reason
         case .receiveJSONUpdateFailed(let reason):

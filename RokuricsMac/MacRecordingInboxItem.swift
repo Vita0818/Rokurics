@@ -106,7 +106,7 @@ nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
     }
 
     var canStartTranscription: Bool {
-        displayAudioAvailable && (transcriptionStatus == "notStarted" || transcriptionStatus == "failed")
+        hasAudio && !isTranscribed
     }
 
     var transcriptionActionText: String {
@@ -114,11 +114,11 @@ nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
     }
 
     var isTranscribed: Bool {
-        transcriptionStatus == "transcribed"
+        hasNonemptyPath(transcriptRelativePath) || hasNonemptyPath(transcriptMarkdownRelativePath)
     }
 
     var isWaitingForTranscription: Bool {
-        displayAudioAvailable && transcriptionStatus == "notStarted"
+        hasAudio && !isTranscribed
     }
 
     var isTranscriptionActive: Bool {
@@ -130,7 +130,7 @@ nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
     }
 
     var isNoteGenerated: Bool {
-        noteStatus == "generated" && noteRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        hasNonemptyPath(noteRelativePath)
     }
 
     var isNoteFailed: Bool {
@@ -146,11 +146,11 @@ nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
     }
 
     var canStartNoteGeneration: Bool {
-        isTranscribed && !isNoteGenerating
+        isTranscribed
     }
 
     var localNetworkReceiveTransferProgress: LocalNetworkTransferProgress? {
-        guard !displayAudioAvailable else {
+        guard !hasAudio else {
             return nil
         }
 
@@ -176,6 +176,10 @@ nonisolated struct MacRecordingInboxItem: Identifiable, Equatable {
             for: transcriptionError,
             transcriptionStatus: transcriptionStatus
         )
+    }
+
+    private func hasNonemptyPath(_ path: String?) -> Bool {
+        path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }
 

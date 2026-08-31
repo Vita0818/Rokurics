@@ -38,10 +38,11 @@ final class TranscriptStore {
     private let rootURL: URL
     private let transcriptsURL: URL
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, rootURL: URL? = nil) {
         self.fileManager = fileManager
-        rootURL = MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
-        transcriptsURL = rootURL
+        self.rootURL = rootURL?.standardizedFileURL
+            ?? MacAppStorageProfile.applicationSupportRootURL(fileManager: fileManager)
+        transcriptsURL = self.rootURL
             .appendingPathComponent("transcripts", isDirectory: true)
             .standardizedFileURL
     }

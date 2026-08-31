@@ -13,10 +13,9 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
     case audioInbox
     case studyLibrary
     case iPhoneConnection
-    case aiChat
 
     static var allCases: [MacSidebarItem] {
-        [.home, .studyLibrary, .aiChat, .iPhoneConnection]
+        [.home, .studyLibrary, .iPhoneConnection]
     }
 
     var id: String { rawValue }
@@ -28,7 +27,6 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .audioInbox: return RokuricsCopy.text("音频收件箱", "Inbox")
         case .studyLibrary: return RokuricsCopy.text("学习库", "Library")
         case .iPhoneConnection: return RokuricsCopy.text("iPhone 连接", "iPhone")
-        case .aiChat: return RokuricsCopy.text("AI 对话", "AI Chat")
         }
     }
 
@@ -39,7 +37,6 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .audioInbox: return "tray.and.arrow.down"
         case .studyLibrary: return "books.vertical"
         case .iPhoneConnection: return "iphone"
-        case .aiChat: return "bubble.left.and.bubble.right"
         }
     }
 
@@ -50,7 +47,6 @@ enum MacSidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .audioInbox: return "mac-sidebar-audio-inbox"
         case .studyLibrary: return "mac-sidebar-study-library"
         case .iPhoneConnection: return "mac-sidebar-iphone-connection"
-        case .aiChat: return "mac-sidebar-ai-chat"
         }
     }
 }
@@ -218,8 +214,8 @@ private struct MacSidebarTitle: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
-            if item == .iPhoneConnection || item == .aiChat {
-                Text(item == .iPhoneConnection ? "iPhone" : "AI")
+            if item == .iPhoneConnection {
+                Text("iPhone")
                     .font(MacTypography.englishBody(size: 13, weight: isSelected ? .semibold : .medium))
             }
 
@@ -233,8 +229,6 @@ private struct MacSidebarTitle: View {
         switch item {
         case .iPhoneConnection:
             return RokuricsCopy.text("连接", "Link")
-        case .aiChat:
-            return RokuricsCopy.text("对话", "Chat")
         default:
             return item.title
         }

@@ -1,10 +1,3 @@
-//
-//  TranscriptionCoordinator.swift
-//  RokuricsMac
-//
-//  Created by Codex on 2026/5/13.
-//
-
 import Combine
 import Foundation
 
@@ -13,234 +6,178 @@ final class TranscriptionCoordinator: ObservableObject {
     @Published private(set) var activeTaskRecordingIDs: Set<String> = []
     @Published private(set) var lastErrorMessage: String?
 
-    private let providerOverride: (any TranscriptionProvider)?
-    private let settingsStore: TranscriptionSettingsStore
+    private let configurationStore: RokuricsAIConfigurationStore
+    private let runtime: RokuricsAIRuntime
     private let recordingFileStore: MacRecordingFileStore
     private let transcriptStore: TranscriptStore
-    private var settingsCancellable: AnyCancellable?
+    private var tasks: [String: Task<Void, Never>] = [:]
+
+    convenience init() {
+        self.init(
+            configurationStore: .shared,
+            runtime: RokuricsAIRuntime(),
+            recordingFileStore: MacRecordingFileStore(),
+            transcriptStore: TranscriptStore()
+        )
+    }
 
     init(
-        provider: (any TranscriptionProvider)? = nil,
-        settingsStore: TranscriptionSettingsStore = .shared,
-        recordingFileStore: MacRecordingFileStore = MacRecordingFileStore(),
-        transcriptStore: TranscriptStore = TranscriptStore()
+        configurationStore: RokuricsAIConfigurationStore,
+        runtime: RokuricsAIRuntime,
+        recordingFileStore: MacRecordingFileStore,
+        transcriptStore: TranscriptStore
     ) {
-        self.providerOverride = provider
-        self.settingsStore = settingsStore
+        self.configurationStore = configurationStore
+        self.runtime = runtime
         self.recordingFileStore = recordingFileStore
         self.transcriptStore = transcriptStore
+    }
 
-        settingsCancellable = settingsStore.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in
-                self?.objectWillChange.send()
-            }
-        }
+    deinit {
+        for task in tasks.values { task.cancel() }
     }
 
     var providerDisplayName: String {
-        if let providerOverride {
-            return providerOverride.displayName
+        guard let reference = configurationStore.catalog.transcriptionModel,
+              let provider = configurationStore.catalog.providers.first(where: { $0.id == reference.providerID }) else {
+            return RokuricsCopy.text("未配置", "Not configured")
         }
-
-        return settingsStore.selectedProviderDisplayName
+        return provider.title
     }
 
     var providerID: String {
-        if let providerOverride {
-            return providerOverride.id
-        }
-
-        return settingsStore.selectedProviderKind.rawValue
+        configurationStore.catalog.transcriptionModel?.providerID ?? "unconfigured"
     }
 
-    var activeTaskCount: Int {
-        activeTaskRecordingIDs.count
-    }
+    var activeTaskCount: Int { activeTaskRecordingIDs.count }
 
     func isTranscribing(recordingID: String) -> Bool {
         activeTaskRecordingIDs.contains(recordingID)
     }
 
     func startTranscription(recordingID: String) {
-        guard !activeTaskRecordingIDs.contains(recordingID) else {
-            return
-        }
-
+        guard tasks[recordingID] == nil else { return }
+        configurationStore.reload()
         activeTaskRecordingIDs.insert(recordingID)
         lastErrorMessage = nil
-
-        Task { [weak self] in
-            await self?.runTranscription(recordingID: recordingID)
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runTranscription(recordingID: recordingID)
         }
+        tasks[recordingID] = task
+    }
+
+    func cancelTranscription(recordingID: String) {
+        tasks[recordingID]?.cancel()
+    }
+
+    func shutdown() async {
+        let running = Array(tasks.values)
+        for task in running { task.cancel() }
+        for task in running { await task.value }
     }
 
     private func runTranscription(recordingID: String) async {
         var failureProviderID = providerID
-        var failureStartedAt: Date?
         var failureModelName: String?
-        var failureMode: ProcessingMode?
-        var failureChunks: [RecordingTranscriptionChunkRecord]?
+        var failureStartedAt: Date?
 
         defer {
+            tasks[recordingID] = nil
             activeTaskRecordingIDs.remove(recordingID)
         }
 
         do {
-            let provider = try currentProvider()
-            failureProviderID = provider.id
-
-            try updateTranscriptionStatus(
+            let route = try configurationStore.transcriptionRoute()
+            failureProviderID = route.providerID
+            failureModelName = route.modelID
+            try updateStatus(
                 recordingID: recordingID,
                 status: "queued",
                 transcriptRelativePath: nil,
                 transcriptMarkdownRelativePath: nil,
-                providerID: provider.id,
-                modelName: nil,
+                providerID: route.providerID,
+                modelName: route.modelID,
                 startedAt: nil,
                 completedAt: nil,
-                errorMessage: nil,
-                stage: "mark queued"
+                errorMessage: nil
             )
 
-            try await provider.validateConfiguration()
             let source = try recordingFileStore.transcriptionSource(for: recordingID)
-            let outputDirectory = try transcriptStore.outputDirectory(recordingID: recordingID, createdAt: source.createdAt)
+            let sourceVersion = try await Self.sourceVersion(fileURL: source.audioFileURL)
+            let outputDirectory = try transcriptStore.outputDirectory(
+                recordingID: recordingID,
+                createdAt: source.createdAt
+            )
             let taskID = UUID().uuidString.lowercased()
-            let chunkPlan = LongAudioTranscriptionPlanner.plan(duration: source.duration)
-            var chunkRecords = chunkPlan.chunks.map { RecordingTranscriptionChunkRecord(descriptor: $0) }
-            failureMode = chunkPlan.mode
-            failureChunks = chunkPlan.shouldUseChunking ? chunkRecords : nil
-            debugLogPreparedSource(
+            let startedAt = Date()
+            failureStartedAt = startedAt
+            try updateStatus(
+                recordingID: recordingID,
+                status: "transcribing",
+                transcriptRelativePath: nil,
+                transcriptMarkdownRelativePath: nil,
+                providerID: route.providerID,
+                modelName: route.modelID,
+                startedAt: startedAt,
+                completedAt: nil,
+                errorMessage: nil
+            )
+
+            let text = try await runtime.transcribeFile(at: source.audioFileURL, route: route)
+            try Task.checkCancellation()
+            guard try await Self.sourceVersion(fileURL: source.audioFileURL) == sourceVersion else {
+                throw RokuricsAIRuntimeError.sourceChanged
+            }
+
+            let completedAt = Date()
+            let result = TranscriptionResult(
                 taskID: taskID,
                 recordingID: recordingID,
-                source: source,
-                outputDirectory: outputDirectory
+                providerID: route.providerID,
+                providerName: route.providerDisplayName,
+                modelName: route.modelID,
+                language: nil,
+                text: text,
+                segments: [],
+                startedAt: startedAt,
+                completedAt: completedAt,
+                status: "transcribed"
             )
             let request = TranscriptionRequest(
                 taskID: taskID,
                 recordingID: recordingID,
                 audioFileURL: source.audioFileURL,
                 metadataFileURL: source.metadataFileURL,
-                language: settingsStore.currentLanguage,
+                language: nil,
                 prompt: nil,
                 outputDirectory: outputDirectory,
-                createdAt: Date(),
+                createdAt: startedAt,
                 sourceDuration: source.duration
             )
-            let startedAt = Date()
-            failureStartedAt = startedAt
-
-            try updateTranscriptionStatus(
-                recordingID: recordingID,
-                status: "transcribing",
-                transcriptRelativePath: nil,
-                transcriptMarkdownRelativePath: nil,
-                providerID: provider.id,
-                modelName: nil,
-                startedAt: startedAt,
-                completedAt: nil,
-                errorMessage: nil,
-                mode: chunkPlan.mode,
-                chunks: chunkPlan.shouldUseChunking ? chunkRecords : nil,
-                stage: "mark transcribing"
+            let saved = try transcriptStore.save(
+                result: result,
+                request: request,
+                recordingTitle: source.title
             )
-
-            let result: TranscriptionResult
-            if chunkPlan.shouldUseChunking {
-                var chunkResults: [(descriptor: AudioChunkDescriptor, result: TranscriptionResult)] = []
-                for chunk in chunkPlan.chunks {
-                    try Task.checkCancellation()
-                    chunkRecords[chunk.index].status = .processing
-                    failureChunks = chunkRecords
-                    try updateTranscriptionStatus(
-                        recordingID: recordingID,
-                        status: "transcribing",
-                        transcriptRelativePath: nil,
-                        transcriptMarkdownRelativePath: nil,
-                        providerID: provider.id,
-                        modelName: nil,
-                        startedAt: startedAt,
-                        completedAt: nil,
-                        errorMessage: nil,
-                        mode: .chunked,
-                        chunks: chunkRecords,
-                        stage: "mark chunk \(chunk.index) processing"
-                    )
-
-                    let chunkRequest = request.chunkRequest(
-                        taskID: "\(taskID)-\(chunk.id)",
-                        descriptor: chunk
-                    )
-                    do {
-                        let chunkResult = try await provider.transcribe(request: chunkRequest)
-                        let chunkSaveResult = try saveChunkTranscript(
-                            result: chunkResult,
-                            request: chunkRequest,
-                            recordingTitle: source.title,
-                            chunk: chunk
-                        )
-                        chunkRecords[chunk.index].status = .generated
-                        chunkRecords[chunk.index].transcriptRelativePath = chunkSaveResult.transcriptRelativePath
-                        chunkRecords[chunk.index].transcriptMarkdownRelativePath = chunkSaveResult.transcriptMarkdownRelativePath
-                        chunkRecords[chunk.index].error = nil
-                        failureChunks = chunkRecords
-                        chunkResults.append((descriptor: chunk, result: chunkResult))
-
-                        try updateTranscriptionStatus(
-                            recordingID: recordingID,
-                            status: "transcribing",
-                            transcriptRelativePath: nil,
-                            transcriptMarkdownRelativePath: nil,
-                            providerID: chunkResult.providerID,
-                            modelName: chunkResult.modelName,
-                            startedAt: startedAt,
-                            completedAt: nil,
-                            errorMessage: nil,
-                            mode: .chunked,
-                            chunks: chunkRecords,
-                            stage: "mark chunk \(chunk.index) transcribed"
-                        )
-                    } catch {
-                        chunkRecords[chunk.index].status = .failed
-                        chunkRecords[chunk.index].error = "chunk \(chunk.index) failed: \(error.localizedDescription)"
-                        failureChunks = chunkRecords
-                        throw TranscriptionError.processFailed(
-                            exitCode: -1,
-                            message: "分块转写失败：chunkIndex=\(chunk.index); start=\(chunk.startTime); end=\(chunk.endTime); error=\(error.localizedDescription)"
-                        )
-                    }
-                }
-
-                result = TranscriptionChunkMerger.merge(
-                    recordingID: recordingID,
-                    taskID: taskID,
-                    chunks: chunkResults
-                )
-            } else {
-                result = try await provider.transcribe(request: request)
-            }
-            failureModelName = result.modelName
-            let saveResult = try saveTranscript(result: result, request: request, recordingTitle: source.title)
-
-            try updateTranscriptionStatus(
+            try updateStatus(
                 recordingID: recordingID,
-                status: result.status,
-                transcriptRelativePath: saveResult.transcriptRelativePath,
-                transcriptMarkdownRelativePath: saveResult.transcriptMarkdownRelativePath,
-                providerID: result.providerID,
-                modelName: result.modelName,
-                startedAt: result.startedAt,
-                completedAt: result.completedAt,
-                errorMessage: nil,
-                mode: chunkPlan.mode,
-                chunks: chunkPlan.shouldUseChunking ? chunkRecords : nil,
-                stage: "mark transcribed"
+                status: "transcribed",
+                transcriptRelativePath: saved.transcriptRelativePath,
+                transcriptMarkdownRelativePath: saved.transcriptMarkdownRelativePath,
+                providerID: route.providerID,
+                modelName: route.modelID,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                errorMessage: nil
             )
         } catch {
-            let failureMessage = error.localizedDescription
-            lastErrorMessage = failureMessage
+            let message = error is CancellationError
+                ? RokuricsCopy.text("转写已取消", "Transcription cancelled")
+                : error.localizedDescription
+            lastErrorMessage = message
             do {
-                try updateTranscriptionStatus(
+                try updateStatus(
                     recordingID: recordingID,
                     status: "failed",
                     transcriptRelativePath: nil,
@@ -249,83 +186,15 @@ final class TranscriptionCoordinator: ObservableObject {
                     modelName: failureModelName,
                     startedAt: failureStartedAt,
                     completedAt: Date(),
-                    errorMessage: failureMessage,
-                    mode: failureMode,
-                    chunks: failureChunks,
-                    stage: "mark failed"
+                    errorMessage: message
                 )
             } catch {
-                lastErrorMessage = "\(failureMessage)\n\(error.localizedDescription)"
-                debugLogFailureStatusWriteFailed(recordingID: recordingID, originalError: failureMessage, updateError: error)
+                lastErrorMessage = "\(message)\n\(error.localizedDescription)"
             }
         }
     }
 
-    private func currentProvider() throws -> any TranscriptionProvider {
-        if let providerOverride {
-            return providerOverride
-        }
-
-        switch settingsStore.selectedProviderKind {
-        case .mock:
-            return MockTranscriptionProvider()
-        case .whisperCpp:
-            let configuration = settingsStore.reloadedWhisperConfiguration() ?? settingsStore.whisperConfiguration
-            debugLogWhisperConfiguration(configuration)
-            return WhisperCppTranscriptionProvider(configuration: configuration)
-        case .mlxWhisper, .localHTTP, .cloudAPI, .customCommand:
-            throw TranscriptionError.unsupportedProvider(settingsStore.selectedProviderDisplayName)
-        }
-    }
-
-    private func saveTranscript(
-        result: TranscriptionResult,
-        request: TranscriptionRequest,
-        recordingTitle: String
-    ) throws -> TranscriptStoreSaveResult {
-        do {
-            debugLogTranscriptStoreWrite(request: request)
-            return try transcriptStore.save(result: result, request: request, recordingTitle: recordingTitle)
-        } catch {
-            throw TranscriptionError.transcriptStoreWriteFailed(
-                "transcript store writing 失败：\n" +
-                "stage=transcript store writing\n" +
-                "recordingID=\(request.recordingID)\n" +
-                "outputDirectory=\(request.outputDirectory.path)\n" +
-                "transcriptJson=\(request.outputDirectory.appendingPathComponent("transcript.json").path)\n" +
-                "transcriptMarkdown=\(request.outputDirectory.appendingPathComponent("transcript.md").path)\n" +
-                "error=\(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func saveChunkTranscript(
-        result: TranscriptionResult,
-        request: TranscriptionRequest,
-        recordingTitle: String,
-        chunk: AudioChunkDescriptor
-    ) throws -> TranscriptStoreSaveResult {
-        do {
-            debugLogChunkTranscriptStoreWrite(request: request, chunk: chunk)
-            return try transcriptStore.saveChunk(
-                result: result,
-                request: request,
-                recordingTitle: recordingTitle,
-                chunk: chunk
-            )
-        } catch {
-            throw TranscriptionError.transcriptStoreWriteFailed(
-                "chunk transcript store writing 失败：\n" +
-                "stage=chunk transcript store writing\n" +
-                "chunkIndex=\(chunk.index)\n" +
-                "recordingID=\(request.recordingID)\n" +
-                "outputDirectory=\(request.outputDirectory.path)\n" +
-                "error=\(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func updateTranscriptionStatus(
+    private func updateStatus(
         recordingID: String,
         status: String,
         transcriptRelativePath: String?,
@@ -334,140 +203,37 @@ final class TranscriptionCoordinator: ObservableObject {
         modelName: String?,
         startedAt: Date?,
         completedAt: Date?,
-        errorMessage: String?,
-        mode: ProcessingMode? = nil,
-        chunks: [RecordingTranscriptionChunkRecord]? = nil,
-        stage: String
+        errorMessage: String?
     ) throws {
-        debugLogReceiveStatusUpdate(
+        try recordingFileStore.updateTranscriptionStatus(
             recordingID: recordingID,
             status: status,
-            stage: stage,
-            errorMessage: errorMessage
+            transcriptRelativePath: transcriptRelativePath,
+            transcriptMarkdownRelativePath: transcriptMarkdownRelativePath,
+            providerID: providerID,
+            modelName: modelName,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            errorMessage: errorMessage,
+            mode: .single,
+            chunks: nil
         )
+    }
 
-        do {
-            try recordingFileStore.updateTranscriptionStatus(
-                recordingID: recordingID,
-                status: status,
-                transcriptRelativePath: transcriptRelativePath,
-                transcriptMarkdownRelativePath: transcriptMarkdownRelativePath,
-                providerID: providerID,
-                modelName: modelName,
-                startedAt: startedAt,
-                completedAt: completedAt,
-                errorMessage: errorMessage,
-                mode: mode,
-                chunks: chunks
+    private struct SourceVersion: Equatable, Sendable {
+        let byteSize: Int64
+        let sha256: String
+    }
+
+    private static func sourceVersion(fileURL: URL) async throws -> SourceVersion {
+        try await Task.detached(priority: .utility) {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let size = (attributes[.size] as? NSNumber)?.int64Value ?? -1
+            guard size >= 0 else { throw RokuricsAIRuntimeError.audioFileUnavailable }
+            return SourceVersion(
+                byteSize: size,
+                sha256: try MacSecurityUtilities.sha256Hex(fileURL: fileURL).lowercased()
             )
-            debugLogReceiveStatusUpdateSucceeded(recordingID: recordingID, status: status, stage: stage)
-        } catch {
-            throw TranscriptionError.receiveJSONUpdateFailed(
-                "receive.json 写回失败：\n" +
-                "stage=\(stage)\n" +
-                "recordingID=\(recordingID)\n" +
-                "targetStatus=\(status)\n" +
-                "error=\(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func debugLogPreparedSource(
-        taskID: String,
-        recordingID: String,
-        source: MacRecordingTranscriptionSource,
-        outputDirectory: URL
-    ) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] preparedSource: " +
-            "taskID=\(taskID), " +
-            "recordingID=\(recordingID), " +
-            "audioFile=\(source.audioFileURL.path), " +
-            "metadataFile=\(source.metadataFileURL?.path ?? "nil"), " +
-            "duration=\(source.duration), " +
-            "outputDirectory=\(outputDirectory.path)"
-        )
-        #endif
-    }
-
-    private func debugLogTranscriptStoreWrite(request: TranscriptionRequest) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] transcriptStore.write: " +
-            "taskID=\(request.taskID), " +
-            "recordingID=\(request.recordingID), " +
-            "outputDirectory=\(request.outputDirectory.path)"
-        )
-        #endif
-    }
-
-    private func debugLogChunkTranscriptStoreWrite(request: TranscriptionRequest, chunk: AudioChunkDescriptor) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] chunkTranscriptStore.write: " +
-            "taskID=\(request.taskID), " +
-            "recordingID=\(request.recordingID), " +
-            "chunkIndex=\(chunk.index), " +
-            "outputDirectory=\(request.outputDirectory.path)"
-        )
-        #endif
-    }
-
-    private func debugLogReceiveStatusUpdate(
-        recordingID: String,
-        status: String,
-        stage: String,
-        errorMessage: String?
-    ) {
-        #if DEBUG
-        let errorSummary = errorMessage.map { String($0.prefix(1000)) } ?? "nil"
-        print(
-            "[Rokurics][TranscriptionCoordinator] receive.update: " +
-            "stage=\(stage), " +
-            "recordingID=\(recordingID), " +
-            "status=\(status), " +
-            "errorSummary=\(errorSummary)"
-        )
-        #endif
-    }
-
-    private func debugLogReceiveStatusUpdateSucceeded(recordingID: String, status: String, stage: String) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] receive.update.succeeded: " +
-            "stage=\(stage), " +
-            "recordingID=\(recordingID), " +
-            "status=\(status)"
-        )
-        #endif
-    }
-
-    private func debugLogFailureStatusWriteFailed(recordingID: String, originalError: String, updateError: Error) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] receive.update.failed: " +
-            "recordingID=\(recordingID), " +
-            "originalError=\(String(originalError.prefix(1000))), " +
-            "updateError=\(updateError.localizedDescription)"
-        )
-        #endif
-    }
-
-    private func debugLogWhisperConfiguration(_ configuration: WhisperCppTranscriptionConfiguration) {
-        #if DEBUG
-        print(
-            "[Rokurics][TranscriptionCoordinator] whisper.configuration: " +
-            "ffmpegPath=\(configuration.normalizedFFmpegExecutablePath), " +
-            "ffmpegBookmarkBytes=\(configuration.ffmpegExecutableBookmarkData?.count ?? 0), " +
-            "ffmpegParentDirectoryBookmarkBytes=\(configuration.ffmpegExecutableParentDirectoryBookmarkData?.count ?? 0), " +
-            "whisperBookmarkBytes=\(configuration.executableBookmarkData?.count ?? 0), " +
-            "whisperParentDirectoryBookmarkBytes=\(configuration.executableParentDirectoryBookmarkData?.count ?? 0), " +
-            "whisperCppRootDirectoryBookmarkBytes=\(configuration.whisperCppRootDirectoryBookmarkData?.count ?? 0), " +
-            "modelBookmarkBytes=\(configuration.modelBookmarkData?.count ?? 0), " +
-            "modelKind=\(configuration.modelKind.displayName), " +
-            "preferredLargeModel=\(configuration.preferredLargeModel)"
-        )
-        #endif
+        }.value
     }
 }

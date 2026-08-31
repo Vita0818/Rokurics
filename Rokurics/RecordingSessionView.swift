@@ -95,7 +95,7 @@ struct RecordingSessionView: View {
             elapsedSeconds: recordingManager.elapsedSeconds,
             isPaused: recordingManager.state.isPaused,
             errorMessage: recordingManager.state == .failed ? recordingManager.lastErrorMessage : nil,
-            transcriptText: transcriptDisplayText,
+            transcriptText: "",
             pauseButtonTitle: pauseButtonTitle,
             pauseButtonSystemImage: pauseButtonImageName,
             canPauseOrResume: canPauseOrResume,
@@ -104,10 +104,6 @@ struct RecordingSessionView: View {
             pauseResumeAction: togglePause,
             stopAction: stopAndDismiss
         )
-    }
-
-    private var transcriptDisplayText: String {
-        recordingManager.liveTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var isFilingOverlayPresented: Bool {

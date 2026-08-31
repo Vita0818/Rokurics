@@ -1796,17 +1796,6 @@ enum StudyRecordingActionPolicy {
         )
     }
 
-    static func importToChatAction(action: (() -> Void)? = nil) -> StudyRecordingCardActionModel {
-        StudyRecordingCardActionModel(
-            id: "chat",
-            systemImage: "bubble.left.and.bubble.right",
-            tint: RokuricsSharedStyle.aqua,
-            accessibilityLabel: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
-            isEnabled: true,
-            action: action
-        )
-    }
-
     static func detailAction(action: (() -> Void)? = nil) -> StudyRecordingCardActionModel {
         StudyRecordingCardActionModel(
             id: "detail",
@@ -2573,7 +2562,6 @@ enum StudyRecordingDetailActionSymbol {
     static let generatedNote = "sparkles.rectangle.stack"
     static let rename = "pencil"
     static let trash = "trash"
-    static let chat = "bubble.left.and.bubble.right"
 }
 
 enum StudyDetailActionPolicy {
@@ -2590,16 +2578,6 @@ enum StudyDetailActionPolicy {
             accessibilityLabel: title,
             tint: tint,
             isEnabled: isEnabled,
-            action: action
-        )
-    }
-
-    static func importToChatHeaderAction(action: @escaping () -> Void) -> StudyDetailHeaderActionModel {
-        StudyDetailHeaderActionModel(
-            id: "chat",
-            systemImage: StudyRecordingDetailActionSymbol.chat,
-            accessibilityLabel: RokuricsCopy.text("导入 AI 对话", "Import to AI Chat"),
-            tint: RokuricsSharedStyle.aqua,
             action: action
         )
     }

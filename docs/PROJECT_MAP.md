@@ -1,8 +1,37 @@
 # PROJECT_MAP
 
-最近自查日期：2026-08-19
+最近自查日期：2026-08-21
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-08-21 设置 UI 与本机录音操作文件
+
+- `Rokurics/IPhoneSettingsView.swift`、`RokuricsMac/MacSettingsView.swift`：设置 UI 不再构造 Debug 同步内核、学习库 migration pilot、switchback proof 或 production-root 确认界面；两个文件下部既有 Debug runtime/config extension 保留。Mac 正常设置继续以 AI 行进入 `RokuricsAISettingsView`。
+- `RokuricsMac/MacRecordingInboxItem.swift`：本机录音可操作事实改读真实 `hasAudio`；transcript/note 是否存在改读相对路径。持久 `queued/transcribing/generating` 仍可展示和解码，但不再定义当前 Task ownership。
+- `RokuricsMac/MacStudyLibraryView.swift`：卡片与详情的播放/转写/总结可用性改为本机文件事实 + coordinator live-task 状态；上传到 iPhone 仍保留 canonical/reconciliation proof gate。
+- `RokuricsMac/MacAudioInboxView.swift`：旧 inbox row action 同步采用相同本机规则，接收进度只在本机确实没有 audio 且没有可查看 transcript 时替代操作区。
+- `RokuricsMac/NoteGenerationCoordinator.swift`：总结入口以可定位的本机 transcript JSON/Markdown 为输入就绪事实，不再要求可能由中断遗留的 status 字符串恰好为 `transcribed`；loader 与 transcript digest CAS 继续验证真实内容。
+
+## 2026-08-20 AI 单路径第一版文件
+
+- `RokuricsMac/RokuricsAIConfiguration.swift`：Rokurics-owned Intatis-compatible provider catalog 与 JSON/JSONC config；`model`/`transcription_model` role、env/file/literal credential、owner-only write、exact route 和 no-fallback validation。
+- `RokuricsMac/RokuricsAIRuntime.swift`：唯一 AI network runtime；file transcription multipart/OpenRouter JSON、one-shot tool-free summary、timeout/retry/no-redirect/strict response、安全错误和可注入测试 transport。
+- `RokuricsMac/RokuricsAISettingsView.swift`：Intatis 同型 provider list/detail、active model、connection、model management、Save、Test Provider、Open Rokurics Config。
+- `RokuricsMac/TranscriptionCoordinator.swift`、`NoteGenerationCoordinator.swift`：保留录音领域按钮/状态/Store 接线，执行 audio/transcript version CAS 后调用唯一 runtime；不再选择 provider/backend。
+- `TranscriptStore.swift`、`NoteStore.swift`、`TranscriptionRequest/Result/Segment.swift`、`NoteGenerationRequest/Result/Error/TranscriptLoader.swift`：现有 generated output schema 和读写路径继续保留。
+- `LongProcessingModels.swift`：只剩旧 `receive.json` 解码所需的 mode/chunk/section record；planner/runner 已删除。
+- `RokuricsMacTests/RokuricsAIConfigurationTests.swift`：config、request、disk-backed upload 和录音到总结落盘闭环 6 项回归。
+- 双端 Chat source、shared Chat source、shared simulated live transcription、whisper/audio preprocess/settings/provider source、旧 summary provider source及其 focused tests 已删除。`Rokurics.xcodeproj/project.pbxproj` 不再有 whisper helper build phase；`RokuricsMac.entitlements` 不再有 whisper 专用 executable/bookmark file entitlement。
+
+## 2026-08-20 canonicalFullSync 上传 CAS 修复文件
+
+- `Rokurics/StudyLibraryStore.swift`、`RokuricsMac/StudyLibraryStore.swift`：新增 `businessModifiedAt(recordingID:)`，明确区分 persisted business truth 与 `effectiveStudyItems` UI/read projection；canonical recording/library overlay 对已有 backing item 保留业务 `updatedAt`，不再写 snapshot `generatedAt`。
+- `Rokurics/RecordingUploadCoordinator.swift`：iPhone -> Mac reconciliation source-version CAS 改读 persisted business clock；hash/size、mark、job、client 和 completion proof 路径不变。
+- `RokuricsMac/SecureReceiverService.swift`：Mac -> iPhone offer 创建前的 source-version CAS 使用同一 persisted business clock；durable offer store、heartbeat delivery、chunk/ACK 路径不变。
+- `RokuricsTests/RokuricsTests.swift`：新增 canonical read served + matching reconciliation + iPhone client invocation/completion-proof 入口回归。
+- `RokuricsTests/CanonicalRecordingMetadataTests.swift`、`RokuricsMacTests/CanonicalRecordingMetadataTests.swift`：双端 canonical effective read 必须保留 backing business `updatedAt`。
+- `RokuricsMacTests/RokuricsMacTests.swift`：新增 `canonicalFullSync` 下 Mac -> iPhone durable offer 可创建的入口回归。
+- `RokuricsShared/SyncCore.swift`：fresh reconciliation 不再继承历史 `staleSourceVersion`；只保留 queued/transferring/awaiting-verification 的真实传输进度。
 
 ## 2026-08-19 JetBrains Mono 字体文件
 
@@ -613,7 +642,7 @@
 target 编译边界：
 
 - `Rokurics` target 包含 `Rokurics/`、`RokuricsShared/`、`RokuricsLiveActivitiesShared/`，并嵌入 `RokuricsLiveActivities` app extension。
-- `RokuricsMac` target 包含 `RokuricsMac/`、`RokuricsShared/`，并有 `Embed whisper.cpp Helper` shell build phase。
+- `RokuricsMac` target 包含 `RokuricsMac/`、`RokuricsShared/`；已无 whisper helper shell build phase。
 - `RokuricsLiveActivities` target 包含 `RokuricsLiveActivities/` 和 `RokuricsLiveActivitiesShared/`。
 - 测试 target 依赖各自 app target。
 
@@ -626,7 +655,7 @@ target 编译边界：
 - Mac app：`RokuricsMac/RokuricsMacApp.swift`
   - `@main` app，进入 `ContentView`。
 - Mac root UI：`RokuricsMac/ContentView.swift`、`RokuricsMac/MacRootView.swift`
-  - `MacRootView` 创建 `SecureReceiverService`、`AudioInboxStore`、转写/笔记/聊天 coordinator、设置 store 和用户 profile store。
+  - `MacRootView` 创建 `SecureReceiverService`、`AudioInboxStore`、统一 AI config、转写/总结 coordinator 和用户 profile store；没有 Chat coordinator。
 - Live Activity extension：`RokuricsLiveActivities/RecordingLiveActivityWidget.swift`
   - `@main` widget bundle。
 
@@ -640,7 +669,6 @@ target 编译边界：
   - `StudyReadingPages.swift`
   - `MacConnectionView.swift`
   - `IPhoneSettingsView.swift`
-  - `IPhoneAIChatView.swift`
 - 录音与本地存储：
   - `RecordingManager.swift`
   - `AudioFileStore.swift`
@@ -712,11 +740,8 @@ target 编译边界：
   - `MacDashboardView.swift`
   - `MacIPhoneConnectionView.swift`
   - `MacStudyLibraryView.swift`
-  - `MacAIChatView.swift`
   - `MacSettingsView.swift`
-  - `MacTranscriptionSettingsView.swift`
-  - `MacNoteGenerationSettingsView.swift`
-  - `MacWhisperCppSettingsView.swift`
+  - `RokuricsAISettingsView.swift`
 - HTTPS 接收与安全：
   - `SecureReceiverService.swift`
   - `SecureLocalHTTPSServer.swift`
@@ -737,29 +762,17 @@ target 编译边界：
   - `ReceivedFileStore.swift`
 - 转写：
   - `TranscriptionCoordinator.swift`
-  - `TranscriptionProvider.swift`
-  - `TranscriptionSettingsStore.swift`
-  - `WhisperCppTranscriptionProvider.swift`
-  - `WhisperCppRuntimeResolver.swift`
-  - `WhisperCppTranscriptionConfiguration.swift`
-  - `AudioPreprocessor.swift`
-  - `NativeAudioConverter.swift`
-  - `FFmpegAudioConverter.swift`
+  - `RokuricsAIConfiguration.swift`
+  - `RokuricsAIRuntime.swift`
   - `TranscriptStore.swift`
-  - `LongProcessingModels.swift`
+  - `LongProcessingModels.swift`（旧 schema decode-only records）
 - 笔记生成：
   - `NoteGenerationCoordinator.swift`
-  - `NoteGenerationProvider.swift`
-  - `NoteGenerationSettingsStore.swift`
-  - `OpenAICompatibleNoteGeneration*`
-  - `AnthropicMessages*`
+  - `RokuricsAIConfiguration.swift`
+  - `RokuricsAIRuntime.swift`
   - `NoteGenerationTranscriptLoader.swift`
   - `NoteStore.swift`
-- AI 聊天：
-  - `ChatCoordinator.swift`
-  - `ChatProvider.swift`
-  - `RokuricsShared/ChatModels.swift`
-  - `RokuricsShared/SharedChatComponents.swift`
+- AI 聊天：已删除。
 - 学习库与同步：
   - `StudyLibraryStore.swift`
   - `StudyLibraryModels.swift`
@@ -813,7 +826,7 @@ target 编译边界：
   - Swift version: 5.0 build setting。
   - Mac Debug bundle id 使用 local 后缀；Release 使用正式 bundle id。
   - Mac target 开启 App Sandbox，并指定 `RokuricsMac/RokuricsMac.entitlements`。
-  - Mac target 有 `Embed whisper.cpp Helper` build phase；该 phase 依赖仓库外本地编译的 whisper.cpp 产物或 `WHISPER_CPP_ROOT`。
+  - Mac target 已移除 `Embed whisper.cpp Helper` build phase和仓库外 whisper.cpp 依赖。
 - `Rokurics.xcodeproj/xcshareddata/xcschemes/Rokurics.xcscheme`
   - build/run/test `Rokurics`，测试包含 `RokuricsTests` 和 `RokuricsUITests`。
 - `Rokurics.xcodeproj/xcshareddata/xcschemes/RokuricsMac.xcscheme`
@@ -825,7 +838,7 @@ target 编译边界：
 - `RokuricsMac/Info.plist`
   - Mac app 显式 Info.plist；包含 `ATSApplicationFontsPath = Fonts/`、麦克风说明，并从 build setting 展开 bundle ID、版本和 deployment target。
 - `RokuricsMac/RokuricsMac.entitlements`
-  - App Sandbox、network client/server、user-selected executable/read-only、app-scope bookmarks。
+  - App Sandbox、network client/server、audio-input；旧 whisper 专用 executable/read-only/bookmark entitlement 已删除。
 - `.gitignore`
   - 忽略 `.build/`、`xcuserdata/`、Xcode 包产物等。
 
@@ -880,8 +893,7 @@ target 编译边界：
   - `StudyLibraryStoreTests.swift`：学习库、文件夹、重命名、移动、receive.json 兼容、sync manifest。
   - `StudyLibrarySyncTests.swift`：Git-backed sync 默认禁用、本地网络同步 endpoint。
   - `LongProcessingTests.swift`：长录音分块转写、长笔记分段、敏感输出过滤。
-  - `AudioPreprocessorTests.swift`、`NativeAudioPreprocessorTests.swift`、`NativeAudioConverterTests.swift`：音频转码与 whisper 调用。
-  - `WhisperCpp*Tests.swift`、`SecurityScopedFileAccessTests.swift`：whisper runtime、sandbox bookmark、权限诊断。
+  - `RokuricsAIConfigurationTests.swift`：AI config、exact roles、disk-backed transcription、无工具 summary 和 Store 落盘闭环。
   - `ChatFeatureTests.swift`：聊天模型、上下文导入、附件、标题、UI 策略。
 - `RokuricsUITests/`、`RokuricsMacUITests/`
   - 基础 XCTest UI launch/performance。
@@ -909,4 +921,4 @@ target 编译边界：
 - `RocuricsNewIcon.png` 的权威来源、是否仍参与资源生成：UNKNOWN。
 - `RokuricsVisualDiagnostics/` 是否应长期保留全部截图，或只作为临时诊断输出：需要后续确认。
 - iPhone/Mac 两侧存在部分同名同步/标题编辑源码，且内容不完全一致；是否计划收敛到共享模块：需要后续确认。
-- Mac `Embed whisper.cpp Helper` build phase 目前依赖仓库外本地 whisper.cpp 编译产物；CI/他人机器的配置方式需要后续确认。
+- AI 的真实 provider/model/network 与长录音限制仍需 CI/真机环境确认；Mac build 不再依赖仓库外 whisper.cpp。
