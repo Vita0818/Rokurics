@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		58F300012FE0000000000001 /* KuzioLibraryAPI in Frameworks */ = {isa = PBXBuildFile; productRef = 58F300022FE0000000000002 /* KuzioLibraryAPI */; };
 		58F100012FC0000000000001 /* RokuricsLiveActivities.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 58F100032FC0000000000003 /* RokuricsLiveActivities.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		58F200022FD0000000000002 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 58F200012FD0000000000001 /* Fonts */; };
 		58F200032FD0000000000003 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 58F200012FD0000000000001 /* Fonts */; };
@@ -162,6 +163,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				58F300012FE0000000000001 /* KuzioLibraryAPI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -262,6 +264,7 @@
 			);
 			name = RokuricsMac;
 			packageProductDependencies = (
+				58F300022FE0000000000002 /* KuzioLibraryAPI */,
 			);
 			productName = RokuricsMac;
 			productReference = 58A089A92FB050430065EF5A /* RokuricsMac.app */;
@@ -454,6 +457,9 @@
 			);
 			mainGroup = 58E3151B2FADB91F0019DCDD;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				58F300032FE0000000000003 /* XCLocalSwiftPackageReference "../../Virgo/Kuzio/Packages/KuzioLibraryAPI" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 58E315252FADB91F0019DCDD /* Products */;
 			projectDirPath = "";
@@ -1225,6 +1231,20 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		58F300032FE0000000000003 /* XCLocalSwiftPackageReference "../../Virgo/Kuzio/Packages/KuzioLibraryAPI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Virgo/Kuzio/Packages/KuzioLibraryAPI;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		58F300022FE0000000000002 /* KuzioLibraryAPI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KuzioLibraryAPI;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 58E3151C2FADB91F0019DCDD /* Project object */;
 }

@@ -1,5 +1,34 @@
 # TESTING
 
+## 2026-08-31 Mac-only Kuzio App Group handoff 第一版验证
+
+依赖与工程检查：
+
+- `xcodebuild -list -project Rokurics.xcodeproj` 成功解析本地 `KuzioLibraryAPI` package；product只链接`RokuricsMac`，测试通过host app编译同一product。
+- `plutil -lint RokuricsMac/RokuricsMac.entitlements` 通过；源码 entitlement 包含精确App Group。
+- Mac arm64 Debug App build退出0。构建仍输出仓库既有actor-isolation/deprecation warnings，本轮没有新增编译错误。
+- generic macOS Release build退出0，主可执行文件为arm64+x86_64通用Mach-O。最终包使用`Developer ID Application: Vita Chi (L5ZXXFUZTL)`、Hardened Runtime和Apple时间戳签名；`codesign --verify --deep --strict`通过。
+- 最终包安装到`/Users/vita/Applications/RokuricsMac.app`。对安装副本重新读取签名，确认bundle ID为`com.Vita0818.RokuricsMac`、Team ID为`L5ZXXFUZTL`，且`com.apple.security.application-groups`只包含`L5ZXXFUZTL.com.Vita0818.RokuricsKuzio`；安装副本与构建包主可执行文件SHA-256一致。
+
+专项测试使用注入临时root，不调用`FileManager.containerURL`，也不触碰真实App Group：
+
+```sh
+xcodebuild -quiet -project Rokurics.xcodeproj -scheme RokuricsMac \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/RokuricsKuzioHandoffTestsScoped \
+  -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+  '<TESTING.md既有canonical fixture排除集>' \
+  test \
+  -only-testing:RokuricsMacTests/KuzioAudioHandoffWriterTests \
+  -only-testing:RokuricsMacTests/RokuricsAIConfigurationTests
+```
+
+最终结果：11 passed / 0 failed / 0 skipped，其中handoff 5项覆盖：ready发布前hidden temporary已完整且ready不存在；发布后只剩官方ready name、bytes一致、权限0600；source bytes不变；非法display name、非audio name和App Group不可用均在创建queue前明确失败；既有ready目标不会被覆盖。旧AI 6项只证明保留源码/历史artifact链未被本轮删除，不代表新录音仍触发AI。
+
+第一次不带排除集的Mac test target编译被仓库已记录的旧generated/library/tombstone actor→MainActor protocol conformance错误阻断；本轮没有修改这些无关fixture。第一次专项源码编译还发现`try`直接位于`#expect`宏内，已改为先读取局部值并在同一排除集下重跑全绿。
+
+Mac本地人工验收仍需：用已签名安装版真实录一段音，停止后确认Rokurics显示“已交给Kuzio”，再在已安装Kuzio中确认root出现同名普通音频；同时确认Rokurics旧学习库没有新增该录音、没有转写/总结/AI请求。未实际录音前不得把单元测试和build描述为两个签名App的端到端通过。本轮没有启动两个App做真实队列写入，也未执行archive、notarization或外部分发Gatekeeper验收。
+
 ## 2026-08-21 设置 Debug UI 与本机动作验证
 
 实际执行并通过：

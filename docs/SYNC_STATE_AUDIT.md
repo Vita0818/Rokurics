@@ -1,5 +1,14 @@
 # SYNC_STATE_AUDIT
 
+## 2026-08-31 Mac 本地录音 → Kuzio handoff 状态边界
+
+- 新 handoff 是 Mac 本地录音完成后的单向文件队列，不属于现有 iPhone↔Rokurics Mac Connection、Sync Discovery 或双向 Upload 状态机；它不使用 `syncRunID`、reconciliation record、upload ledger、heartbeat、TLS/HMAC route 或 canonical kernel switch。
+- `MacRecordingManager` 在 AVAudioRecorder 停止并关闭 source 后进入 `saving`，调用 `KuzioAudioHandoffWriter`。hidden temporary 完整写入并同步后，同目录 exclusive atomic ready rename 是 Rokurics 侧唯一成功终态；Kuzio是否运行不影响该队列提交。
+- 成功状态只表示“已交给Kuzio队列”，不代表Kuzio consumer已经导入、生成NodeID或运行AI。Rokurics不读取回执、不轮询Kuzio、不维护第二份导入ledger。
+- 失败保持 `failed` 与pending source；重新进入录音页重试同一source。重试在排入异步writer前同步进入`saving` busy状态，避免同一pending source被瞬时重复触发。失败不写旧Mac inbox，不创建StudyItem，不启动transcription/note generation，不回退旧学习库。
+- Writer不修改/删除source；测试只使用注入临时root。真实App Group目录、Kuzio production资料库和既有iPhone/Mac同步状态在自动测试中均未触碰。
+- 本节不改变iPhone→Rokurics Mac安全receiver或历史数据链。旧`MacRecordingFileStore`/Study/AI/sync状态继续可读，但不再接收Mac本地新录音。
+
 ## 2026-08-21 Mac 本机动作与同步状态拆分
 
 - 原错误链：本机 `audio.m4a` 已存在 -> `MacRecordingInboxItem.hasAudio == true`，但 peer/canonical display proof 暂未完成 -> `displaySyncState.canDisplayAsComplete == false` -> 学习库把播放和转写禁用，或用 receive progress 替换整个 action area。该链把“本机能否读文件”错误等同于“对端内容是否已被证明”。

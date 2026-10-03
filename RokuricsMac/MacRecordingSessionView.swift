@@ -63,6 +63,8 @@ struct MacRecordingSessionView: View {
         switch recordingManager.phase {
         case .recording, .paused, .preparing, .stopping, .saving:
             return
+        case .failed where recordingManager.hasPendingHandoff:
+            recordingManager.retryHandoff()
         case .idle, .filing, .saved, .permissionDenied, .failed:
             recordingManager.startRecording()
         }

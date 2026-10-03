@@ -15,9 +15,14 @@ final class MacRecordingManager: ObservableObject {
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var statusMessage = RokuricsCopy.text("Mac 本地录音就绪", "Local Mac recorder ready")
     @Published private(set) var lastErrorMessage: String?
-    @Published private(set) var latestSavedItem: MacRecordingInboxItem?
+    @Published private(set) var latestHandoffFileName: String?
 
-    private let recordingFileStore: MacRecordingFileStore
+    private struct PendingHandoff {
+        let temporaryAudioURL: URL
+        let displayFileName: String
+    }
+
+    private let handoffWriter: KuzioAudioHandoffWriter
     private let fileManager: FileManager
     private var recorder: AVAudioRecorder?
     private var recordingTimer: Timer?
@@ -25,12 +30,13 @@ final class MacRecordingManager: ObservableObject {
     private var activeRecordingTitle: String?
     private var activeRecordingURL: URL?
     private var recordingStartedAt: Date?
+    private var pendingHandoff: PendingHandoff?
 
     init(
-        recordingFileStore: MacRecordingFileStore = MacRecordingFileStore(),
+        handoffWriter: KuzioAudioHandoffWriter = KuzioAudioHandoffWriter(),
         fileManager: FileManager = .default
     ) {
-        self.recordingFileStore = recordingFileStore
+        self.handoffWriter = handoffWriter
         self.fileManager = fileManager
     }
 
@@ -40,6 +46,10 @@ final class MacRecordingManager: ObservableObject {
 
     var isRecording: Bool {
         phase == .recording
+    }
+
+    var hasPendingHandoff: Bool {
+        pendingHandoff != nil
     }
 
     func toggleRecording() {
@@ -85,6 +95,11 @@ final class MacRecordingManager: ObservableObject {
             return
         }
 
+        if pendingHandoff != nil {
+            retryHandoff()
+            return
+        }
+
         cleanupActiveRecorder(removeActiveFile: true)
         lastErrorMessage = nil
         elapsedSeconds = 0
@@ -99,10 +114,8 @@ final class MacRecordingManager: ObservableObject {
     func stopRecording() {
         guard (phase == .recording || phase == .paused),
               let recorder,
-              let recordingID = activeRecordingID,
               let title = activeRecordingTitle,
-              let audioURL = activeRecordingURL,
-              let startedAt = recordingStartedAt else {
+              let audioURL = activeRecordingURL else {
             return
         }
 
@@ -112,19 +125,23 @@ final class MacRecordingManager: ObservableObject {
         stopTimer()
         recorder.stop()
 
-        let endedAt = Date()
-        let duration = recorder.currentTime > 0 ? recorder.currentTime : max(endedAt.timeIntervalSince(startedAt), elapsedSeconds)
         self.recorder = nil
 
         Task { [weak self] in
             await self?.persistFinishedRecording(
-                recordingID: recordingID,
                 title: title,
-                temporaryAudioURL: audioURL,
-                createdAt: startedAt,
-                endedAt: endedAt,
-                duration: duration
+                temporaryAudioURL: audioURL
             )
+        }
+    }
+
+    func retryHandoff() {
+        guard !phase.isBusy, let pendingHandoff else {
+            return
+        }
+        markHandoffInProgress()
+        Task { [weak self] in
+            await self?.deliverToKuzio(pendingHandoff)
         }
     }
 
@@ -175,69 +192,46 @@ final class MacRecordingManager: ObservableObject {
     }
 
     private func persistFinishedRecording(
-        recordingID: String,
         title: String,
-        temporaryAudioURL: URL,
-        createdAt: Date,
-        endedAt: Date,
-        duration: TimeInterval
+        temporaryAudioURL: URL
     ) async {
+        let displayFileName = title.lowercased().hasSuffix(".m4a")
+            ? title
+            : "\(title).m4a"
+        let pendingHandoff = PendingHandoff(
+            temporaryAudioURL: temporaryAudioURL,
+            displayFileName: displayFileName
+        )
+        self.pendingHandoff = pendingHandoff
+        markHandoffInProgress()
+        await deliverToKuzio(pendingHandoff)
+    }
+
+    private func markHandoffInProgress() {
         phase = .saving
-        statusMessage = RokuricsCopy.text("正在保存到学习库", "Saving to library")
+        statusMessage = RokuricsCopy.text("正在交给 Kuzio", "Handing recording to Kuzio")
+        lastErrorMessage = nil
+    }
 
+    private func deliverToKuzio(_ pendingHandoff: PendingHandoff) async {
         do {
-            let fileSize = try fileSize(at: temporaryAudioURL)
-            let sourceDevice = Self.localMacSourceDevice()
-            let originalFileName = "\(recordingID).m4a"
-            let metadata = IncomingRecordingMetadata(
-                id: recordingID,
-                title: title,
-                originalFileName: originalFileName,
-                relativeAudioPath: "audio.m4a",
-                createdAt: createdAt,
-                endedAt: endedAt,
-                duration: duration,
-                format: "m4a",
-                codec: "aac",
-                sampleRate: 44_100,
-                channels: 1,
-                bitrate: 96_000,
-                fileSize: fileSize,
-                uploadStatus: "localMacRecording",
-                transcriptionStatus: "notStarted",
-                noteStatus: "notStarted",
-                tags: [RokuricsCopy.text("Mac 本地录音", "Mac Local Recording")],
-                sourceDeviceName: sourceDevice.deviceName,
-                sourceDeviceID: sourceDevice.id,
-                uploadedAt: endedAt
+            let receipt = try await handoffWriter.handoffAudio(
+                at: pendingHandoff.temporaryAudioURL,
+                displayFileName: pendingHandoff.displayFileName
             )
-
-            _ = try recordingFileStore.saveMetadata(metadata, sourceDevice: sourceDevice, uploadTraceID: nil)
-            let uploadURL = try recordingFileStore.temporaryAudioUploadURL(recordingID: recordingID)
-            if fileManager.fileExists(atPath: uploadURL.path) {
-                try fileManager.removeItem(at: uploadURL)
-            }
-            try fileManager.moveItem(at: temporaryAudioURL, to: uploadURL)
-            let checksum = try await recordingFileStore.checksumForTemporaryAudioUpload(at: uploadURL, recordingID: recordingID)
-            _ = try await recordingFileStore.saveAudio(
-                temporaryFileURL: uploadURL,
-                recordingID: recordingID,
-                requestedFileName: originalFileName,
-                sourceDevice: sourceDevice,
-                checksum: checksum,
-                fileSize: fileSize,
-                uploadTraceID: nil
-            )
-
-            latestSavedItem = recordingFileStore.loadInboxItems().first { $0.id == recordingID }
+            latestHandoffFileName = receipt.displayFileName
+            self.pendingHandoff = nil
             phase = .saved
-            statusMessage = RokuricsCopy.text("录音已保存到学习库", "Recording saved to library")
+            statusMessage = RokuricsCopy.text("录音已交给 Kuzio", "Recording handed to Kuzio")
+            // The handoff contract copies into the shared queue. Rokurics does
+            // not mutate or delete the source recording as part of delivery.
             cleanupActiveRecorder(removeActiveFile: false)
         } catch {
-            failRecording(reason: RokuricsCopy.text("录音保存失败", "Failed to save recording"), errorCode: "mac_recording_save_failed")
-            if fileManager.fileExists(atPath: temporaryAudioURL.path) {
-                try? fileManager.removeItem(at: temporaryAudioURL)
-            }
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? RokuricsCopy.text("无法将录音交给 Kuzio，请重试。", "Could not hand the recording to Kuzio. Please retry.")
+            phase = .failed
+            statusMessage = message
+            lastErrorMessage = message
         }
     }
 
@@ -283,18 +277,11 @@ final class MacRecordingManager: ObservableObject {
     }
 
     private func failRecording(reason: String, errorCode: String) {
+        pendingHandoff = nil
         cleanupActiveRecorder(removeActiveFile: true)
         phase = .failed
         statusMessage = reason
         lastErrorMessage = errorCode
-    }
-
-    private func fileSize(at url: URL) throws -> Int64 {
-        let attributes = try fileManager.attributesOfItem(atPath: url.path)
-        guard let fileSize = attributes[.size] as? NSNumber else {
-            throw MacRecordingManagerError.fileSizeUnavailable
-        }
-        return fileSize.int64Value
     }
 
     private static func requestMicrophonePermissionIfNeeded() async -> Bool {
@@ -321,19 +308,6 @@ final class MacRecordingManager: ObservableObject {
         )
     }
 
-    private static func localMacSourceDevice() -> PairedDevice {
-        let hostName = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let deviceName = hostName?.isEmpty == false ? hostName! : "Mac"
-        return PairedDevice(
-            id: "mac-local-recording",
-            deviceName: deviceName,
-            sharedSecretBase64URL: "local-mac-recording-source",
-            pairedAt: Date(),
-            lastSeenAt: Date(),
-            userConnectionIntent: .wantsConnected
-        )
-    }
-
     private static let recordingSettings: [String: Any] = [
         AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
         AVSampleRateKey: 44_100,
@@ -352,5 +326,4 @@ final class MacRecordingManager: ObservableObject {
 
 private enum MacRecordingManagerError: Error {
     case recorderDidNotStart
-    case fileSizeUnavailable
 }

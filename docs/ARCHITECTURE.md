@@ -11,7 +11,32 @@
 - 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
 - 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
 
-最近自查日期：2026-08-21
+最近自查日期：2026-08-31
+
+## 2026-08-31 Mac-only Kuzio 单向文件交付架构
+
+用户最新确认的产品边界是 `Rokurics 负责录音 → Kuzio 负责永久保存与后续管理`。第一版仅切换 Mac 本地录音；iPhone/iOS、既有 iPhone→Rokurics Mac 安全上传和历史数据读取不在本轮范围。旧学习库、转写、总结与同步源码保留，但 Mac 本地新录音完成路径不能调用它们。
+
+```text
+MacRecordingManager / AVAudioRecorder temporary m4a
+        |
+        | KuzioAudioHandoffWriter
+        | hidden temporary + bounded copy + synchronize
+        | same-directory exclusive atomic ready rename
+        v
+Apple App Group system container
+RokuricsToKuzio/Incoming
+        |
+        | Kuzio startup scan / DispatchSource consumer
+        v
+Kuzio ImportedFiles vault + ordinary root resource-link
+```
+
+跨项目合同只来自独立 `KuzioLibraryAPI` 1.2 package 的 `KuzioLibraryFileHandoffContract`。权限由相同 Developer Team 签名和精确 App Group entitlement 提供；没有 XPC、Mach service、socket、HTTP、Bonjour、URL scheme、sidecar 或 bookmark 交换。Rokurics 只能向 `Incoming` 发布文件，不能读取 `Default.kuzio`、选择 NodeID、提交 hierarchy、制作 locator 或启动 Kuzio AI。
+
+Producer 的 commit boundary 是 ready rename 成功。Kuzio 可以未运行；隐藏 temporary 永远不是 ready。Writer 从自己打开的 `O_NOFOLLOW` regular-file source descriptor 复制，以 `O_CREAT | O_EXCL | O_NOFOLLOW` 创建 `0600` temporary，root/Incoming 为 `0700`；完成 `synchronize()` 后用 `RENAME_EXCL` 发布，避免覆盖同 request ID。任何失败清理本轮未发布 temporary、保留 source 并显式报错；禁止回退 `MacRecordingFileStore` 或旧学习库。source 的后续生命周期不属于 handoff writer，writer 自身不移动、修改或删除它。
+
+本节取代下方 2026-07-08 历史段落中“Mac 本地录音必须写 Rokurics inbox”的旧产品完成路径；下方记录仍用于理解历史数据和其他 receiver 链路，不构成新 Mac 本地录音 fallback。
 
 ## 2026-08-21 本机动作、运行中任务与跨设备证明边界
 

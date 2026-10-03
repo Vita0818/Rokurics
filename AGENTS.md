@@ -81,6 +81,7 @@ git status --short
 - Mac 接收与处理链路：`SecureReceiverService`、`SecureLocalHTTPSServer`、`RequestVerifier`、`MacRecordingFileStore`、`AudioInboxStore`。
 - 学习库与同步链路：`StudyFilingModels`、`StudyLibraryStore`、`StudyLibrarySyncModels`、`StudyLibrarySyncCoordinator`、`ConnectionSyncStateStores`。
 - 转写/总结链路：`RokuricsAIConfiguration`、`RokuricsAIRuntime`、`RokuricsAISettingsView`、`TranscriptionCoordinator`、`TranscriptStore`、`NoteGenerationCoordinator`、`NoteStore`。独立 AI Chat、Mock、whisper/ffmpeg 与旧 provider-specific clients 已删除；历史生成物 schema 只读兼容必须保留。
+- Kuzio 单向投递链路：Mac 本地录音完成后由 `KuzioAudioHandoffWriter` 使用官方 `KuzioLibraryAPI` 1.2 App Group handoff 合同发布普通音频；该新路径不写 Rokurics 学习库、不触发 Rokurics 转写/总结/AI，也不得回退旧 Store。旧学习库与 AI 源码继续保留供历史数据兼容，但不是新 Mac 本地录音的完成路径。
 - 安全与文件访问：`KeychainStore`、`MacIdentityManager`、`PairingManager`、`SecurityScopedFileAccess`、`RokuricsMac/RokuricsMac.entitlements`。
 
 ## 文档索引

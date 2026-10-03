@@ -1,6 +1,16 @@
 # CURRENT_STATE
 
-最近一次自查日期：2026-08-21
+最近一次自查日期：2026-08-31
+
+## 2026-08-31 Mac-only Rokurics → Kuzio App Group 音频投递第一版
+
+Mac 本地录音的最新产品完成路径已经从 Rokurics 自己的 inbox/学习库切换为 Kuzio 官方单向文件投递。`RokuricsMac` 通过本地 Swift package 直接消费 `KuzioLibraryAPI` 1.2 的 `KuzioLibraryFileHandoffContract`，并使用精确 Team-ID App Group `L5ZXXFUZTL.com.Vita0818.RokuricsKuzio`。两边都只调用 `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` 解析系统容器；Rokurics 不拼接 Group Containers 物理路径，也不读取或修改 `Default.kuzio`。
+
+新增 `KuzioAudioHandoffWriter` 是最薄 producer：在 `RokuricsToKuzio/Incoming` 使用官方 helper 生成的隐藏 temporary name，并以 `O_CREAT | O_EXCL | O_NOFOLLOW` 创建 `0600` 目标，防止覆盖或跟随同名文件；随后 bounded chunk 复制完整音频、调用 `FileHandle.synchronize()`，再用同目录 `renamex_np(..., RENAME_EXCL)` 原子发布 ready name。它不写 sidecar、manifest、bookmark、NodeID、SHA 文件、转写、总结或第二学习库；writer 不修改或删除源录音。App Group、目录、文件名、音频类型、source regular-file、目标冲突或 publish 任一条件失败都会明确失败并保留 source，不回退旧 Rokurics Store。
+
+`MacRecordingManager` 停止录音后现在只进入该 handoff；成功 ready rename 后显示“录音已交给 Kuzio”，Kuzio 可以尚未启动。失败保留当前临时音频，重新进入录音页会重试同一 source。该新路径不再调用 `MacRecordingFileStore.saveMetadata/saveAudio`，也不触发 `StudyLibraryStore`、`TranscriptionCoordinator`、`NoteGenerationCoordinator` 或 `RokuricsAIRuntime`。旧学习库、AI、同步与历史数据源码均未删除，既有 iPhone→Rokurics Mac receiver 也未改，但它们不是这条 Mac 本地录音完成路径。
+
+专项测试使用注入临时 root，不访问真实 App Group：handoff 5/5 通过；连同旧 AI artifact 兼容回归共 11/11 通过。Mac arm64 Debug App build与 arm64+x86_64 generic macOS Release build 均通过。最终 Release 由 `Developer ID Application: Vita Chi (L5ZXXFUZTL)` 签名并取得 Apple 时间戳，Hardened Runtime、深度签名和精确 App Group entitlement 均已核对；安装副本位于 `/Users/vita/Applications/RokuricsMac.app`，其可执行文件与构建包 SHA-256 一致。完整 Mac test target 仍会被仓库已记录的旧 canonical actor-isolation fixtures 阻断，因此定向测试按 `TESTING.md` 既有排除集执行。真实用户录音→共享容器→已安装 Kuzio consumer→普通资料库文件的端到端人工验收仍未运行；也未执行 notarization 或外部分发 Gatekeeper 验收。
 
 ## 2026-08-21 设置 Debug UI 清理与 Mac 本机操作解锁
 

@@ -1,8 +1,19 @@
 # PROJECT_MAP
 
-最近自查日期：2026-08-21
+最近自查日期：2026-08-31
 
 本文描述当前仓库结构。判断依据来自 Xcode project、scheme、Swift 源码、测试文件、脚本和现有 `docs/LongRecordingTestPlan.md`、`docs/SYNC_STATE_AUDIT.md`。
+
+## 2026-08-31 Kuzio App Group producer 文件
+
+- `RokuricsMac/KuzioAudioHandoffWriter.swift`：Mac-only 官方 handoff producer。只消费 `KuzioLibraryAPI.KuzioLibraryFileHandoffContract`，通过 App Group 系统容器、隐藏 temporary、完整复制/synchronize 和同目录 exclusive atomic ready rename 交付一个普通音频文件；不拥有学习库或 AI 状态。
+- `RokuricsMac/MacRecordingManager.swift`：Mac 本地录音停止后的完成 owner 已改为 `KuzioAudioHandoffWriter`。新路径不再构造 `IncomingRecordingMetadata` 或调用 `MacRecordingFileStore`；失败保留 source 并可重试。
+- `RokuricsMac/MacRecordingSessionView.swift`：失败且存在 pending handoff 时重新进入页面会重试；普通录音/权限失败仍走原录音启动行为。
+- `RokuricsMac/RokuricsMac.entitlements`：新增唯一 App Group `L5ZXXFUZTL.com.Vita0818.RokuricsKuzio`；既有 sandbox、audio-input、network client/server 保留。
+- `Rokurics.xcodeproj/project.pbxproj`：新增本地 package `../../Virgo/Kuzio/Packages/KuzioLibraryAPI`，只把 `KuzioLibraryAPI` product 链接到 `RokuricsMac`；不依赖 Kuzio 根 package，也不复制合同源码。
+- `RokuricsMacTests/KuzioAudioHandoffWriterTests.swift`：临时 root 覆盖 hidden temporary 完整性、ready 原子发布、source 不变、0600 文件权限、既有 ready 不覆盖、非法 display name、非音频名和 App Group 不可用失败。
+
+旧 `MacRecordingFileStore`、学习库、转写、总结与同步文件继续存在并服务历史数据/既有其他链路，但不再是 Mac 本地新录音的完成路径。
 
 ## 2026-08-21 设置 UI 与本机录音操作文件
 

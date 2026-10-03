@@ -1,5 +1,17 @@
 # DO_NOT_BREAK
 
+## Mac-only Rokurics → Kuzio handoff 禁区（2026-08-31）
+
+- 新 Mac 本地录音完成路径只能消费官方 `KuzioLibraryAPI` 1.2 `KuzioLibraryFileHandoffContract`；不得复制 App Group、目录或命名合同到第二份本地实现，不得依赖 Kuzio 根 package。
+- App Group 必须精确为 `L5ZXXFUZTL.com.Vita0818.RokuricsKuzio`，并由 `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` 获取系统容器。不得手写 `~/Library/Group Containers` 路径、扫描其他 group 或回退任意共享目录。
+- Rokurics 只能写 `RokuricsToKuzio/Incoming`。必须用官方 helper 生成隐藏 temporary 和 ready 名称；temporary 必须 exclusive/no-follow 创建，完整复制并 `synchronize()` 后才可在同一目录 exclusive atomic rename。既有 temporary/ready 不得被覆盖；隐藏 temporary、partial write、非法名或 publish failure 不得伪装成功。
+- Producer 不得写 sidecar、manifest、bookmark、NodeID、ResourceID、SHA 文件、转写、总结、AI 状态、virtual hierarchy 或第二学习库；不得新增 XPC、socket、HTTP、Bonjour、端口或 URL scheme。
+- Writer 必须用 `O_NOFOLLOW` 打开 regular-file source，拒绝 hard link/非 regular source，保持 source bytes 不变；目标 queue 文件 `0600`，root/Incoming `0700`。失败清理本轮 temporary，但不得删除或修改 source。
+- `MacRecordingManager` 新完成路径不得调用 `MacRecordingFileStore`、`StudyLibraryStore`、`TranscriptionCoordinator`、`NoteGenerationCoordinator` 或 `RokuricsAIRuntime`。失败必须保留 source、明确报错并允许重试；严禁回退旧 Rokurics 学习库。
+- 旧学习库、AI、同步和 receiver 源码按用户要求保留，不得物理删除；保留历史解码/其他既有链路不构成新录音 fallback。
+- 本节是用户最新明确决定，取代下方 v10.0 历史禁区中“Mac 本地录音必须继续写 Rokurics inbox”的旧产品路径要求；该旧要求只适用于历史记录解释。
+- 测试只能注入临时 root，不得把 fake audio 发布到真实 App Group 或 production Kuzio 资料库。构建安装后必须核对最终签名 entitlement；没有真实用户录音人工验收时不得声称端到端已经通过。
+
 ## 设置 UI 与本机操作可用性禁区（2026-08-21）
 
 - iPhone/Mac 设置页不得重新显示 canonical kernel、library metadata pilot、switchback proof、诊断路径或 production-root 确认等 Debug UI。当前底层 Debug key/runtime/driver 保留不等于允许恢复产品入口；若未来删除底层能力需另立范围。
